@@ -1,10 +1,16 @@
 """全局配置：从环境变量与项目根 .env 读取，统一 KG_ 前缀。"""
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 项目根的 .env 用绝对路径定位：无论从哪个目录启动服务都能读到；
+# 当前工作目录若另有 .env 则优先（后加载覆盖）
+_ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_prefix="KG_", extra="ignore"
+        env_file=(str(_ROOT_ENV), ".env"), env_prefix="KG_", extra="ignore"
     )
 
     # LLM 网关（OpenAI 兼容；规划与审查双实例可用不同模型）
