@@ -17,15 +17,18 @@ class ScriptedLLM:
     async def chat(self, messages, temperature=0.2):
         return self.replies.pop(0)
 
+    async def chat_stream(self, messages, temperature=0.2):
+        text = self.replies.pop(0)
+        for i in range(0, len(text), 5):
+            yield text[i:i + 5]
 
-PLAN = json.dumps({
-    "thought": "查一下磁盘",
+
+_STEPS = json.dumps({
     "steps": [{"tool": "sysinfo.disk_usage", "arguments": {},
                "purpose": "查看磁盘使用率", "risk": "low"}],
-    "final_answer": None,
 }, ensure_ascii=False)
-DONE = json.dumps({"thought": "完成", "steps": [],
-                   "final_answer": "磁盘情况见上，无异常。"}, ensure_ascii=False)
+PLAN = f"查一下磁盘。\n```json\n{_STEPS}\n```"
+DONE = "磁盘情况见上，无异常。\n```json\n{\"steps\": []}\n```"
 REVIEW_OK = json.dumps({"safe": True, "matches_intent": True,
                         "risk": "low", "reason": "只读查询"}, ensure_ascii=False)
 

@@ -12,7 +12,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -24,6 +24,7 @@ from kylinguard.mcp_client import ToolManager
 from kylinguard.pipeline import Confirmations, Pipeline
 from kylinguard.planner import Planner
 from kylinguard.reviewer import Reviewer
+from kylinguard.sessions import SessionStore
 from kylinguard.snapshot import SnapshotCache
 
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -31,6 +32,7 @@ _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: str = ""  # 空 = 新建会话（SSE 首事件返回 session_created）
 
 
 class ConfirmRequest(BaseModel):
@@ -42,6 +44,7 @@ def create_app(settings: Settings | None = None,
                *, with_tools: bool = True) -> FastAPI:
     settings = settings or get_settings()
     audit = AuditLog(settings.db_path)
+    sessions = SessionStore(settings.db_path)
     tools = ToolManager()
     confirmations = Confirmations()
     snapshot_cache = SnapshotCache(settings.snapshot_interval)
@@ -63,12 +66,15 @@ def create_app(settings: Settings | None = None,
         if with_tools:
             await snapshot_cache.stop()
             await tools.stop()
+        sessions.close()
         audit.close()
 
     app = FastAPI(title="麒盾 KylinGuard", lifespan=lifespan)
     app.state.pipeline = pipeline
     app.state.confirmations = confirmations
     app.state.audit = audit
+    app.state.sessions = sessions
+    app.state.snapshot_cache = snapshot_cache
 
     @app.get("/api/health")
     async def health():
@@ -76,7 +82,15 @@ def create_app(settings: Settings | None = None,
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest):
-        session_id = uuid.uuid4().hex
+        created = not req.session_id
+        if created:
+            session_id = uuid.uuid4().hex
+            app.state.sessions.create(session_id, req.message)
+        else:
+            session_id = req.session_id
+            if not app.state.sessions.exists(session_id):
+                raise HTTPException(404, "会话不存在")
+            app.state.sessions.touch(session_id)
         queue: asyncio.Queue = asyncio.Queue()
 
         async def emit(event: dict):
@@ -95,6 +109,10 @@ def create_app(settings: Settings | None = None,
                 await queue.put(None)
 
         async def stream():
+            if created:
+                yield ("data: " + json.dumps(
+                    {"type": "session_created", "session_id": session_id},
+                    ensure_ascii=False) + "\n\n")
             task = asyncio.create_task(run())
             try:
                 while True:
@@ -112,6 +130,22 @@ def create_app(settings: Settings | None = None,
     async def confirm(req: ConfirmRequest):
         return {"ok": app.state.confirmations.resolve(req.confirm_id,
                                                       req.approved)}
+
+    @app.get("/api/sessions")
+    async def list_sessions():
+        return {"sessions": app.state.sessions.list()}
+
+    @app.get("/api/sessions/{session_id}/events")
+    async def session_events(session_id: str):
+        if not app.state.sessions.exists(session_id):
+            raise HTTPException(404, "会话不存在")
+        return {"events": app.state.audit.events(session_id)}
+
+    @app.get("/api/status")
+    async def status():
+        snapshot, age = await app.state.snapshot_cache.get()
+        return {"snapshot": snapshot,
+                "collected_ago_seconds": round(age, 1)}
 
     if _FRONTEND_DIST.is_dir():
         app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True),
