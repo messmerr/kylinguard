@@ -2,6 +2,7 @@
 // 同一状态机同时服务实时流（含 assistant_delta）与历史回放（无 delta，
 // 用 plan.thought / final_answer.answer 整段渲染）。
 import { computed, reactive, ref } from 'vue'
+import { apiFetch } from './useAuth.js'
 
 export const sessions = ref([])
 export const activeId = ref('')
@@ -130,7 +131,7 @@ export function handleEvent(ev) {
 }
 
 export async function refreshSessions() {
-  const r = await fetch('/api/sessions')
+  const r = await apiFetch('/api/sessions')
   sessions.value = (await r.json()).sessions
 }
 
@@ -147,7 +148,7 @@ export async function loadSession(id) {
   if (running.value) return
   newSession()
   activeId.value = id
-  const r = await fetch(`/api/sessions/${id}/events`)
+  const r = await apiFetch(`/api/sessions/${id}/events`)
   for (const ev of (await r.json()).events) {
     handleEvent({ type: ev.event_type, ...ev.payload })
   }
@@ -161,7 +162,7 @@ export async function sendMessage(text, { onUpdate } = {}) {
   streamingItem = null
   push({ kind: 'user', text })
   try {
-    const resp = await fetch('/api/chat', {
+    const resp = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text, session_id: activeId.value }),
@@ -191,7 +192,7 @@ export async function sendMessage(text, { onUpdate } = {}) {
 }
 
 export async function resolveConfirm(card, approved) {
-  await fetch('/api/confirm', {
+  await apiFetch('/api/confirm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ confirm_id: card.confirmId, approved }),

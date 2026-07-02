@@ -27,6 +27,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { apiFetch } from '../composables/useAuth.js'
 import { stats } from '../composables/useChat.js'
 
 const status = ref(null)
@@ -83,7 +84,7 @@ const ageText = computed(() => {
 
 async function poll() {
   try {
-    const r = await fetch('/api/status')
+    const r = await apiFetch('/api/status')
     if (r.ok) status.value = await r.json()
   } catch { /* 下轮重试 */ }
 }
