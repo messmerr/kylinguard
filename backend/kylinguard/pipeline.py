@@ -21,6 +21,11 @@ from kylinguard.rules import check_command
 from kylinguard.snapshot import collect_snapshot, format_snapshot
 
 
+async def _fresh_snapshot() -> tuple[dict[str, str], float]:
+    """默认快照源：即时采集（生产环境注入 SnapshotCache.get 走缓存）。"""
+    return await collect_snapshot(), 0.0
+
+
 class Confirmations:
     """挂起中的人工确认：confirm_id → Future[bool]。"""
 
@@ -44,7 +49,7 @@ class Confirmations:
 class Pipeline:
     def __init__(self, settings: Settings, audit: AuditLog, tools,
                  planner, reviewer, confirmations: Confirmations,
-                 snapshot_fn=collect_snapshot):
+                 snapshot_fn=_fresh_snapshot):
         self._settings = settings
         self._audit = audit
         self._tools = tools
@@ -61,9 +66,10 @@ class Pipeline:
 
         await record("user_query", {"query": user_query})
 
-        # ① 感知
-        snapshot = await self._snapshot_fn()
-        await record("snapshot", {"snapshot": snapshot})
+        # ① 感知（走缓存，collected_ago_seconds = 快照距采集的秒数）
+        snapshot, age = await self._snapshot_fn()
+        await record("snapshot", {"snapshot": snapshot,
+                                  "collected_ago_seconds": round(age, 1)})
         env_summary = format_snapshot(snapshot, per_item=1500)
 
         conversation = [
@@ -80,7 +86,15 @@ class Pipeline:
             except PlanningError as e:
                 await record("final_answer", {"answer": str(e), "aborted": True})
                 return
-            await record("plan", {"round": round_no, **plan.model_dump()})
+            # step_id 在规划落审计前生成：前端按它把校验/确认/执行聚合到
+            # 同一步骤行，审计回放（M2）按它分组
+            step_ids = [uuid.uuid4().hex[:12] for _ in plan.steps]
+            await record("plan", {
+                "round": round_no, "thought": plan.thought,
+                "steps": [{**s.model_dump(), "step_id": sid}
+                          for s, sid in zip(plan.steps, step_ids)],
+                "final_answer": plan.final_answer,
+            })
 
             if not plan.steps:
                 await record("final_answer",
@@ -89,9 +103,9 @@ class Pipeline:
                 return
 
             observations = []
-            for step in plan.steps:
+            for step, step_id in zip(plan.steps, step_ids):
                 observations.append(await self._run_step(
-                    user_query, env_summary, step, record))
+                    user_query, env_summary, step, step_id, record))
 
             conversation.append({"role": "assistant",
                                  "content": plan.model_dump_json()})
@@ -108,7 +122,7 @@ class Pipeline:
         })
 
     async def _run_step(self, user_query: str, env_summary: str,
-                        step: PlanStep, record) -> str:
+                        step: PlanStep, step_id: str, record) -> str:
         # ③ 校验：三道闸
         try:
             server, tool = split_qualified(step.tool)
@@ -130,6 +144,7 @@ class Pipeline:
         review = await self._reviewer.review(user_query, env_summary, action_desc)
         decision = decide(meta, rule, review, step.risk)
         await record("verification", {
+            "step_id": step_id,
             "step": step.model_dump(), "rule": rule.model_dump(),
             "review": review.model_dump(), "decision": decision.model_dump(),
         })
@@ -140,7 +155,8 @@ class Pipeline:
         if decision.action in (GateAction.CONFIRM, GateAction.DOUBLE_CONFIRM):
             confirm_id, fut = self.confirmations.create()
             await record("confirm_request", {
-                "confirm_id": confirm_id, "step": step.model_dump(),
+                "confirm_id": confirm_id, "step_id": step_id,
+                "step": step.model_dump(),
                 "decision": decision.model_dump(),
             })
             try:
@@ -150,7 +166,8 @@ class Pipeline:
                 self.confirmations.resolve(confirm_id, False)  # 清理挂起项
                 approved = False
             await record("confirm_result",
-                         {"confirm_id": confirm_id, "approved": approved})
+                         {"confirm_id": confirm_id, "step_id": step_id,
+                          "approved": approved})
             if not approved:
                 return f"步骤 {step.tool} 未获管理员批准（拒绝或超时），已跳过"
 
@@ -161,5 +178,6 @@ class Pipeline:
             output = f"[工具调用失败] {e}"
         # ⑤ 溯源
         await record("execution",
-                     {"step": step.model_dump(), "output": output[:8000]})
+                     {"step_id": step_id, "step": step.model_dump(),
+                      "output": output[:8000]})
         return f"步骤 {step.tool} 输出：\n{output[:4000]}"

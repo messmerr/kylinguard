@@ -46,7 +46,7 @@ class FakeTools:
 
 
 async def _fake_snapshot():
-    return {"memory": "充足", "disk": "50%"}
+    return {"memory": "充足", "disk": "50%"}, 12.3
 
 
 def _pipeline(tmp_path, planner_outputs, reviewer=None, tools=None,
@@ -90,6 +90,32 @@ async def test_只读步骤全自动端到端(tmp_path):
     assert tools.calls == [("sysinfo", "disk_usage", {})]
     assert events[-1]["answer"] == "磁盘使用正常。"
     assert audit.verify_chain("s1") is True
+
+
+async def test_snapshot事件带采集年龄(tmp_path):
+    p, audit, tools = _pipeline(
+        tmp_path, [_plan("sysinfo.disk_usage", {}, "low"), FINAL])
+    events = await _collect(p)
+    snap_ev = events[_types(events).index("snapshot")]
+    assert snap_ev["collected_ago_seconds"] == 12.3
+
+
+async def test_同一步骤各事件step_id一致(tmp_path):
+    p, audit, tools = _pipeline(
+        tmp_path,
+        [_plan("services.stop_service", {"name": "nginx"}, "high"), FINAL])
+
+    async def approve(e):
+        if e["type"] == "confirm_request":
+            p.confirmations.resolve(e["confirm_id"], True)
+
+    events = await _collect(p, "停掉 nginx", on_event=approve)
+    first_plan = next(e for e in events if e["type"] == "plan" and e["steps"])
+    sid = first_plan["steps"][0]["step_id"]
+    assert sid  # plan 事件里每个步骤带 step_id
+    by_type = {e["type"]: e for e in events}
+    for t in ("verification", "confirm_request", "confirm_result", "execution"):
+        assert by_type[t]["step_id"] == sid
 
 
 async def test_高危步骤需确认_批准后执行(tmp_path):

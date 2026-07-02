@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     output_max_bytes: int = 65536
     exec_user: str = ""  # 生产环境设为 kylinguard-exec；空 = 当前用户（开发）
 
+    # 感知
+    snapshot_interval: int = 30  # 快照后台轮询间隔（秒）
+
     # 规划循环
     max_json_retries: int = 3
     max_iterations: int = 6

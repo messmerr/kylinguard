@@ -24,6 +24,7 @@ from kylinguard.mcp_client import ToolManager
 from kylinguard.pipeline import Confirmations, Pipeline
 from kylinguard.planner import Planner
 from kylinguard.reviewer import Reviewer
+from kylinguard.snapshot import SnapshotCache
 
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
@@ -43,20 +44,24 @@ def create_app(settings: Settings | None = None,
     audit = AuditLog(settings.db_path)
     tools = ToolManager()
     confirmations = Confirmations()
+    snapshot_cache = SnapshotCache(settings.snapshot_interval)
     planner_llm, reviewer_llm = build_clients(settings)
     pipeline = Pipeline(
         settings=settings, audit=audit, tools=tools,
         planner=Planner(planner_llm, settings.max_json_retries),
         reviewer=Reviewer(reviewer_llm, settings.max_json_retries),
         confirmations=confirmations,
+        snapshot_fn=snapshot_cache.get,
     )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if with_tools:
             await tools.start()
+            await snapshot_cache.start()
         yield
         if with_tools:
+            await snapshot_cache.stop()
             await tools.stop()
         audit.close()
 
