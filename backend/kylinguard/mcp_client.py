@@ -14,6 +14,9 @@ SERVERS: dict[str, str] = {
     "sysinfo": "kylinguard.plugins.sysinfo",
     "services": "kylinguard.plugins.services",
     "logs": "kylinguard.plugins.logs",
+    "network": "kylinguard.plugins.network",
+    "disk": "kylinguard.plugins.disk",
+    "security": "kylinguard.plugins.security",
     "run_command": "kylinguard.plugins.run_command",
 }
 

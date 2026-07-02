@@ -94,3 +94,89 @@ async def test_run_command_透传执行(monkeypatch):
     out = await rc.run_command(command="uptime")
     assert "ran:uptime" in out
     assert "exit_code=0" in out
+
+
+async def test_ping_host_主机名校验():
+    import kylinguard.plugins.network as network
+
+    out = await network.ping_host(host="evil.com; rm -rf /", count=4)
+    assert "参数不合法" in out
+    out2 = await network.ping_host(host="127.0.0.1", count=99)
+    assert "参数不合法" in out2
+
+
+async def test_ping_host_正常构造命令(monkeypatch):
+    import kylinguard.plugins.network as network
+
+    async def fake_run(cmd, **kwargs):
+        assert cmd == "ping -c 2 -W 2 kylinos.cn"
+        return ExecResult(exit_code=0, stdout="2 received", stderr="",
+                          duration_ms=1)
+
+    monkeypatch.setattr(network, "run_command", fake_run)
+    out = await network.ping_host(host="kylinos.cn", count=2)
+    assert "2 received" in out
+
+
+async def test_disk_hotspots_解析排序(monkeypatch):
+    import kylinguard.plugins.disk as disk
+
+    async def fake_run(cmd, **kwargs):
+        return ExecResult(exit_code=0,
+                          stdout="1024\t/var/a\n8192\t/var/b\n512\t/var/c",
+                          stderr="", duration_ms=1)
+
+    monkeypatch.setattr(disk, "run_command", fake_run)
+    out = await disk.disk_hotspots(path="/var", depth=1)
+    lines = out.splitlines()
+    assert "/var/b" in lines[1]  # 占用最大的排最前
+
+
+async def test_disk_hotspots_拒绝伪文件系统():
+    import kylinguard.plugins.disk as disk
+
+    out = await disk.disk_hotspots(path="/proc", depth=1)
+    assert "参数不合法" in out
+
+
+async def test_clean_file_白名单外拒绝():
+    import kylinguard.plugins.disk as disk
+
+    assert "拒绝" in await disk.clean_file(path="/etc/passwd")
+    assert "拒绝" in await disk.clean_file(path="/var/log/../../etc/shadow")
+
+
+async def test_clean_file_白名单内执行(monkeypatch):
+    import kylinguard.plugins.disk as disk
+
+    async def fake_run(cmd, **kwargs):
+        assert cmd == "rm -f /tmp/big.log"
+        return ExecResult(exit_code=0, stdout="", stderr="", duration_ms=1)
+
+    monkeypatch.setattr(disk, "run_command", fake_run)
+    out = await disk.clean_file(path="/tmp/big.log")
+    assert "已删除" in out
+
+
+async def test_critical_file_perms_基线对比(monkeypatch):
+    import kylinguard.plugins.security as security
+
+    async def fake_run(cmd, **kwargs):
+        return ExecResult(
+            exit_code=0,
+            stdout="644 root /etc/passwd\n777 nobody /etc/shadow",
+            stderr="", duration_ms=1)
+
+    monkeypatch.setattr(security, "run_command", fake_run)
+    out = await security.critical_file_perms()
+    assert "✓ /etc/passwd" in out
+    assert "⚠ 偏离基线 /etc/shadow" in out
+
+
+def test_新插件注册表齐全():
+    from kylinguard.registry import get_meta
+
+    assert get_meta("disk", "clean_file").risk == RiskLevel.HIGH
+    assert get_meta("disk", "clean_file").needs_sudo is True
+    assert get_meta("network", "ping_host").risk == RiskLevel.LOW
+    assert get_meta("security", "critical_file_perms").risk == RiskLevel.LOW
