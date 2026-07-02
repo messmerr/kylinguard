@@ -101,5 +101,29 @@ class AuditLog:
             prev = h
         return True
 
+    def stats(self) -> dict:
+        """全局安全统计（仪表盘用）：事件量、拦截数、确认批准/拒绝数。"""
+        try:
+            total = self._conn.execute(
+                "SELECT COUNT(*) FROM audit_events").fetchone()[0]
+            by_type = dict(self._conn.execute(
+                "SELECT event_type, COUNT(*) FROM audit_events "
+                "GROUP BY event_type").fetchall())
+            denied = self._conn.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE "
+                "event_type='verification' AND "
+                "json_extract(payload, '$.decision.action')='deny'"
+            ).fetchone()[0]
+            approved = self._conn.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE "
+                "event_type='confirm_result' AND "
+                "json_extract(payload, '$.approved')"
+            ).fetchone()[0]
+            rejected = by_type.get("confirm_result", 0) - approved
+        except sqlite3.Error as e:
+            raise AuditError(f"审计读取失败：{e}") from e
+        return {"total_events": total, "by_type": by_type, "denied": denied,
+                "confirm_approved": approved, "confirm_rejected": rejected}
+
     def close(self):
         self._conn.close()

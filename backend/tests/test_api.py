@@ -179,3 +179,44 @@ async def test_status返回快照(app, monkeypatch):
     body = r.json()
     assert body["snapshot"]["memory"] == "充足"
     assert body["collected_ago_seconds"] == 5.0
+
+
+async def test_审计链校验端点(app):
+    app.state.audit.append("sv", "user_query", {"query": "x"})
+    app.state.sessions.create("sv", "x")
+    async with _client(app) as c:
+        h = await _login(c)
+        r = await c.get("/api/sessions/sv/verify", headers=h)
+    assert r.json()["ok"] is True
+
+
+async def test_全局统计端点(app):
+    app.state.audit.append("st", "verification",
+                           {"decision": {"action": "deny"}})
+    app.state.sessions.create("st", "x")
+    async with _client(app) as c:
+        h = await _login(c)
+        r = await c.get("/api/stats", headers=h)
+    body = r.json()
+    assert body["sessions"] == 1
+    assert body["denied"] == 1
+
+
+async def test_策略CRUD端点(app):
+    async with _client(app) as c:
+        h = await _login(c)
+        r1 = await c.post("/api/policies", headers=h,
+                          json={"kind": "blacklist", "pattern": r"\bwipefs\b",
+                                "note": "擦除签名"})
+        pid = r1.json()["id"]
+        r2 = await c.get("/api/policies", headers=h)
+        body = r2.json()
+        assert body["custom"][0]["id"] == pid
+        assert "privilege_escalators" in body["builtin"]
+        r3 = await c.post("/api/policies", headers=h,
+                          json={"kind": "blacklist", "pattern": "([坏正则"})
+        assert r3.status_code == 400
+        r4 = await c.delete(f"/api/policies/{pid}", headers=h)
+        assert r4.json()["ok"] is True
+        r5 = await c.delete("/api/policies/99999", headers=h)
+        assert r5.status_code == 404

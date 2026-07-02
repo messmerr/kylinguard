@@ -48,3 +48,19 @@ def test_写入失败抛致命错误(log):
     log.close()
     with pytest.raises(AuditError):
         log.append("s1", "user_query", {"query": "x"})
+
+
+def test_全局统计(log):
+    log.append("s1", "user_query", {"query": "a"})
+    log.append("s1", "verification",
+               {"decision": {"action": "deny", "risk": "high"}})
+    log.append("s1", "verification",
+               {"decision": {"action": "auto", "risk": "low"}})
+    log.append("s2", "confirm_result", {"approved": True, "operator": "admin"})
+    log.append("s2", "confirm_result", {"approved": False, "operator": "admin"})
+    s = log.stats()
+    assert s["total_events"] == 5
+    assert s["by_type"]["verification"] == 2
+    assert s["denied"] == 1
+    assert s["confirm_approved"] == 1
+    assert s["confirm_rejected"] == 1

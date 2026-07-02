@@ -189,6 +189,18 @@ def create_app(settings: Settings | None = None,
             raise HTTPException(404, "会话不存在")
         return {"events": app.state.audit.events(session_id)}
 
+    @app.get("/api/sessions/{session_id}/verify")
+    async def session_verify(session_id: str,
+                             _user: str = Depends(require_auth)):
+        if not app.state.sessions.exists(session_id):
+            raise HTTPException(404, "会话不存在")
+        return {"ok": app.state.audit.verify_chain(session_id)}
+
+    @app.get("/api/stats")
+    async def stats(_user: str = Depends(require_auth)):
+        return {"sessions": len(app.state.sessions.list()),
+                **app.state.audit.stats()}
+
     @app.get("/api/status")
     async def status(_user: str = Depends(require_auth)):
         snapshot, age = await app.state.snapshot_cache.get()
