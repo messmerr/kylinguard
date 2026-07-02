@@ -1,6 +1,10 @@
 """FastAPI 入口：SSE 对话、人工确认、健康检查、前端静态托管。
 
 启动：uvicorn --factory kylinguard.api:create_app --host 0.0.0.0 --port 8000
+
+M2 待办（设计文档已规划，上线前必须完成）：所有 /api/* 路由加登录鉴权；
+confirm 与发起会话绑定同一管理员身份并在审计链中归因。M1 开发阶段仅限
+本机/内网联调使用。
 """
 import asyncio
 import json
