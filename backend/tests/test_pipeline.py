@@ -91,8 +91,9 @@ async def test_只读步骤全自动端到端(tmp_path):
     p, audit, tools = _pipeline(
         tmp_path, [_plan("sysinfo.disk_usage", {}, "low"), FINAL])
     events = await _collect(p)
-    assert _types(events) == ["user_query", "snapshot", "plan", "verification",
-                              "execution", "plan", "final_answer"]
+    audited = [t for t in _types(events) if t != "phase"]
+    assert audited == ["user_query", "snapshot", "plan", "verification",
+                       "execution", "plan", "final_answer"]
     assert tools.calls == [("sysinfo", "disk_usage", {})]
     assert events[-1]["answer"] == "磁盘使用正常。"
     assert audit.verify_chain("s1") is True
@@ -277,3 +278,26 @@ async def test_execution事件带耗时(tmp_path):
     events = await _collect(p)
     ev = events[_types(events).index("execution")]
     assert isinstance(ev["duration_ms"], int) and ev["duration_ms"] >= 0
+
+
+async def test_阶段事件让内部过程可感(tmp_path):
+    p, audit, tools = _pipeline(
+        tmp_path, [_plan("sysinfo.disk_usage", {}, "low"), FINAL])
+    events = await _collect(p)
+    phases = [e for e in events if e["type"] == "phase"]
+    # 每轮规划前有 planning 相位；每步审查前有 reviewing 相位
+    assert {"phase": "planning", "round": 0}.items() <= phases[0].items()
+    reviewing = [e for e in phases if e["phase"] == "reviewing"]
+    assert reviewing and reviewing[0]["tool"] == "sysinfo.disk_usage"
+    assert reviewing[0]["step_id"]
+    # phase 是纯 UI 事件，不入审计链
+    assert "phase" not in {e["event_type"] for e in audit.events("s1")}
+
+
+async def test_final_answer带总耗时(tmp_path):
+    p, audit, tools = _pipeline(
+        tmp_path, [_plan("sysinfo.disk_usage", {}, "low"), FINAL])
+    events = await _collect(p)
+    final = events[-1]
+    assert final["type"] == "final_answer"
+    assert isinstance(final["elapsed_ms"], int) and final["elapsed_ms"] >= 0

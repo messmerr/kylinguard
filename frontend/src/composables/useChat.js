@@ -8,6 +8,7 @@ export const sessions = ref([])
 export const activeId = ref('')
 export const items = ref([])
 export const running = ref(false)
+export const phase = ref(null) // 当前阶段指示：{ name, tool? }，null=空闲
 
 let stepsById = {}
 let confirmsById = {}
@@ -49,11 +50,22 @@ export function handleEvent(ev) {
       activeId.value = ev.session_id
       refreshSessions()
       break
+    case 'phase':
+      // 规划相位清空 tool（整体思考中）；审查相位带上工具名
+      phase.value = ev.phase === 'reviewing'
+        ? { name: 'reviewing', tool: ev.tool }
+        : { name: ev.phase }
+      // 审查相位：把对应步骤行标记为"审查中"，比笼统的"校验中"更具体
+      if (ev.phase === 'reviewing' && stepsById[ev.step_id]) {
+        stepsById[ev.step_id].status = 'reviewing'
+      }
+      break
     case 'snapshot':
       push({ kind: 'snapshot', snapshot: ev.snapshot,
              age: ev.collected_ago_seconds ?? 0, expanded: false })
       break
     case 'assistant_delta':
+      phase.value = null // 首 token 到达，退出"规划中"指示
       if (!streamingItem) {
         streamingItem = push({ kind: 'assistant', role: 'streaming',
                                text: '', streaming: true })
@@ -76,6 +88,7 @@ export function handleEvent(ev) {
       // steps 为空时不定稿：等 final_answer 统一处理（文本即答案）
       break
     case 'verification': {
+      phase.value = null // 判定已出，退出"审查中"指示
       const step = stepsById[ev.step_id]
       if (!step) break
       step.verification = { rule: ev.rule, review: ev.review, decision: ev.decision }
@@ -187,6 +200,7 @@ export async function sendMessage(text, { onUpdate } = {}) {
     push({ kind: 'fatal', error: `连接中断：${e.message}` })
   } finally {
     running.value = false
+    phase.value = null
     refreshSessions()
   }
 }

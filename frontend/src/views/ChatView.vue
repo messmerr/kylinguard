@@ -39,8 +39,10 @@
                       :closable="false" :title="it.error" class="fatal" />
           </template>
 
-          <div v-if="running && !hasStreaming" class="trace-line dim shimmer">
-            ⏳ Agent 处理中…
+          <div v-if="running && !hasStreaming" class="phase-bar">
+            <span class="phase-spinner"></span>
+            <span class="phase-text">{{ phaseText }}</span>
+            <span class="phase-timer">{{ timer }}s</span>
           </div>
         </div>
       </div>
@@ -61,13 +63,13 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import ConfirmCard from '../components/ConfirmCard.vue'
 import MarkdownText from '../components/MarkdownText.vue'
 import Sidebar from '../components/Sidebar.vue'
 import StatusPanel from '../components/StatusPanel.vue'
 import TraceStep from '../components/TraceStep.vue'
-import { items, running, sendMessage } from '../composables/useChat.js'
+import { items, phase, running, sendMessage } from '../composables/useChat.js'
 
 defineProps({
   showSidebar: { type: Boolean, default: true },
@@ -79,6 +81,36 @@ const chatRef = ref(null)
 
 const hasStreaming = computed(() => items.value.some((it) => it.streaming))
 const ageText = (age) => (age < 3 ? '刚刚' : `${Math.round(age)} 秒前`)
+
+// 阶段指示文案：让"处理中"变成用户可感的具体环节
+const phaseText = computed(() => {
+  const p = phase.value
+  if (!p) return '正在准备…'
+  if (p.name === 'planning') return '规划模型正在分析系统状态、拟定执行计划…'
+  if (p.name === 'reviewing') {
+    const t = p.tool ? p.tool.split('.').pop() : ''
+    return `独立 LLM 审查员正在校验「${t}」的安全性与意图一致性…`
+  }
+  return '处理中…'
+})
+
+// 秒表：任务进行期间每 100ms 递增，让等待有进度感
+const timer = ref('0.0')
+let timerId = null
+let startAt = 0
+watch(running, (on) => {
+  if (on) {
+    startAt = performance.now()
+    timer.value = '0.0'
+    timerId = setInterval(() => {
+      timer.value = ((performance.now() - startAt) / 1000).toFixed(1)
+    }, 100)
+  } else if (timerId) {
+    clearInterval(timerId)
+    timerId = null
+  }
+})
+onUnmounted(() => timerId && clearInterval(timerId))
 
 function scrollToBottom() {
   nextTick(() => {
@@ -134,8 +166,16 @@ async function submit() {
 .trace-line.clickable { cursor: pointer; }
 .trace-line.clickable:hover { background: #161b22; }
 .dim { color: #8b949e; }
-.shimmer { animation: pulse 1.6s ease-in-out infinite; }
-@keyframes pulse { 50% { opacity: 0.45; } }
+.phase-bar { display: flex; align-items: center; gap: 10px; margin: 10px 0;
+  padding: 8px 14px; background: #161b22; border: 1px solid #21262d;
+  border-radius: 10px; font-size: 13px; color: #c9d1d9; }
+.phase-spinner { width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid #30363d; border-top-color: #58a6ff; flex-shrink: 0;
+  animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.phase-text { flex: 1; }
+.phase-timer { color: #8b949e; font-size: 12px;
+  font-family: ui-monospace, Consolas, monospace; }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
   align-self: center; }
 .dot.hollow { border: 1.5px solid #8b949e; background: transparent; }

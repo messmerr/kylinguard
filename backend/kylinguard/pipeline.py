@@ -87,10 +87,20 @@ class Pipeline:
         return conv
 
     async def handle(self, session_id: str, user_query: str, emit) -> None:
+        started = time.monotonic()
+
         async def record(event_type: str, payload: dict):
             h = self._audit.append(session_id, event_type, payload)
             await emit({"type": event_type, "session_id": session_id,
                         "hash": h, **payload})
+
+        async def phase(name: str, **extra):
+            # 阶段指示：纯 UI 事件（不入审计），让内部工作对用户可感
+            await emit({"type": "phase", "session_id": session_id,
+                        "phase": name, **extra})
+
+        def elapsed_ms() -> int:
+            return int((time.monotonic() - started) * 1000)
 
         conversation = self._get_conversation(session_id)
         await record("user_query", {"query": user_query})
@@ -107,6 +117,8 @@ class Pipeline:
 
         for round_no in range(self._settings.max_iterations):
             # ② 规划（分析文本经 assistant_delta 流式外发，不逐条入审计）
+            await phase("planning", round=round_no)
+
             async def on_delta(text: str, _round=round_no):
                 await emit({"type": "assistant_delta",
                             "session_id": session_id,
@@ -116,7 +128,8 @@ class Pipeline:
                 plan = await self._planner.next_actions(conversation,
                                                         on_delta=on_delta)
             except PlanningError as e:
-                await record("final_answer", {"answer": str(e), "aborted": True})
+                await record("final_answer", {"answer": str(e), "aborted": True,
+                                              "elapsed_ms": elapsed_ms()})
                 return
             # step_id 在规划落审计前生成：前端按它把校验/确认/执行聚合到
             # 同一步骤行，审计回放（M2）按它分组
@@ -132,13 +145,14 @@ class Pipeline:
                 answer = plan.final_answer or "（模型未给出结论）"
                 conversation.append({"role": "assistant", "content": answer})
                 await record("final_answer", {"answer": answer,
-                                              "aborted": False})
+                                              "aborted": False,
+                                              "elapsed_ms": elapsed_ms()})
                 return
 
             observations = []
             for step, step_id in zip(plan.steps, step_ids):
                 observations.append(await self._run_step(
-                    user_query, env_summary, step, step_id, record))
+                    user_query, env_summary, step, step_id, record, phase))
 
             conversation.append({"role": "assistant",
                                  "content": plan.model_dump_json()})
@@ -152,10 +166,11 @@ class Pipeline:
             "answer": f"迭代轮数达到上限（{self._settings.max_iterations}），"
                       "任务中止。请缩小问题范围后重试。",
             "aborted": True,
+            "elapsed_ms": elapsed_ms(),
         })
 
     async def _run_step(self, user_query: str, env_summary: str,
-                        step: PlanStep, step_id: str, record) -> str:
+                        step: PlanStep, step_id: str, record, phase) -> str:
         # ③ 校验：三道闸
         try:
             server, tool = split_qualified(step.tool)
@@ -175,6 +190,7 @@ class Pipeline:
                            f"{json.dumps(step.arguments, ensure_ascii=False)}"
                            f"（声称目的：{step.purpose}）")
 
+        await phase("reviewing", step_id=step_id, tool=step.tool)
         review = await self._reviewer.review(user_query, env_summary, action_desc)
         decision = decide(meta, rule, review, step.risk)
         await record("verification", {

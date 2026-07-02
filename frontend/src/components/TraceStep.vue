@@ -53,7 +53,8 @@ const riskClass = computed(() => {
 const statusText = computed(() => {
   const risk = riskLabelMap[step.verification?.decision.risk || step.risk] || ''
   switch (step.status) {
-    case 'verifying': return '校验中…'
+    case 'verifying': return '规则引擎校验中…'
+    case 'reviewing': return '独立 LLM 审查中…'
     case 'waiting': return `⏳ ${risk}，等待确认`
     case 'running': return '执行中…'
     case 'done': return step.autoAllowed ? '✓ 自动放行' : '✓ 已执行'
@@ -96,6 +97,7 @@ const preview = computed(() => {
 .status.done { color: #3fb950; }
 .status.denied, .status.skipped { color: #f85149; }
 .status.waiting { color: #d29922; }
+.status.verifying, .status.reviewing { color: #58a6ff; }
 .preview { margin: 0 0 2px 24px; padding: 6px 10px; background: #10141a;
   border-left: 2px solid #21262d; border-radius: 0 6px 6px 0;
   color: #8b949e; cursor: pointer; }
