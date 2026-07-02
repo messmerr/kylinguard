@@ -24,7 +24,9 @@ from kylinguard.llm import build_clients
 from kylinguard.mcp_client import ToolManager
 from kylinguard.pipeline import Confirmations, Pipeline
 from kylinguard.planner import Planner
+from kylinguard.policy import KINDS, PolicyStore
 from kylinguard.reviewer import Reviewer
+from kylinguard.rules import builtin_rules
 from kylinguard.sessions import SessionStore
 from kylinguard.snapshot import SnapshotCache
 
@@ -46,6 +48,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class PolicyRequest(BaseModel):
+    kind: str
+    pattern: str
+    note: str = ""
+
+
 def create_app(settings: Settings | None = None,
                *, with_tools: bool = True) -> FastAPI:
     settings = settings or get_settings()
@@ -54,6 +62,7 @@ def create_app(settings: Settings | None = None,
     auth_store = AuthStore(settings.db_path)
     auth_store.ensure_admin(settings.admin_user, settings.admin_password)
     tokens = TokenManager(settings.token_ttl)
+    policies = PolicyStore(settings.db_path)
     tools = ToolManager()
     confirmations = Confirmations()
     snapshot_cache = SnapshotCache(settings.snapshot_interval)
@@ -64,6 +73,7 @@ def create_app(settings: Settings | None = None,
         reviewer=Reviewer(reviewer_llm, settings.max_json_retries),
         confirmations=confirmations,
         snapshot_fn=snapshot_cache.get,
+        policy_store=policies,
     )
 
     @asynccontextmanager
@@ -77,6 +87,7 @@ def create_app(settings: Settings | None = None,
             await tools.stop()
         sessions.close()
         auth_store.close()
+        policies.close()
         audit.close()
 
     app = FastAPI(title="麒盾 KylinGuard", lifespan=lifespan)
@@ -87,6 +98,7 @@ def create_app(settings: Settings | None = None,
     app.state.snapshot_cache = snapshot_cache
     app.state.auth = auth_store
     app.state.tokens = tokens
+    app.state.policies = policies
 
     async def require_auth(authorization: str = Header("")) -> str:
         """所有业务端点的鉴权依赖：返回当前管理员用户名。"""
@@ -182,6 +194,27 @@ def create_app(settings: Settings | None = None,
         snapshot, age = await app.state.snapshot_cache.get()
         return {"snapshot": snapshot,
                 "collected_ago_seconds": round(age, 1)}
+
+    @app.get("/api/policies")
+    async def list_policies(_user: str = Depends(require_auth)):
+        return {"custom": app.state.policies.list(),
+                "builtin": builtin_rules(), "kinds": list(KINDS)}
+
+    @app.post("/api/policies")
+    async def add_policy(req: PolicyRequest,
+                         _user: str = Depends(require_auth)):
+        try:
+            pid = app.state.policies.add(req.kind, req.pattern, req.note)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"id": pid}
+
+    @app.delete("/api/policies/{policy_id}")
+    async def delete_policy(policy_id: int,
+                            _user: str = Depends(require_auth)):
+        if not app.state.policies.remove(policy_id):
+            raise HTTPException(404, "策略不存在")
+        return {"ok": True}
 
     if _FRONTEND_DIST.is_dir():
         app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True),

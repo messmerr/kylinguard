@@ -59,7 +59,7 @@ class Confirmations:
 class Pipeline:
     def __init__(self, settings: Settings, audit: AuditLog, tools,
                  planner, reviewer, confirmations: Confirmations,
-                 snapshot_fn=_fresh_snapshot):
+                 snapshot_fn=_fresh_snapshot, policy_store=None):
         self._settings = settings
         self._audit = audit
         self._tools = tools
@@ -67,6 +67,7 @@ class Pipeline:
         self._reviewer = reviewer
         self.confirmations = confirmations
         self._snapshot_fn = snapshot_fn
+        self._policy_store = policy_store  # 鸭子类型：extra() -> ExtraPolicies
         self._conversations: dict[str, list[dict]] = {}
 
     def _get_conversation(self, session_id: str) -> list[dict]:
@@ -164,7 +165,8 @@ class Pipeline:
 
         if meta.dynamic:
             command = str(step.arguments.get("command", ""))
-            rule = check_command(command)
+            extra = self._policy_store.extra() if self._policy_store else None
+            rule = check_command(command, extra=extra)
             action_desc = f"执行命令：{command}（声称目的：{step.purpose}）"
         else:
             rule = RuleVerdict(decision=RuleDecision.REVIEW,

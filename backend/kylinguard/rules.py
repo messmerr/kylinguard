@@ -14,8 +14,17 @@
 """
 import re
 import shlex
+from dataclasses import dataclass, field
 
 from kylinguard.models import RuleDecision, RuleVerdict
+
+
+@dataclass(frozen=True)
+class ExtraPolicies:
+    """管理员自定义策略（PolicyStore 聚合产出），与内置规则合并判定。"""
+    blacklist: list = field(default_factory=list)   # [(正则, 说明)]
+    readonly: frozenset = frozenset()               # 命令名集合
+    protected: tuple = ()                           # 路径前缀
 
 # --- 黑名单（字符串级粗筛）：无条件拒绝 ---
 _BLACKLIST: list[tuple[str, str]] = [
@@ -89,10 +98,6 @@ def _has_forbidden_flag(argv: list[str], forbidden: set[str]) -> bool:
     return False
 
 
-def _touches_protected(argv: list[str]) -> bool:
-    return any(arg.startswith(_PROTECTED_PREFIXES) for arg in argv[1:])
-
-
 def _is_rm_root(argv: list[str]) -> bool:
     """argv 级判定"递归删除根目录"，不受空格/选项顺序变体影响。"""
     if argv[0] != "rm":
@@ -123,13 +128,16 @@ def _is_readonly_whitelisted(argv: list[str]) -> bool:
     return False
 
 
-def check_command(command: str) -> RuleVerdict:
+def check_command(command: str,
+                  extra: ExtraPolicies | None = None) -> RuleVerdict:
     text = command.strip()
     if not text:
         return _deny("空命令，拒绝执行", "empty")
 
     # ① 黑名单粗筛（字符串级，覆盖 fork 炸弹等 argv 拆不出的模式）
-    for pattern, label in _BLACKLIST:
+    #    自定义黑名单与内置合并（只收紧）
+    custom_blacklist = extra.blacklist if extra else []
+    for pattern, label in list(_BLACKLIST) + list(custom_blacklist):
         if re.search(pattern, text):
             return _deny(f"命中危险命令黑名单：{label}", pattern)
 
@@ -158,19 +166,24 @@ def check_command(command: str) -> RuleVerdict:
             f"禁止经 {argv[0]!r} 提权或启动子 shell；"
             "提权由系统受限执行器统一管理", "privilege_escalator")
 
-    # ⑤ 保护路径写操作：安全红线
+    # ⑤ 保护路径写操作：安全红线（自定义保护路径合并）
+    protected = _PROTECTED_PREFIXES + (extra.protected if extra else ())
     writes = argv[0] in _WRITE_COMMANDS or (
         argv[0] in _INPLACE_EDITORS
         and any(t == "-i" or t.startswith("-i.") or t == "--in-place"
                 for t in argv[1:])
     )
-    if writes and _touches_protected(argv):
+    touches = any(arg.startswith(protected) for arg in argv[1:])
+    if writes and touches:
         return _deny("疑似修改关键（保护）配置文件，安全红线禁止",
                      "protected_path")
 
     # ⑥ 只读白名单（命令+参数级）；触及保护路径的读操作降级交后续闸门
-    if _is_readonly_whitelisted(argv):
-        if _touches_protected(argv):
+    #    自定义白名单为命令名级（管理员显式放行决策）
+    whitelisted = _is_readonly_whitelisted(argv) or (
+        extra is not None and argv[0] in extra.readonly)
+    if whitelisted:
+        if touches:
             return RuleVerdict(
                 decision=RuleDecision.REVIEW,
                 reason="只读命令但访问敏感文件，交由 LLM 审查员与风险门控判定")
@@ -182,3 +195,18 @@ def check_command(command: str) -> RuleVerdict:
     return RuleVerdict(
         decision=RuleDecision.REVIEW,
         reason="规则层不表态，交由 LLM 审查员与风险门控判定")
+
+
+def builtin_rules() -> dict:
+    """导出内置规则供策略管理页只读展示（代码级安全基线，UI 不可改）。"""
+    return {
+        "blacklist": [(p, label) for p, label in _BLACKLIST]
+                     + [("<argv>rm -r 目标为 /", "递归删除根目录（argv 级判定）")],
+        "metachars": _METACHARS.pattern,
+        "privilege_escalators": sorted(_PRIVILEGE_ESCALATORS),
+        "protected_prefixes": list(_PROTECTED_PREFIXES),
+        "write_commands": sorted(_WRITE_COMMANDS),
+        "safe_commands": {cmd: sorted(flags)
+                          for cmd, flags in _SAFE_COMMANDS.items()},
+        "systemctl_ro_subcmds": sorted(_SYSTEMCTL_RO_SUBCMDS),
+    }
