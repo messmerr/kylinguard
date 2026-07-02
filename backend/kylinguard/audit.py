@@ -72,11 +72,14 @@ class AuditLog:
             return h
 
     def events(self, session_id: str) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT seq, ts, event_type, payload, prev_hash, hash "
-            "FROM audit_events WHERE session_id=? ORDER BY seq",
-            (session_id,),
-        ).fetchall()
+        try:
+            rows = self._conn.execute(
+                "SELECT seq, ts, event_type, payload, prev_hash, hash "
+                "FROM audit_events WHERE session_id=? ORDER BY seq",
+                (session_id,),
+            ).fetchall()
+        except sqlite3.Error as e:
+            raise AuditError(f"审计读取失败：{e}") from e
         return [
             {"seq": r[0], "ts": r[1], "event_type": r[2],
              "payload": json.loads(r[3]), "prev_hash": r[4], "hash": r[5]}

@@ -37,6 +37,38 @@ class LLMClient:
                     delay *= 2
         raise LLMError(f"LLM 调用失败（已重试 {self.max_retries} 次）：{last_err}")
 
+    async def chat_stream(self, messages: list[dict],
+                          temperature: float = 0.2):
+        """流式对话：逐个产出文本增量。
+
+        重试只覆盖建立连接阶段；流中途断开直接抛出（半截输出无法安全续接，
+        由调用方决定整轮重试）。
+        """
+        delay = 1.0
+        stream = None
+        last_err: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                stream = await self._client.chat.completions.create(
+                    model=self.model, messages=messages,
+                    temperature=temperature, stream=True,
+                )
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(delay)
+                    delay *= 2
+        if stream is None:
+            raise LLMError(
+                f"LLM 调用失败（已重试 {self.max_retries} 次）：{last_err}")
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
 
 def build_clients(settings: Settings) -> tuple[LLMClient, LLMClient]:
     """规划与审查双实例：系统提示词彼此独立，模型可分别配置。"""

@@ -1,11 +1,16 @@
 """五阶段安全流水线编排：感知→规划→校验→受限执行→溯源。
 
 - 每个事件先落审计链再对外发射；审计失败（AuditError）直接上抛中止任务。
+  例外：assistant_delta 流式增量只走 UI 不逐条入审计——整轮完整文本
+  在 plan/final_answer 事件里落链，审计完整性不受影响。
+- 多轮对话：conversation 按 session_id 常驻内存；服务重启后从审计链
+  摘要重建（历史指令与结论，工具细节不还原）。
 - 迭代规划：把每轮工具结果喂回会话，直至 final_answer 或轮数上限。
 - 中高危步骤经 Confirmations 挂起等待管理员决断，超时按拒绝。
 """
 import asyncio
 import json
+import time
 import uuid
 
 from kylinguard.audit import AuditLog
@@ -57,6 +62,23 @@ class Pipeline:
         self._reviewer = reviewer
         self.confirmations = confirmations
         self._snapshot_fn = snapshot_fn
+        self._conversations: dict[str, list[dict]] = {}
+
+    def _get_conversation(self, session_id: str) -> list[dict]:
+        conv = self._conversations.get(session_id)
+        if conv is None:
+            conv = [{"role": "system",
+                     "content": build_system_prompt(self._tools.describe())}]
+            # 重启恢复：从审计链摘要重建（指令与结论对，工具细节不还原）
+            for ev in self._audit.events(session_id):
+                if ev["event_type"] == "user_query":
+                    conv.append({"role": "user",
+                                 "content": f"管理员指令：{ev['payload']['query']}"})
+                elif ev["event_type"] == "final_answer":
+                    conv.append({"role": "assistant",
+                                 "content": ev["payload"]["answer"]})
+            self._conversations[session_id] = conv
+        return conv
 
     async def handle(self, session_id: str, user_query: str, emit) -> None:
         async def record(event_type: str, payload: dict):
@@ -64,6 +86,7 @@ class Pipeline:
             await emit({"type": event_type, "session_id": session_id,
                         "hash": h, **payload})
 
+        conversation = self._get_conversation(session_id)
         await record("user_query", {"query": user_query})
 
         # ① 感知（走缓存，collected_ago_seconds = 快照距采集的秒数）
@@ -72,17 +95,20 @@ class Pipeline:
                                   "collected_ago_seconds": round(age, 1)})
         env_summary = format_snapshot(snapshot, per_item=1500)
 
-        conversation = [
-            {"role": "system",
-             "content": build_system_prompt(self._tools.describe())},
+        conversation.append(
             {"role": "user",
-             "content": f"管理员指令：{user_query}\n\n当前系统快照：\n{env_summary}"},
-        ]
+             "content": f"管理员指令：{user_query}\n\n当前系统快照：\n{env_summary}"})
 
         for round_no in range(self._settings.max_iterations):
-            # ② 规划
+            # ② 规划（分析文本经 assistant_delta 流式外发，不逐条入审计）
+            async def on_delta(text: str, _round=round_no):
+                await emit({"type": "assistant_delta",
+                            "session_id": session_id,
+                            "round": _round, "text": text})
+
             try:
-                plan = await self._planner.next_actions(conversation)
+                plan = await self._planner.next_actions(conversation,
+                                                        on_delta=on_delta)
             except PlanningError as e:
                 await record("final_answer", {"answer": str(e), "aborted": True})
                 return
@@ -97,9 +123,10 @@ class Pipeline:
             })
 
             if not plan.steps:
-                await record("final_answer",
-                             {"answer": plan.final_answer or "（模型未给出结论）",
-                              "aborted": False})
+                answer = plan.final_answer or "（模型未给出结论）"
+                conversation.append({"role": "assistant", "content": answer})
+                await record("final_answer", {"answer": answer,
+                                              "aborted": False})
                 return
 
             observations = []
@@ -172,12 +199,14 @@ class Pipeline:
                 return f"步骤 {step.tool} 未获管理员批准（拒绝或超时），已跳过"
 
         # ④ 受限执行（经 MCP 插件进程）
+        started = time.monotonic()
         try:
             output = await self._tools.call(server, tool, step.arguments)
         except Exception as e:
             output = f"[工具调用失败] {e}"
+        duration_ms = int((time.monotonic() - started) * 1000)
         # ⑤ 溯源
         await record("execution",
                      {"step_id": step_id, "step": step.model_dump(),
-                      "output": output[:8000]})
+                      "duration_ms": duration_ms, "output": output[:8000]})
         return f"步骤 {step.tool} 输出：\n{output[:4000]}"
