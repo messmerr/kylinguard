@@ -7,16 +7,26 @@ from kylinguard.api import create_app
 from kylinguard.audit import AuditError
 from kylinguard.config import Settings
 
+PW = "test-pw-123"
+
 
 @pytest.fixture()
 def app(tmp_path):
-    settings = Settings(_env_file=None, db_path=str(tmp_path / "kg.db"))
+    settings = Settings(_env_file=None, db_path=str(tmp_path / "kg.db"),
+                        admin_password=PW)
     return create_app(settings, with_tools=False)
 
 
 def _client(app):
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+
+async def _login(c) -> dict:
+    r = await c.post("/api/login",
+                     json={"username": "admin", "password": PW})
+    assert r.status_code == 200
+    return {"Authorization": f"Bearer {r.json()['token']}"}
 
 
 def _parse_sse(text: str) -> list[dict]:
@@ -35,16 +45,46 @@ class FatalPipeline:
         raise AuditError("磁盘满了")
 
 
-async def test_health(app):
+async def test_health无需鉴权(app):
     async with _client(app) as c:
         r = await c.get("/api/health")
     assert r.status_code == 200 and r.json()["status"] == "ok"
 
 
+async def test_登录成功与失败(app):
+    async with _client(app) as c:
+        ok = await c.post("/api/login",
+                          json={"username": "admin", "password": PW})
+        bad = await c.post("/api/login",
+                           json={"username": "admin", "password": "wrong"})
+    assert ok.status_code == 200 and ok.json()["token"]
+    assert bad.status_code == 401
+
+
+async def test_业务端点未登录一律401(app):
+    async with _client(app) as c:
+        r1 = await c.post("/api/chat", json={"message": "x"})
+        r2 = await c.get("/api/sessions")
+        r3 = await c.get("/api/status")
+        r4 = await c.post("/api/confirm",
+                          json={"confirm_id": "x", "approved": True})
+    assert [r.status_code for r in (r1, r2, r3, r4)] == [401] * 4
+
+
+async def test_logout后token失效(app):
+    async with _client(app) as c:
+        h = await _login(c)
+        await c.post("/api/logout", headers=h)
+        r = await c.get("/api/sessions", headers=h)
+    assert r.status_code == 401
+
+
 async def test_chat_SSE流式事件(app):
     app.state.pipeline = FakePipeline()
     async with _client(app) as c:
-        r = await c.post("/api/chat", json={"message": "系统怎么样"})
+        h = await _login(c)
+        r = await c.post("/api/chat", json={"message": "系统怎么样"},
+                         headers=h)
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
     events = _parse_sse(r.text)
@@ -56,38 +96,44 @@ async def test_chat_SSE流式事件(app):
 async def test_审计失败发fatal事件后收流(app):
     app.state.pipeline = FatalPipeline()
     async with _client(app) as c:
-        r = await c.post("/api/chat", json={"message": "x"})
+        h = await _login(c)
+        r = await c.post("/api/chat", json={"message": "x"}, headers=h)
     events = [e for e in _parse_sse(r.text) if e["type"] != "session_created"]
     assert events[0]["type"] == "fatal" and "审计" in events[0]["error"]
     assert events[-1]["type"] == "done"
 
 
-async def test_confirm接口(app):
-    cid, fut = app.state.confirmations.create()
+async def test_confirm归因到登录账号(app):
     async with _client(app) as c:
+        h = await _login(c)
+        cid, fut = app.state.confirmations.create()
         r1 = await c.post("/api/confirm",
-                          json={"confirm_id": cid, "approved": True})
+                          json={"confirm_id": cid, "approved": True},
+                          headers=h)
         r2 = await c.post("/api/confirm",
-                          json={"confirm_id": "不存在", "approved": True})
-    assert r1.json()["ok"] is True and fut.result() is True
+                          json={"confirm_id": "不存在", "approved": True},
+                          headers=h)
+    assert r1.json()["ok"] is True
+    assert fut.result() == (True, "admin")  # 决断归因到具体管理员
     assert r2.json()["ok"] is False
 
 
 async def test_chat自动建会话并可续聊(app):
     app.state.pipeline = FakePipeline()
     async with _client(app) as c:
-        r1 = await c.post("/api/chat", json={"message": "第一条消息"})
+        h = await _login(c)
+        r1 = await c.post("/api/chat", json={"message": "第一条消息"},
+                          headers=h)
         events = _parse_sse(r1.text)
         assert events[0]["type"] == "session_created"
         sid = events[0]["session_id"]
         assert sid
-        # 带 session_id 续聊：不再发 session_created
         r2 = await c.post("/api/chat",
-                          json={"message": "第二条", "session_id": sid})
+                          json={"message": "第二条", "session_id": sid},
+                          headers=h)
         types2 = [e["type"] for e in _parse_sse(r2.text)]
         assert "session_created" not in types2
-        # 会话列表
-        r3 = await c.get("/api/sessions")
+        r3 = await c.get("/api/sessions", headers=h)
         sessions = r3.json()["sessions"]
         assert sessions[0]["id"] == sid
         assert sessions[0]["title"].startswith("第一条消息")
@@ -95,8 +141,10 @@ async def test_chat自动建会话并可续聊(app):
 
 async def test_未知session_id拒绝(app):
     async with _client(app) as c:
+        h = await _login(c)
         r = await c.post("/api/chat",
-                         json={"message": "x", "session_id": "不存在的"})
+                         json={"message": "x", "session_id": "不存在的"},
+                         headers=h)
     assert r.status_code == 404
 
 
@@ -106,7 +154,8 @@ async def test_会话事件回放(app):
                                                   "aborted": False})
     app.state.sessions.create("sx", "历史问题")
     async with _client(app) as c:
-        r = await c.get("/api/sessions/sx/events")
+        h = await _login(c)
+        r = await c.get("/api/sessions/sx/events", headers=h)
     events = r.json()["events"]
     assert [e["event_type"] for e in events] == ["user_query", "final_answer"]
     assert events[1]["payload"]["answer"] == "历史答案"
@@ -114,7 +163,8 @@ async def test_会话事件回放(app):
 
 async def test_未知会话回放404(app):
     async with _client(app) as c:
-        r = await c.get("/api/sessions/不存在/events")
+        h = await _login(c)
+        r = await c.get("/api/sessions/不存在/events", headers=h)
     assert r.status_code == 404
 
 
@@ -124,7 +174,8 @@ async def test_status返回快照(app, monkeypatch):
 
     monkeypatch.setattr(app.state.snapshot_cache, "get", fake_get)
     async with _client(app) as c:
-        r = await c.get("/api/status")
+        h = await _login(c)
+        r = await c.get("/api/status", headers=h)
     body = r.json()
     assert body["snapshot"]["memory"] == "充足"
     assert body["collected_ago_seconds"] == 5.0

@@ -32,7 +32,11 @@ async def _fresh_snapshot() -> tuple[dict[str, str], float]:
 
 
 class Confirmations:
-    """挂起中的人工确认：confirm_id → Future[bool]。"""
+    """挂起中的人工确认：confirm_id → Future[(approved, operator)]。
+
+    operator 是做出决断的管理员账号，随 confirm_result 写入审计链
+    （谁在何时批准了哪条中高危操作）。
+    """
 
     def __init__(self):
         self._pending: dict[str, asyncio.Future] = {}
@@ -43,11 +47,12 @@ class Confirmations:
         self._pending[confirm_id] = fut
         return confirm_id, fut
 
-    def resolve(self, confirm_id: str, approved: bool) -> bool:
+    def resolve(self, confirm_id: str, approved: bool,
+                operator: str = "") -> bool:
         fut = self._pending.pop(confirm_id, None)
         if fut is None or fut.done():
             return False
-        fut.set_result(approved)
+        fut.set_result((approved, operator))
         return True
 
 
@@ -187,14 +192,14 @@ class Pipeline:
                 "decision": decision.model_dump(),
             })
             try:
-                approved = await asyncio.wait_for(
+                approved, operator = await asyncio.wait_for(
                     fut, timeout=self._settings.confirm_timeout)
             except asyncio.TimeoutError:
                 self.confirmations.resolve(confirm_id, False)  # 清理挂起项
-                approved = False
+                approved, operator = False, "(超时)"
             await record("confirm_result",
                          {"confirm_id": confirm_id, "step_id": step_id,
-                          "approved": approved})
+                          "approved": approved, "operator": operator})
             if not approved:
                 return f"步骤 {step.tool} 未获管理员批准（拒绝或超时），已跳过"
 

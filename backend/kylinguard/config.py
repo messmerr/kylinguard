@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     output_max_bytes: int = 65536
     exec_user: str = ""  # 生产环境设为 kylinguard-exec；空 = 当前用户（开发）
 
+    # 鉴权（管理员账户在首次启动时创建；密码留空则不创建、无法登录）
+    admin_user: str = "admin"
+    admin_password: str = ""
+    token_ttl: int = 12 * 3600  # 登录 token 有效期（秒）
+
     # 感知
     snapshot_interval: int = 30  # 快照后台轮询间隔（秒）
 

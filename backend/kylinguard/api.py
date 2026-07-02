@@ -12,12 +12,13 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from kylinguard.audit import AuditError, AuditLog
+from kylinguard.auth import AuthStore, TokenManager
 from kylinguard.config import Settings, get_settings
 from kylinguard.llm import build_clients
 from kylinguard.mcp_client import ToolManager
@@ -40,11 +41,19 @@ class ConfirmRequest(BaseModel):
     approved: bool
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
 def create_app(settings: Settings | None = None,
                *, with_tools: bool = True) -> FastAPI:
     settings = settings or get_settings()
     audit = AuditLog(settings.db_path)
     sessions = SessionStore(settings.db_path)
+    auth_store = AuthStore(settings.db_path)
+    auth_store.ensure_admin(settings.admin_user, settings.admin_password)
+    tokens = TokenManager(settings.token_ttl)
     tools = ToolManager()
     confirmations = Confirmations()
     snapshot_cache = SnapshotCache(settings.snapshot_interval)
@@ -67,6 +76,7 @@ def create_app(settings: Settings | None = None,
             await snapshot_cache.stop()
             await tools.stop()
         sessions.close()
+        auth_store.close()
         audit.close()
 
     app = FastAPI(title="麒盾 KylinGuard", lifespan=lifespan)
@@ -75,13 +85,36 @@ def create_app(settings: Settings | None = None,
     app.state.audit = audit
     app.state.sessions = sessions
     app.state.snapshot_cache = snapshot_cache
+    app.state.auth = auth_store
+    app.state.tokens = tokens
+
+    async def require_auth(authorization: str = Header("")) -> str:
+        """所有业务端点的鉴权依赖：返回当前管理员用户名。"""
+        token = authorization.removeprefix("Bearer ").strip()
+        username = app.state.tokens.validate(token)
+        if not username:
+            raise HTTPException(401, "未登录或登录已过期")
+        return username
 
     @app.get("/api/health")
     async def health():
         return {"status": "ok"}
 
+    @app.post("/api/login")
+    async def login(req: LoginRequest):
+        if not app.state.auth.verify(req.username, req.password):
+            raise HTTPException(401, "用户名或密码错误")
+        return {"token": app.state.tokens.issue(req.username),
+                "username": req.username}
+
+    @app.post("/api/logout")
+    async def logout(authorization: str = Header("")):
+        app.state.tokens.revoke(
+            authorization.removeprefix("Bearer ").strip())
+        return {"ok": True}
+
     @app.post("/api/chat")
-    async def chat(req: ChatRequest):
+    async def chat(req: ChatRequest, _user: str = Depends(require_auth)):
         created = not req.session_id
         if created:
             session_id = uuid.uuid4().hex
@@ -127,22 +160,25 @@ def create_app(settings: Settings | None = None,
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     @app.post("/api/confirm")
-    async def confirm(req: ConfirmRequest):
-        return {"ok": app.state.confirmations.resolve(req.confirm_id,
-                                                      req.approved)}
+    async def confirm(req: ConfirmRequest,
+                      user: str = Depends(require_auth)):
+        # operator 随 confirm_result 写入审计链：确认决断归因到管理员账号
+        return {"ok": app.state.confirmations.resolve(
+            req.confirm_id, req.approved, operator=user)}
 
     @app.get("/api/sessions")
-    async def list_sessions():
+    async def list_sessions(_user: str = Depends(require_auth)):
         return {"sessions": app.state.sessions.list()}
 
     @app.get("/api/sessions/{session_id}/events")
-    async def session_events(session_id: str):
+    async def session_events(session_id: str,
+                             _user: str = Depends(require_auth)):
         if not app.state.sessions.exists(session_id):
             raise HTTPException(404, "会话不存在")
         return {"events": app.state.audit.events(session_id)}
 
     @app.get("/api/status")
-    async def status():
+    async def status(_user: str = Depends(require_auth)):
         snapshot, age = await app.state.snapshot_cache.get()
         return {"snapshot": snapshot,
                 "collected_ago_seconds": round(age, 1)}
