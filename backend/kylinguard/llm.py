@@ -16,7 +16,8 @@ class LLMError(RuntimeError):
 class LLMClient:
     def __init__(self, base_url: str, api_key: str, model: str,
                  max_retries: int = 3):
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        # 空密钥用占位符：允许服务无密钥启动（协议级验证），真实调用时才报错
+        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key or "unset")
         self.model = model
         self.max_retries = max_retries
 
