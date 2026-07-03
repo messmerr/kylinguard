@@ -17,6 +17,10 @@ let streamingItem = null // 当前正在流式累积的 assistant 文本项
 export const stats = computed(() => {
   const s = { steps: 0, auto: 0, confirmed: 0, denied: 0 }
   for (const it of items.value) {
+    if (it.kind === 'intent') {
+      s.denied++
+      continue
+    }
     if (it.kind !== 'step') continue
     s.steps++
     if (it.status === 'denied' || it.status === 'skipped') s.denied++
@@ -103,6 +107,9 @@ export function handleEvent(ev) {
       }
       break
     }
+    case 'intent_filter':
+      push({ kind: 'intent', decision: ev.decision, expanded: false })
+      break
     case 'confirm_request':
       confirmsById[ev.confirm_id] = push({
         kind: 'confirm', confirmId: ev.confirm_id, stepId: ev.step_id,

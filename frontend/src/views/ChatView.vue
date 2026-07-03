@@ -33,6 +33,17 @@
 
             <TraceStep v-else-if="it.kind === 'step'" :step="it" />
 
+            <div v-else-if="it.kind === 'intent'" class="intent-card"
+                 @click="it.expanded = !it.expanded">
+              <div class="intent-head">
+                <span class="intent-title">安全意图校验器已拒绝</span>
+                <code class="intent-rule">{{ it.decision?.matched_rule || 'policy' }}</code>
+              </div>
+              <div class="intent-reason">{{ it.decision?.reason }}</div>
+              <pre v-if="it.expanded" class="mono intent-detail">{{
+                JSON.stringify(it.decision, null, 2) }}</pre>
+            </div>
+
             <ConfirmCard v-else-if="it.kind === 'confirm' && !it.hidden" :card="it" />
 
             <el-alert v-else-if="it.kind === 'fatal'" type="error"
@@ -186,6 +197,16 @@ async function submit() {
   font-size: 12px; white-space: pre-wrap; word-break: break-all;
   margin: 2px 0; color: #c9d1d9; }
 .fatal { margin: 10px 0; }
+.intent-card { margin: 8px 0 8px 24px; padding: 10px 12px;
+  border: 1px solid #f85149; background: #1f1214; border-radius: 8px;
+  cursor: pointer; }
+.intent-head { display: flex; align-items: center; gap: 10px; }
+.intent-title { color: #ff7b72; font-weight: 700; font-size: 13px; }
+.intent-rule { margin-left: auto; max-width: 240px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: #8b949e;
+  font-size: 11px; }
+.intent-reason { color: #e6edf3; font-size: 13px; margin-top: 4px; }
+.intent-detail { margin-top: 8px; color: #c9d1d9; }
 
 .composer { padding: 10px 24px 14px; }
 .composer-box { max-width: 800px; margin: 0 auto; position: relative;
