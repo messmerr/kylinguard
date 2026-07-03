@@ -25,6 +25,19 @@ async def connection_stats() -> str:
 
 
 @mcp.tool()
+async def lsof_listening() -> str:
+    """用 lsof 列出监听 TCP 端口及进程；lsof 不可用时降级为 ss（只读）。"""
+    r = await run_command("lsof -nP -iTCP -sTCP:LISTEN",
+                          timeout=10, max_output=16384)
+    if r.exit_code == 0 and r.stdout.strip():
+        return r.stdout
+    fallback = await run_command("ss -tulnp", timeout=10, max_output=16384)
+    if fallback.exit_code == 0:
+        return "[lsof 不可用，已降级为 ss]\n" + fallback.stdout
+    return f"[采集失败] lsof: {r.stderr or r.stdout}\nss: {fallback.stderr or fallback.stdout}"
+
+
+@mcp.tool()
 async def firewall_status() -> str:
     """查看防火墙当前规则（只读，firewalld）。"""
     r = await run_command("firewall-cmd --list-all", timeout=10,

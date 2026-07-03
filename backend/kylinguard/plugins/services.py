@@ -23,11 +23,19 @@ async def _systemctl(action: str, name: str, *, sudo: bool) -> str:
     if _bad_name(name):
         return f"服务名不合法：{name!r}（只允许字母数字及 .@:-_）"
     settings = get_settings()
-    r = await run_command(
-        f"systemctl {action} {name}",
-        timeout=settings.command_timeout,
-        run_as=settings.exec_user if sudo else "",
-    )
+    if sudo and settings.privileged_helper:
+        # 生产部署中，真正需要 root 的动作只允许通过 root-owned helper。
+        # helper 再做服务名/动作白名单校验，sudoers 只放行这个窄入口。
+        r = await run_command(
+            f"sudo -n {settings.privileged_helper} service {action} {name}",
+            timeout=settings.command_timeout,
+        )
+    else:
+        r = await run_command(
+            f"systemctl {action} {name}",
+            timeout=settings.command_timeout,
+            run_as=settings.exec_user if sudo else "",
+        )
     body = r.stdout or r.stderr
     return f"exit_code={r.exit_code}\n{body}"
 

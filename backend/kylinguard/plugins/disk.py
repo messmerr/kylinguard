@@ -42,6 +42,20 @@ async def disk_hotspots(path: str = "/", depth: int = 2) -> str:
 
 
 @mcp.tool()
+async def io_stats() -> str:
+    """采集磁盘 I/O 统计。优先使用 iostat，不可用时降级读取 /proc/diskstats（只读）。"""
+    r = await run_command("iostat -xz 1 1", timeout=20, max_output=32768)
+    if r.exit_code == 0 and r.stdout.strip():
+        return r.stdout
+    fallback = await run_command("cat /proc/diskstats", timeout=10,
+                                 max_output=32768)
+    if fallback.exit_code == 0 and fallback.stdout.strip():
+        lines = fallback.stdout.splitlines()[:40]
+        return "[iostat 不可用，已降级为 /proc/diskstats 前 40 行]\n" + "\n".join(lines)
+    return f"[采集失败] iostat: {r.stderr or r.stdout}\n/proc/diskstats: {fallback.stderr or fallback.stdout}"
+
+
+@mcp.tool()
 async def large_files(path: str = "/var", min_mb: int = 100) -> str:
     """列出指定目录下超过 min_mb 的大文件。min_mb 取 10-10240（只读）。"""
     if _bad_scan_path(path) or not (10 <= min_mb <= 10240):
@@ -64,8 +78,14 @@ async def clean_file(path: str) -> str:
         return ("拒绝：仅允许清理 /tmp、/var/tmp、/var/cache、/var/log "
                 f"下的文件，{p!r} 不在白名单内")
     settings = get_settings()
-    r = await run_command(f"rm -f {p}", timeout=15,
-                          run_as=settings.exec_user)
+    if settings.privileged_helper:
+        r = await run_command(
+            f"sudo -n {settings.privileged_helper} clean-file {p}",
+            timeout=15,
+        )
+    else:
+        r = await run_command(f"rm -f {p}", timeout=15,
+                              run_as=settings.exec_user)
     if r.exit_code == 0:
         return f"已删除 {p}"
     return f"[删除失败] exit_code={r.exit_code} {r.stderr or r.stdout}"

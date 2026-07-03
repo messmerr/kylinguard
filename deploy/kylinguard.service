@@ -1,0 +1,26 @@
+[Unit]
+Description=KylinGuard secure OS operations agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kylinguard
+Group=kylinguard
+WorkingDirectory=/opt/kylinguard/backend
+EnvironmentFile=/etc/kylinguard/kylinguard.env
+ExecStart=/opt/kylinguard/.venv/bin/python -m uvicorn --factory kylinguard.api:create_app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kylinguard
+ReadOnlyPaths=/opt/kylinguard /etc/kylinguard
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

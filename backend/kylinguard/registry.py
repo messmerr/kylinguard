@@ -17,6 +17,7 @@ TOOL_REGISTRY: dict[str, ToolMeta] = dict([
     # 系统观测（全只读）
     _meta("sysinfo", "system_snapshot", RiskLevel.LOW, description="采集系统整体快照"),
     _meta("sysinfo", "top_processes", RiskLevel.LOW, description="资源占用最高的进程"),
+    _meta("sysinfo", "process_tree", RiskLevel.LOW, description="进程父子关系树"),
     _meta("sysinfo", "disk_usage", RiskLevel.LOW, description="磁盘分区使用情况"),
     # 进程与服务
     _meta("services", "service_status", RiskLevel.LOW, description="查询服务状态"),
@@ -29,11 +30,13 @@ TOOL_REGISTRY: dict[str, ToolMeta] = dict([
     _meta("logs", "tail_file", RiskLevel.LOW, description="查看 /var/log 下日志尾部"),
     # 网络诊断（只读为主）
     _meta("network", "listening_ports", RiskLevel.LOW, description="监听端口与进程"),
+    _meta("network", "lsof_listening", RiskLevel.LOW, description="lsof 视角的监听端口"),
     _meta("network", "connection_stats", RiskLevel.LOW, description="连接数统计"),
     _meta("network", "firewall_status", RiskLevel.LOW, description="防火墙规则查看"),
     _meta("network", "ping_host", RiskLevel.LOW, description="连通性探测"),
     # 磁盘清理（扫描只读，清理高危）
     _meta("disk", "disk_hotspots", RiskLevel.LOW, description="目录占用热点"),
+    _meta("disk", "io_stats", RiskLevel.LOW, description="磁盘 I/O 统计"),
     _meta("disk", "large_files", RiskLevel.LOW, description="大文件扫描"),
     _meta("disk", "clean_file", RiskLevel.HIGH, needs_sudo=True,
           description="删除白名单目录下的文件"),

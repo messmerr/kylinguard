@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from kylinguard.models import ExecResult, RiskLevel
 from kylinguard.registry import get_meta
 
@@ -59,6 +61,28 @@ async def test_restart_service_构造sudo命令(monkeypatch):
     monkeypatch.setattr(services, "run_command", fake_run)
     out = await services.restart_service(name="nginx")
     assert captured["cmd"] == "systemctl restart nginx"
+    assert "done" in out
+
+
+async def test_restart_service_uses_privileged_helper(monkeypatch):
+    import kylinguard.plugins.services as services
+    captured = {}
+
+    async def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["run_as"] = kwargs.get("run_as", "")
+        return ExecResult(exit_code=0, stdout="done", stderr="", duration_ms=1)
+
+    monkeypatch.setattr(services, "run_command", fake_run)
+    monkeypatch.setattr(services, "get_settings", lambda: SimpleNamespace(
+        command_timeout=30,
+        exec_user="kylinguard-exec",
+        privileged_helper="/usr/local/libexec/kylinguard/execctl",
+    ))
+    out = await services.restart_service(name="nginx")
+    assert captured["cmd"] == (
+        "sudo -n /usr/local/libexec/kylinguard/execctl service restart nginx")
+    assert captured["run_as"] == ""
     assert "done" in out
 
 

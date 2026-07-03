@@ -1,0 +1,7 @@
+Defaults:kylinguard !requiretty
+
+# General commands run as the unprivileged execution account.
+kylinguard ALL=(kylinguard-exec) NOPASSWD: ALL
+
+# Privileged operations are narrowed to a root-owned validator helper.
+kylinguard ALL=(root) NOPASSWD: /usr/local/libexec/kylinguard/execctl *

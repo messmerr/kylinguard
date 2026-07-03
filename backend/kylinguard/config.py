@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     command_timeout: int = 30
     output_max_bytes: int = 65536
     exec_user: str = ""  # 生产环境设为 kylinguard-exec；空 = 当前用户（开发）
+    privileged_helper: str = ""  # 生产环境设为 root-owned 受限 helper；空 = 不启用
 
     # 鉴权（管理员账户在首次启动时创建；密码留空则不创建、无法登录）
     admin_user: str = "admin"

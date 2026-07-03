@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  echo "拒绝：$*" >&2
+  exit 64
+}
+
+valid_name() {
+  [[ "$1" =~ ^[A-Za-z0-9_.@:-]+$ ]]
+}
+
+check_service_allowlist() {
+  local unit="$1"
+  local allow="/etc/kylinguard/allowed-services"
+  [ -f "$allow" ] || return 0
+  grep -Fx -- "$unit" "$allow" >/dev/null 2>&1
+}
+
+case "${1:-}" in
+  service)
+    action="${2:-}"
+    unit="${3:-}"
+    [ "$#" -eq 3 ] || die "service 参数必须为：service <start|restart|stop> <unit>"
+    case "$action" in start|restart|stop) ;; *) die "非法 service 动作：$action" ;; esac
+    valid_name "$unit" || die "非法服务名：$unit"
+    check_service_allowlist "$unit" || die "服务未在 /etc/kylinguard/allowed-services 白名单内：$unit"
+    exec /usr/bin/systemctl "$action" "$unit"
+    ;;
+  clean-file)
+    path="${2:-}"
+    [ "$#" -eq 2 ] || die "clean-file 参数必须为：clean-file <path>"
+    [ -n "$path" ] || die "路径为空"
+    resolved="$(realpath -m -- "$path")"
+    case "$resolved" in
+      /tmp/*|/var/tmp/*|/var/cache/*|/var/log/*) ;;
+      *) die "清理路径不在白名单目录内：$resolved" ;;
+    esac
+    [ -f "$resolved" ] || die "只允许删除普通文件：$resolved"
+    exec /usr/bin/rm -f -- "$resolved"
+    ;;
+  *)
+    die "未知动作：${1:-}"
+    ;;
+esac

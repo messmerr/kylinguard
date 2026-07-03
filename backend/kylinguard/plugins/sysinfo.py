@@ -29,6 +29,22 @@ async def top_processes(sort_by: str = "cpu", limit: int = 10) -> str:
 
 
 @mcp.tool()
+async def process_tree(limit: int = 80) -> str:
+    """查看进程父子关系树。limit 可为 10-300（只读）。"""
+    if not (10 <= limit <= 300):
+        return "参数不合法：limit 可为 10-300"
+    r = await run_command(
+        "ps -eo pid,ppid,stat,%cpu,%mem,comm,args --forest",
+        timeout=10,
+        max_output=32768,
+    )
+    if r.exit_code != 0:
+        return f"[执行失败] {r.stderr or r.stdout}"
+    lines = r.stdout.splitlines()
+    return "\n".join(lines[: limit + 1])
+
+
+@mcp.tool()
 async def disk_usage() -> str:
     """查看各磁盘分区使用率。"""
     r = await run_command("df -h", timeout=10, max_output=8192)
