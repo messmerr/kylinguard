@@ -5,8 +5,8 @@
   引号/空格/选项前置等变体绕过；
 - 只读白名单是"命令+参数"级而非命令名级：白名单命令携带危险 flag
   （tail -f、date -s、ip link set）即失去只读资格；
-- "执行其参数"的载荷执行器绝不凭前缀放行：提权/子 shell 类直接拒绝
-  （提权由受限执行器统一管理），其余载荷运行器交后续闸门；
+- "执行其参数"的载荷执行器绝不凭前缀放行：提权/子 shell/解释器/远程下载
+  等载荷运行器直接拒绝；
 - 任何无法解析的输入 fail closed（拒绝），绝不猜测。
 
 执行器不经 shell（argv 直接 exec），元字符本无法生效，
@@ -44,10 +44,20 @@ _PRIVILEGE_ESCALATORS = {
     "sh", "bash", "zsh", "dash", "ksh", "csh", "fish",
 }
 
+# --- 载荷执行器：可把参数、远端内容或脚本解释成动作，run_command 中一律拒绝 ---
+_PAYLOAD_EXECUTORS = {
+    "env", "xargs", "ssh", "scp", "sftp", "docker", "podman", "kubectl",
+    "systemd-run", "crontab", "at", "nohup", "watch", "python", "python3",
+    "perl", "ruby", "node", "php", "lua", "curl", "wget", "nc", "ncat",
+    "socat", "base64", "openssl",
+}
+
 # --- 关键配置文件/目录（安全红线）：写操作拒绝，读操作降级交后续闸门 ---
 _PROTECTED_PREFIXES = (
     "/etc/passwd", "/etc/shadow", "/etc/gshadow", "/etc/sudoers",
-    "/etc/group", "/etc/ssh/", "/etc/pam.d", "/boot/",
+    "/etc/group", "/etc/hosts", "/etc/ssh/", "/etc/pam.d", "/etc/systemd/",
+    "/etc/cron", "/etc/kylin-release", "/boot/", "/root/.ssh/",
+    "/usr/lib/systemd/", "/lib/systemd/", "/var/spool/cron",
 )
 # 写型命令：参数触及保护路径即视为修改企图
 _WRITE_COMMANDS = {
@@ -57,13 +67,25 @@ _WRITE_COMMANDS = {
 # sed/awk 仅带原地编辑 flag 时算写
 _INPLACE_EDITORS = {"sed", "awk", "gawk", "perl"}
 
+_CONTROL_COMMANDS = {
+    "kill", "pkill", "killall", "reboot", "shutdown", "halt", "poweroff",
+    "mount", "umount", "swapoff", "swapon", "service",
+}
+_SYSTEMCTL_MUTATING_SUBCMDS = {
+    "start", "restart", "stop", "reload", "try-restart", "reload-or-restart",
+    "enable", "disable", "mask", "unmask", "reset-failed", "set-property",
+    "edit", "link", "preset", "preset-all", "add-wants", "add-requires",
+    "revert",
+}
+
 # --- 只读白名单：命令名 → 使其失格的危险 flag 集合 ---
 #（单字符项按短选项字符匹配，"--xx" 项按长选项精确匹配）
 _SAFE_COMMANDS: dict[str, set[str]] = {
     "ps": set(), "free": set(), "df": set(), "du": set(), "uptime": set(),
     "uname": set(), "whoami": set(), "id": set(), "hostname": set(),
     "pwd": set(), "ls": set(), "wc": set(), "which": set(), "stat": set(),
-    "nl": set(), "cut": set(), "diff": set(), "last": set(), "lastlog": set(),
+    "nl": set(), "cut": set(), "diff": set(), "last": set(), "lastb": set(),
+    "lastlog": set(),
     "lsblk": set(), "lscpu": set(), "lsmem": set(), "ss": set(),
     "netstat": set(), "cat": set(), "head": set(), "grep": set(),
     "echo": set(),
@@ -128,6 +150,13 @@ def _is_readonly_whitelisted(argv: list[str]) -> bool:
     return False
 
 
+def _is_systemctl_mutation(argv: list[str]) -> bool:
+    if argv[0] != "systemctl":
+        return False
+    words = [t for t in argv[1:] if not t.startswith("-")]
+    return bool(words) and words[0] in _SYSTEMCTL_MUTATING_SUBCMDS
+
+
 def check_command(command: str,
                   extra: ExtraPolicies | None = None) -> RuleVerdict:
     text = command.strip()
@@ -166,6 +195,11 @@ def check_command(command: str,
             f"禁止经 {argv[0]!r} 提权或启动子 shell；"
             "提权由系统受限执行器统一管理", "privilege_escalator")
 
+    if argv[0] in _PAYLOAD_EXECUTORS:
+        return _deny(
+            f"禁止经 {argv[0]!r} 执行脚本、远端载荷或二级命令；"
+            "请改用受控 MCP 插件工具", "payload_executor")
+
     # ⑤ 保护路径写操作：安全红线（自定义保护路径合并）
     protected = _PROTECTED_PREFIXES + (extra.protected if extra else ())
     writes = argv[0] in _WRITE_COMMANDS or (
@@ -174,14 +208,29 @@ def check_command(command: str,
                 for t in argv[1:])
     )
     touches = any(arg.startswith(protected) for arg in argv[1:])
+    whitelisted = _is_readonly_whitelisted(argv) or (
+        extra is not None and argv[0] in extra.readonly)
     if writes and touches:
         return _deny("疑似修改关键（保护）配置文件，安全红线禁止",
                      "protected_path")
 
+    if writes:
+        return _deny(
+            f"自由命令禁止执行写操作 {argv[0]!r}；"
+            "请改用具备参数约束和白名单的结构化 MCP 插件", "mutating_command")
+
+    if argv[0] in _CONTROL_COMMANDS or _is_systemctl_mutation(argv):
+        return _deny(
+            f"自由命令禁止执行控制型操作 {argv[0]!r}；"
+            "服务启停等动作必须走结构化 MCP 插件和最小权限代理", "control_command")
+
+    if argv[0] in _INPLACE_EDITORS and not whitelisted:
+        return _deny(
+            f"自由命令禁止执行解释/编辑器类命令 {argv[0]!r}；"
+            "请改用只读工具或结构化插件", "editor_command")
+
     # ⑥ 只读白名单（命令+参数级）；触及保护路径的读操作降级交后续闸门
     #    自定义白名单为命令名级（管理员显式放行决策）
-    whitelisted = _is_readonly_whitelisted(argv) or (
-        extra is not None and argv[0] in extra.readonly)
     if whitelisted:
         if touches:
             return RuleVerdict(
@@ -191,10 +240,10 @@ def check_command(command: str,
                            reason="命中只读命令白名单（命令与参数均只读）",
                            matched_rule=argv[0])
 
-    # ⑦ 其余（含 ssh/xargs/env/docker 等载荷执行器）：绝不自动放行
+    # ⑦ 其余未知命令：不靠“确认”放行。需要扩展能力时应新增结构化插件或只读白名单。
     return RuleVerdict(
-        decision=RuleDecision.REVIEW,
-        reason="规则层不表态，交由 LLM 审查员与风险门控判定")
+        decision=RuleDecision.DENY,
+        reason="未知自由命令未进入只读白名单，拒绝执行；请改用结构化 MCP 插件")
 
 
 def builtin_rules() -> dict:
@@ -204,8 +253,10 @@ def builtin_rules() -> dict:
                      + [("<argv>rm -r 目标为 /", "递归删除根目录（argv 级判定）")],
         "metachars": _METACHARS.pattern,
         "privilege_escalators": sorted(_PRIVILEGE_ESCALATORS),
+        "payload_executors": sorted(_PAYLOAD_EXECUTORS),
         "protected_prefixes": list(_PROTECTED_PREFIXES),
         "write_commands": sorted(_WRITE_COMMANDS),
+        "control_commands": sorted(_CONTROL_COMMANDS),
         "safe_commands": {cmd: sorted(flags)
                           for cmd, flags in _SAFE_COMMANDS.items()},
         "systemctl_ro_subcmds": sorted(_SYSTEMCTL_RO_SUBCMDS),

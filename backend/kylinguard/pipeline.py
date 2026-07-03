@@ -16,6 +16,7 @@ import uuid
 from kylinguard.audit import AuditLog
 from kylinguard.config import Settings
 from kylinguard.gate import decide
+from kylinguard.intent import screen_user_intent
 from kylinguard.models import (
     GateAction, PlanStep, RuleDecision, RuleVerdict,
 )
@@ -104,6 +105,16 @@ class Pipeline:
 
         conversation = self._get_conversation(session_id)
         await record("user_query", {"query": user_query})
+
+        intent = screen_user_intent(user_query)
+        if intent.decision == RuleDecision.DENY:
+            await record("intent_filter", {"decision": intent.model_dump()})
+            await record("final_answer", {
+                "answer": f"请求已被安全意图校验器拒绝：{intent.reason}",
+                "aborted": True,
+                "elapsed_ms": elapsed_ms(),
+            })
+            return
 
         # ① 感知（走缓存，collected_ago_seconds = 快照距采集的秒数）
         snapshot, age = await self._snapshot_fn()

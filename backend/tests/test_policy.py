@@ -45,7 +45,7 @@ def test_自定义黑名单参与判定(store):
 
 
 def test_自定义白名单参与判定(store):
-    assert check_command("lsattr /var/log").decision == RuleDecision.REVIEW
+    assert check_command("lsattr /var/log").decision == RuleDecision.DENY
     store.add("readonly", "lsattr", "")
     assert check_command("lsattr /var/log",
                          extra=store.extra()).decision == RuleDecision.ALLOW

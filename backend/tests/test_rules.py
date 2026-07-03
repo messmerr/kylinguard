@@ -66,7 +66,7 @@ def test_只读白名单放行(cmd):
     "journalctl -f",
 ])
 def test_其余命令交后续闸门(cmd):
-    assert check_command(cmd).decision == RuleDecision.REVIEW
+    assert check_command(cmd).decision == RuleDecision.DENY
 
 
 def test_读关键文件不误杀():
