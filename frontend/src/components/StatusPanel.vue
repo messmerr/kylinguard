@@ -44,18 +44,39 @@ function brief(key, raw) {
   const lines = raw.split('\n').filter((l) => l.trim())
   switch (key) {
     case 'uptime_load': {
-      const m = raw.match(/load average[s]?:\s*(.+)/)
-      return m ? m[1].split(',')[0].trim() : lines[0]?.slice(0, 16)
+      // Linux: "load average: 0.1"  Windows: "0d 6h 9m  CPU: 4%"
+      const mLinux = raw.match(/load average[s]?:\s*(.+)/)
+      if (mLinux) return mLinux[1].split(',')[0].trim()
+      const mWin = raw.match(/CPU:\s*(\d+)%/)
+      if (mWin) return `CPU ${mWin[1]}%`
+      return lines[0]?.slice(0, 20) || '—'
     }
     case 'memory': {
-      const m = raw.match(/Mem:\s+(\d+)\s+(\d+)/)
-      return m ? `${Math.round(m[2] / m[1] * 100)}% 已用` : '—'
+      // Linux: "Mem:  15585  13177  2408"  Windows: "total=15585MB used=13177MB free=2408MB"
+      const mLinux = raw.match(/Mem:\s+(\d+)\s+(\d+)/)
+      if (mLinux) return `${Math.round(mLinux[2] / mLinux[1] * 100)}% 已用`
+      const mWin = raw.match(/total=(\d+)MB used=(\d+)MB/)
+      if (mWin) return `${Math.round(+mWin[2] / +mWin[1] * 100)}% 已用`
+      return '—'
     }
     case 'disk': {
+      // Linux: "80%"  Windows: "used=439G free=10G" → 计算百分比
       let max = 0
       for (const l of lines.slice(1)) {
-        const m = l.match(/(\d+)%/)
-        if (m) max = Math.max(max, +m[1])
+        const mPct = l.match(/(\d+)%/)
+        if (mPct) { max = Math.max(max, +mPct[1]); continue }
+        const mWin = l.match(/used=([\d.]+)G.*?total=([\d.]+)G|total=([\d.]+)G used=([\d.]+)G/)
+        if (mWin) {
+          const used = +(mWin[1] || mWin[4]), total = +(mWin[2] || mWin[3])
+          if (total > 0) max = Math.max(max, Math.round(used / total * 100))
+        }
+      }
+      // Windows disk 行格式: "C    total=449.4G used=439.3G free=10.1G"
+      if (max === 0) {
+        for (const l of lines) {
+          const m = l.match(/total=([\d.]+)G\s+used=([\d.]+)G/)
+          if (m) max = Math.max(max, Math.round(+m[2] / +m[1] * 100))
+        }
       }
       return `最高 ${max}%`
     }
