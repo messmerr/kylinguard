@@ -1,29 +1,52 @@
 <template>
   <div class="step-block">
-    <div class="step-line" @click="step.expanded = !step.expanded">
-      <span class="dot" :class="riskClass"></span>
-      <code class="tool">{{ shortTool }}</code>
-      <code v-if="argsText" class="args">{{ argsText }}</code>
-      <span class="purpose">{{ step.purpose }}</span>
-      <span class="status" :class="step.status">
-        {{ statusText }}<template v-if="step.durationMs != null"> · {{ durationText }}</template>
-      </span>
+    <div class="step-header" @click="step.expanded = !step.expanded">
+      <span class="bullet" :class="riskClass">●</span>
+      <span class="tool-name">{{ shortTool }}</span>
+      <span v-if="argsText" class="args">{{ argsText }}</span>
+      <span class="spacer"></span>
+      <span class="status-badge" :class="step.status">{{ statusText }}</span>
+      <span v-if="step.durationMs != null" class="duration">{{ durationText }}</span>
+      <span class="chevron" :class="{ open: step.expanded }">›</span>
     </div>
 
-    <!-- 输出预览：完成后默认露出首行，不必点开 -->
-    <pre v-if="preview && !step.expanded" class="preview mono"
-         @click="step.expanded = true">{{ preview }}</pre>
+    <!-- 折叠时：输出首行预览 -->
+    <div v-if="preview && !step.expanded" class="preview-line"
+         @click="step.expanded = true">
+      <span class="tree-indent">│</span>
+      <span class="preview-text">{{ preview }}</span>
+    </div>
 
-    <div v-if="step.expanded" class="detail">
+    <!-- 展开时：三道闸 + 完整输出 -->
+    <div v-if="step.expanded" class="step-body">
       <template v-if="step.verification">
-        <p><span class="label">规则引擎</span>{{ step.verification.rule.reason }}</p>
-        <p><span class="label">LLM 审查员</span>{{ step.verification.review.reason }}</p>
-        <p><span class="label">门控结论</span>{{ step.verification.decision.reason }}</p>
+        <div class="guard-row">
+          <span class="tree-indent">├─</span>
+          <span class="guard-label">规则引擎</span>
+          <span class="guard-text">{{ step.verification.rule.reason }}</span>
+        </div>
+        <div class="guard-row">
+          <span class="tree-indent">├─</span>
+          <span class="guard-label">LLM 审查</span>
+          <span class="guard-text">{{ step.verification.review.reason }}</span>
+        </div>
+        <div class="guard-row">
+          <span class="tree-indent">└─</span>
+          <span class="guard-label">门控结论</span>
+          <span class="guard-text">{{ step.verification.decision.reason }}</span>
+        </div>
       </template>
-      <p v-else class="label">三道闸校验中…</p>
+      <div v-else class="guard-row">
+        <span class="tree-indent">└─</span>
+        <span class="guard-text muted">三道闸校验中…</span>
+      </div>
+
       <template v-if="step.output != null">
-        <div class="label out-label">完整输出</div>
-        <pre class="mono full-output">{{ step.output }}</pre>
+        <div class="output-header">
+          <span class="tree-indent">│</span>
+          <span class="guard-label">输出</span>
+        </div>
+        <pre class="output-block">{{ step.output }}</pre>
       </template>
     </div>
   </div>
@@ -35,31 +58,31 @@ import { computed } from 'vue'
 const props = defineProps({ step: { type: Object, required: true } })
 const step = props.step
 
-const riskLabelMap = { low: '低危', medium: '中危', high: '高危' }
 const shortTool = computed(() => step.tool.split('.').pop())
 
 const argsText = computed(() => {
   const entries = Object.entries(step.args || {})
   if (!entries.length) return ''
   const s = entries.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ')
-  return s.length > 60 ? s.slice(0, 60) + '…' : s
+  return s.length > 72 ? s.slice(0, 72) + '…' : s
 })
 
 const riskClass = computed(() => {
-  if (step.status === 'denied' || step.status === 'skipped') return 'risk-deny'
-  return `risk-${step.verification?.decision.risk || step.risk}`
+  if (step.status === 'denied' || step.status === 'skipped') return 'deny'
+  return step.verification?.decision.risk || step.risk || 'low'
 })
 
 const statusText = computed(() => {
-  const risk = riskLabelMap[step.verification?.decision.risk || step.risk] || ''
+  const risk = { low: '低危', medium: '中危', high: '高危' }[
+    step.verification?.decision.risk || step.risk] || ''
   switch (step.status) {
-    case 'verifying': return '规则引擎校验中…'
-    case 'reviewing': return '独立 LLM 审查中…'
-    case 'waiting': return `⏳ ${risk}，等待确认`
-    case 'running': return '执行中…'
-    case 'done': return step.autoAllowed ? '✓ 自动放行' : '✓ 已执行'
-    case 'denied': return `✗ 已拒绝：${step.denyReason}`
-    case 'skipped': return '✗ 未获批准，已跳过'
+    case 'verifying': return '校验中'
+    case 'reviewing': return '审查中'
+    case 'waiting':   return `${risk} · 等待确认`
+    case 'running':   return '执行中'
+    case 'done':      return step.autoAllowed ? `${risk} · 自动放行` : `${risk} · 已执行`
+    case 'denied':    return `已拒绝`
+    case 'skipped':   return '已跳过'
     default: return ''
   }
 })
@@ -71,43 +94,83 @@ const durationText = computed(() => {
 
 const preview = computed(() => {
   if (step.status !== 'done' || !step.output) return ''
-  const lines = step.output.split('\n').filter((l) => l.trim())
-  const head = lines.slice(0, 2).join('\n')
-  return lines.length > 2 ? head + '\n…' : head
+  const lines = step.output.split('\n').filter(l => l.trim())
+  const head = lines.slice(0, 2).join('  ')
+  return lines.length > 2 ? head + '  …' : head
 })
 </script>
 
 <style scoped>
-.step-block { margin: 2px 0; }
-.step-line { display: flex; align-items: baseline; gap: 8px;
-  padding: 4px 8px; font-size: 13px; color: #c9d1d9; cursor: pointer;
-  border-radius: 6px; line-height: 1.5; }
-.step-line:hover { background: #161b22; }
-.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-  align-self: center; }
-.dot.risk-low { background: #3fb950; }
-.dot.risk-medium { background: #d29922; }
-.dot.risk-high, .dot.risk-deny { background: #f85149; }
-.tool { color: #79c0ff; font-size: 12px;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-.args { color: #8b949e; font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-.purpose { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status { margin-left: auto; flex-shrink: 0; font-size: 12px; color: #8b949e; }
-.status.done { color: #3fb950; }
-.status.denied, .status.skipped { color: #f85149; }
-.status.waiting { color: #d29922; }
-.status.verifying, .status.reviewing { color: #58a6ff; }
-.preview { margin: 0 0 2px 24px; padding: 6px 10px; background: #10141a;
-  border-left: 2px solid #21262d; border-radius: 0 6px 6px 0;
-  color: #8b949e; cursor: pointer; }
-.preview:hover { color: #c9d1d9; }
-.detail { margin: 2px 0 8px 24px; padding: 8px 12px; background: #161b22;
-  border-radius: 8px; font-size: 12px; color: #c9d1d9; }
-.detail p { margin: 3px 0; }
-.label { color: #8b949e; margin-right: 8px; }
-.out-label { margin-top: 8px; }
-.full-output { max-height: 320px; overflow-y: auto; }
-.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+.step-block { margin: 3px 0; }
+
+.step-header {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 6px; border-radius: 5px;
+  font-size: 13px; cursor: pointer; user-select: none;
+  transition: background 0.1s;
+}
+.step-header:hover { background: #0d1117; }
+
+.bullet { font-size: 9px; flex-shrink: 0; line-height: 1; }
+.bullet.low    { color: #3fb950; }
+.bullet.medium { color: #d29922; }
+.bullet.high   { color: #f85149; }
+.bullet.deny   { color: #f85149; }
+
+.tool-name {
+  color: #79c0ff; font-size: 12px; font-weight: 600;
+  font-family: ui-monospace, Consolas, monospace; flex-shrink: 0;
+}
+.args {
+  color: #6e7681; font-size: 11px;
+  font-family: ui-monospace, Consolas, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+.spacer { flex: 1; }
+
+.status-badge { font-size: 11px; flex-shrink: 0; color: #6e7681; }
+.status-badge.done    { color: #3fb950; }
+.status-badge.denied,
+.status-badge.skipped { color: #f85149; }
+.status-badge.waiting { color: #d29922; }
+.status-badge.verifying,
+.status-badge.reviewing { color: #58a6ff; }
+
+.duration { font-size: 11px; color: #484f58; font-family: ui-monospace, Consolas, monospace; flex-shrink: 0; }
+.chevron { font-size: 13px; color: #484f58; flex-shrink: 0; transition: transform 0.15s; }
+.chevron.open { transform: rotate(90deg); }
+
+.tree-indent {
+  color: #30363d; font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px; flex-shrink: 0; width: 22px;
+}
+
+.preview-line {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 1px 6px 1px 16px; cursor: pointer;
+}
+.preview-text {
+  font-size: 11px; color: #484f58; font-family: ui-monospace, Consolas, monospace;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: color 0.1s;
+}
+.preview-line:hover .preview-text { color: #8b949e; }
+
+.step-body { padding: 2px 6px 6px 16px; }
+
+.guard-row { display: flex; align-items: baseline; gap: 6px; padding: 1px 0; }
+.guard-label {
+  color: #6e7681; font-size: 11px; font-weight: 600; flex-shrink: 0; width: 52px;
+}
+.guard-text { font-size: 12px; color: #8b949e; }
+.guard-text.muted { color: #484f58; }
+
+.output-header { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.output-block {
+  margin: 3px 0 0 22px; padding: 8px 10px;
+  background: #010409; border: 1px solid #1e2430; border-radius: 6px;
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+  color: #8b949e; white-space: pre-wrap; word-break: break-all;
+  max-height: 280px; overflow-y: auto; line-height: 1.5;
+}
 </style>

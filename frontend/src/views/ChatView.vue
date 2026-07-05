@@ -5,13 +5,20 @@
       <div class="chat" ref="chatRef">
         <div class="chat-inner">
           <div v-if="!items.length" class="welcome">
-            <div class="welcome-logo">🛡</div>
-            <div class="welcome-title">麒盾 KylinGuard</div>
+            <div class="welcome-title">KylinGuard</div>
             <div class="welcome-sub">用自然语言下达运维指令，五阶段安全流水线全程护航</div>
+            <div class="welcome-hints">
+              <span class="hint">查看磁盘使用情况</span>
+              <span class="hint">列出 CPU 占用最高的进程</span>
+              <span class="hint">检查失败的服务</span>
+            </div>
           </div>
 
           <template v-for="(it, i) in items" :key="i">
-            <div v-if="it.kind === 'user'" class="bubble user">{{ it.text }}</div>
+            <div v-if="it.kind === 'user'" class="user-prompt">
+              <span class="user-chevron">›</span>
+              <span class="user-text">{{ it.text }}</span>
+            </div>
 
             <div v-else-if="it.kind === 'snapshot'" class="trace-line clickable"
                  @click="it.expanded = !it.expanded">
@@ -61,12 +68,14 @@
       <div class="composer">
         <div class="composer-box">
           <el-input v-model="input" type="textarea" :rows="1" autosize
-                    resize="none" placeholder="用自然语言下达运维指令…"
+                    resize="none" placeholder="输入运维指令…"
                     :disabled="running" @keydown.enter.exact.prevent="submit" />
-          <el-button class="send-btn" type="primary" circle
-                     :loading="running" @click="submit">↑</el-button>
+          <button class="send-btn" :disabled="running || !input.trim()" @click="submit">
+            <span v-if="running" class="send-spinner"></span>
+            <span v-else>↑</span>
+          </button>
         </div>
-        <div class="composer-hint">Enter 发送 · 中高危操作将请求确认 · 全程审计留痕</div>
+        <div class="composer-hint">Enter 发送 · 中高危操作请求确认 · 全程审计留痕</div>
       </div>
     </main>
     <StatusPanel v-if="showPanel" />
@@ -155,14 +164,30 @@ async function submit() {
 .chat { flex: 1; overflow-y: auto; }
 .chat-inner { max-width: 800px; margin: 0 auto; padding: 20px 24px 30px; }
 
-.welcome { text-align: center; margin-top: 16vh; }
-.welcome-logo { font-size: 44px; }
-.welcome-title { font-size: 22px; font-weight: 700; margin-top: 10px; }
-.welcome-sub { color: #8b949e; font-size: 13px; margin-top: 6px; }
+.welcome { text-align: center; margin-top: 14vh; }
+.welcome-title {
+  font-size: 20px; font-weight: 700; color: #e6edf3;
+  font-family: ui-monospace, Consolas, monospace; letter-spacing: 0.04em;
+}
+.welcome-sub { color: #6e7681; font-size: 13px; margin-top: 8px; }
+.welcome-hints { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 20px; }
+.hint {
+  padding: 6px 14px; border: 1px solid #21262d; border-radius: 6px;
+  font-size: 12px; color: #8b949e; cursor: pointer; transition: border-color 0.15s, color 0.15s;
+}
+.hint:hover { border-color: #58a6ff; color: #c9d1d9; }
 
-.bubble.user { max-width: 620px; margin: 16px 0 16px auto; width: fit-content;
-  background: #1f6feb; color: #fff; padding: 10px 14px; border-radius: 12px;
-  white-space: pre-wrap; font-size: 14px; line-height: 1.6; }
+.user-prompt {
+  display: flex; align-items: baseline; gap: 10px;
+  margin: 18px 0 6px; padding: 0 2px;
+}
+.user-chevron {
+  color: #58a6ff; font-size: 16px; flex-shrink: 0; line-height: 1;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.user-text {
+  font-size: 14px; color: #e6edf3; white-space: pre-wrap; line-height: 1.6;
+}
 
 .assistant { margin: 10px 0; font-size: 14px; color: #e6edf3; }
 .assistant.thinking { color: #8b949e; font-size: 13px;
@@ -208,15 +233,32 @@ async function submit() {
 .intent-reason { color: #e6edf3; font-size: 13px; margin-top: 4px; }
 .intent-detail { margin-top: 8px; color: #c9d1d9; }
 
-.composer { padding: 10px 24px 14px; }
-.composer-box { max-width: 800px; margin: 0 auto; position: relative;
-  background: #161b22; border: 1px solid #30363d; border-radius: 14px;
-  padding: 8px 52px 8px 12px; transition: border-color 0.2s; }
-.composer-box:focus-within { border-color: #58a6ff; }
-.composer-box :deep(.el-textarea__inner) { background: transparent;
-  border: none; box-shadow: none; color: #e6edf3; font-size: 14px;
-  max-height: 160px; }
-.send-btn { position: absolute; right: 8px; bottom: 8px; }
-.composer-hint { max-width: 800px; margin: 6px auto 0; text-align: center;
+.composer { padding: 8px 24px 12px; }
+.composer-box {
+  max-width: 800px; margin: 0 auto; position: relative;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+  padding: 8px 48px 8px 14px; transition: border-color 0.15s;
+}
+.composer-box:focus-within { border-color: #388bfd; }
+.composer-box :deep(.el-textarea__inner) {
+  background: transparent; border: none; box-shadow: none;
+  color: #e6edf3; font-size: 14px; max-height: 180px;
+  font-family: inherit; padding: 0;
+}
+.send-btn {
+  position: absolute; right: 8px; bottom: 8px;
+  width: 30px; height: 30px; border-radius: 6px;
+  background: #238636; border: none; color: #fff; font-size: 15px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s;
+}
+.send-btn:hover:not(:disabled) { background: #2ea043; }
+.send-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+.send-spinner {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid #484f58; border-top-color: #e6edf3;
+  animation: spin 0.7s linear infinite;
+}
+.composer-hint { max-width: 800px; margin: 5px auto 0; text-align: center;
   font-size: 11px; color: #484f58; }
 </style>
