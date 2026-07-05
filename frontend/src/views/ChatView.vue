@@ -8,9 +8,9 @@
             <div class="welcome-title">KylinGuard</div>
             <div class="welcome-sub">用自然语言下达运维指令，五阶段安全流水线全程护航</div>
             <div class="welcome-hints">
-              <span class="hint">查看磁盘使用情况</span>
-              <span class="hint">列出 CPU 占用最高的进程</span>
-              <span class="hint">检查失败的服务</span>
+              <span class="hint" @click="sendHint('查看磁盘使用情况')">查看磁盘使用情况</span>
+              <span class="hint" @click="sendHint('列出 CPU 占用最高的进程')">列出 CPU 占用最高的进程</span>
+              <span class="hint" @click="sendHint('检查失败的服务')">检查失败的服务</span>
             </div>
           </div>
 
@@ -154,6 +154,11 @@ async function submit() {
   const text = input.value.trim()
   if (!text) return
   input.value = ''
+  await sendMessage(text, { onUpdate: scrollToBottom })
+}
+
+async function sendHint(text) {
+  if (running.value) return
   await sendMessage(text, { onUpdate: scrollToBottom })
 }
 </script>
