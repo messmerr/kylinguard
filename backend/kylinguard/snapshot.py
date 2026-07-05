@@ -5,11 +5,54 @@ SnapshotCache 后台定时刷新，请求路径零采集延迟；该缓存同时
 仪表盘（M2）的数据源。
 """
 import asyncio
+import sys
 import time
 
 from kylinguard.executor import run_command
 
-_SNAPSHOT_COMMANDS: dict[str, str] = {
+_IS_WINDOWS = sys.platform == "win32"
+
+# Windows 下用 argv 列表避免 shlex.split 破坏 PowerShell 脚本
+_PS = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]
+
+_SNAPSHOT_COMMANDS_WINDOWS: dict[str, list[str]] = {
+    "uptime_load": _PS + [
+        "$up=(Get-Date)-(Get-CimInstance Win32_OperatingSystem).LastBootUpTime;"
+        "$load=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;"
+        "'{0}d {1}h {2}m  CPU: {3}%' -f $up.Days,$up.Hours,$up.Minutes,[int]$load"
+    ],
+    "memory": _PS + [
+        "$os=Get-CimInstance Win32_OperatingSystem;"
+        "$t=[math]::Round($os.TotalVisibleMemorySize/1KB);"
+        "$f=[math]::Round($os.FreePhysicalMemory/1KB);"
+        "'total={0}MB used={1}MB free={2}MB' -f $t,($t-$f),$f"
+    ],
+    "disk": _PS + [
+        "Get-PSDrive -PSProvider FileSystem|Where-Object{$_.Used -ne $null}|"
+        "ForEach-Object{"
+        "$t=[math]::Round(($_.Used+$_.Free)/1GB,1);"
+        "$u=[math]::Round($_.Used/1GB,1);"
+        "$fr=[math]::Round($_.Free/1GB,1);"
+        "'{0,-4} total={1}G used={2}G free={3}G' -f $_.Name,$t,$u,$fr}"
+    ],
+    "top_cpu": _PS + [
+        "Get-Process|Sort-Object CPU -Descending|Select-Object -First 15|"
+        "Format-Table -AutoSize Name,Id,"
+        "@{n='CPU(s)';e={[math]::Round($_.CPU,1)}},"
+        "@{n='Mem(MB)';e={[math]::Round($_.WorkingSet/1MB,1)}}|Out-String"
+    ],
+    "failed_units": _PS + [
+        "Get-Service|Where-Object{$_.Status -eq 'Stopped' -and $_.StartType -eq 'Automatic'}|"
+        "Select-Object Name,DisplayName,Status|Format-Table -AutoSize|Out-String"
+    ],
+    "recent_errors": _PS + [
+        "Get-WinEvent -FilterHashtable @{LogName='System';Level=2} -MaxEvents 20 "
+        "-ErrorAction SilentlyContinue|"
+        "ForEach-Object{'['+$_.TimeCreated.ToString('MM-dd HH:mm')+'] '+$_.ProviderName+': '+($_.Message -split \"`n\")[0]}"
+    ],
+}
+
+_SNAPSHOT_COMMANDS_LINUX: dict[str, str] = {
     "uptime_load": "uptime",
     "memory": "free -m",
     "disk": "df -h",
@@ -18,6 +61,10 @@ _SNAPSHOT_COMMANDS: dict[str, str] = {
     "recent_errors": "journalctl -p err -n 20 --no-pager",
 }
 
+_SNAPSHOT_COMMANDS: dict = (
+    _SNAPSHOT_COMMANDS_WINDOWS if _IS_WINDOWS else _SNAPSHOT_COMMANDS_LINUX
+)
+
 _TITLES = {
     "uptime_load": "运行时长与负载", "memory": "内存(MB)", "disk": "磁盘",
     "top_cpu": "CPU 占用最高进程", "failed_units": "失败的服务",
@@ -25,8 +72,11 @@ _TITLES = {
 }
 
 
-async def _collect_one(key: str, cmd: str) -> tuple[str, str]:
-    r = await run_command(cmd, timeout=10, max_output=4096)
+async def _collect_one(key: str, cmd: str | list[str]) -> tuple[str, str]:
+    if isinstance(cmd, list):
+        r = await run_command(cmd, timeout=15, max_output=4096)
+    else:
+        r = await run_command(cmd, timeout=10, max_output=4096)
     if r.exit_code == 0:
         return key, r.stdout.strip() or "(无输出)"
     return key, f"[采集失败] {(r.stderr or r.stdout).strip()}"

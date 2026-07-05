@@ -19,7 +19,8 @@ async def test_全部采集成功(monkeypatch):
 
 async def test_单项失败降级不抛错(monkeypatch):
     async def fake_run(cmd, **kwargs):
-        if cmd.startswith("journalctl"):
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+        if "journalctl" in cmd_str or "recent_errors" in cmd_str or "WinEvent" in cmd_str:
             return _result(1, "", "权限不足")
         return _result(0, "ok")
 

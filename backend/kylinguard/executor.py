@@ -23,13 +23,16 @@ def _decode(data: bytes, max_output: int) -> tuple[str, bool]:
     return text, truncated
 
 
-async def run_command(command: str, *, timeout: int = 30,
+async def run_command(command: str | list[str], *, timeout: int = 30,
                       max_output: int = 65536, run_as: str = "") -> ExecResult:
-    try:
-        argv = shlex.split(command)
-    except ValueError as e:
-        return ExecResult(exit_code=127, stdout="",
-                          stderr=f"命令无法解析：{e}", duration_ms=0)
+    if isinstance(command, list):
+        argv = command
+    else:
+        try:
+            argv = shlex.split(command)
+        except ValueError as e:
+            return ExecResult(exit_code=127, stdout="",
+                              stderr=f"命令无法解析：{e}", duration_ms=0)
     if not argv:
         return ExecResult(exit_code=127, stdout="",
                           stderr="空命令", duration_ms=0)
