@@ -52,6 +52,7 @@ const VIEWS = [
   { key: 'audit',     icon: '◎', label: '审计回放' },
   { key: 'policy',    icon: '⊞', label: '策略管理' },
   { key: 'dashboard', icon: '▤', label: '仪表盘'   },
+  { key: 'alerts',    icon: '⚑', label: '告警配置' },
 ]
 
 function timeText(ts) {

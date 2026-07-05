@@ -7,6 +7,7 @@
       <AuditView v-else-if="view === 'audit'" />
       <PolicyView v-else-if="view === 'policy'" />
       <DashboardView v-else-if="view === 'dashboard'" />
+      <AlertsView v-else-if="view === 'alerts'" />
     </div>
   </div>
 </template>
@@ -19,6 +20,7 @@ import AuditView from './views/AuditView.vue'
 import ChatView from './views/ChatView.vue'
 import DashboardView from './views/DashboardView.vue'
 import LoginView from './views/LoginView.vue'
+import AlertsView from './views/AlertsView.vue'
 import PolicyView from './views/PolicyView.vue'
 import Sidebar from './components/Sidebar.vue'
 

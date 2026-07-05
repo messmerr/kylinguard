@@ -254,7 +254,11 @@ class SnapshotCache:
 
     get() 返回 (快照, 距采集的秒数)；缓存为空时（服务刚启动）触发一次
     即时采集兜底。collect_snapshot 自身逐项降级不抛错，轮询循环再兜一层
-    防止意外异常杀死后台任务。每轮刷新后自动检测异常并注入 AlertStore。
+    防止意外异常杀死后台任务。
+
+    每轮刷新后：
+    1. 用内置规则（detect_anomalies）维护 in-memory AlertStore（供状态面板展示）
+    2. 若注入了 AlertRuleStore，则按用户配置规则评估 → 推送 → 写历史
     """
 
     def __init__(self, interval: float = 30):
@@ -264,10 +268,14 @@ class SnapshotCache:
         self._task: asyncio.Task | None = None
         self._refresh_lock = asyncio.Lock()
         self._alert_store = AlertStore()
+        self._rule_store = None   # 由 api.py 通过 set_rule_store() 注入
 
     @property
-    def alert_store(self) -> AlertStore:
+    def alert_store(self) -> "AlertStore":
         return self._alert_store
+
+    def set_rule_store(self, rule_store) -> None:
+        self._rule_store = rule_store
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._poll_loop())
@@ -286,7 +294,7 @@ class SnapshotCache:
             try:
                 await self.refresh()
             except Exception:
-                pass  # 单轮失败不退出，下一轮重试
+                pass
             await asyncio.sleep(self._interval)
 
     async def refresh(self) -> None:
@@ -296,9 +304,75 @@ class SnapshotCache:
             try:
                 self._alert_store.ingest(detect_anomalies(self._snapshot))
             except Exception:
-                pass  # 告警检测失败不影响快照本身
+                pass
+            if self._rule_store is not None:
+                try:
+                    await _evaluate_rules(self._snapshot, self._rule_store)
+                except Exception:
+                    pass
 
     async def get(self) -> tuple[dict[str, str], float]:
         if self._snapshot is None:
             await self.refresh()
         return self._snapshot, time.monotonic() - self._collected_at
+
+
+async def _evaluate_rules(snapshot: dict[str, str], rule_store) -> None:
+    """按用户配置规则评估快照，触发告警时推送并写历史。"""
+    from kylinguard.alert_pusher import push_all
+
+    # 提取当前指标值
+    metrics: dict[str, float | None] = {
+        "memory_pct": _parse_memory_pct(snapshot),
+        "cpu_pct": _parse_cpu_pct(snapshot),
+        "failed_services": 1.0 if _has_failed_units(snapshot) else 0.0,
+    }
+    for name, pct in _parse_disk_pcts(snapshot):
+        metrics[f"disk_pct_{name}"] = float(pct)
+        metrics["disk_pct"] = float(pct)  # 任意磁盘最大值覆盖
+
+    now = time.time()
+    for rule in rule_store.list_rules():
+        if not rule.enabled:
+            continue
+        val = metrics.get(rule.metric)
+        if val is None:
+            continue
+        # 评估条件
+        triggered = (rule.operator == ">=" and val >= rule.threshold) or \
+                    (rule.operator == ">"  and val >  rule.threshold) or \
+                    (rule.operator == "<=" and val <= rule.threshold) or \
+                    (rule.operator == "<"  and val <  rule.threshold)
+        if not triggered:
+            continue
+        # 检查冷却期
+        last = rule_store.get_last_fired(rule.id)
+        if now - last < rule.silence_minutes * 60:
+            continue
+
+        rule_store.update_last_fired(rule.id)
+
+        # 构建推送载荷
+        metric_value = f"{val:.0f}%"
+        payload = {
+            "rule_name": rule.name,
+            "metric": rule.metric,
+            "metric_value": metric_value,
+            "severity": rule.severity,
+            "title": rule.name,
+            "message": f"{rule.metric} 当前值 {metric_value}，触发规则「{rule.name}」",
+        }
+
+        # 推送到关联渠道
+        channels = [rule_store.get_channel(cid) for cid in rule.channel_ids
+                    if rule_store.get_channel(cid)]
+        notified = await push_all(channels, payload)
+
+        # 写历史
+        rule_store.add_history(
+            rule_id=rule.id, rule_name=rule.name,
+            metric=rule.metric, metric_value=metric_value,
+            severity=rule.severity,
+            message=payload["message"],
+            channels_notified=notified,
+        )

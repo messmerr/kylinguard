@@ -9,3 +9,5 @@ dist/
 .venv/
 data/
 *.egg-info/
+.gitignore
+赛题要求.md

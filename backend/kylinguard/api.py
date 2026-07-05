@@ -27,6 +27,8 @@ from kylinguard.planner import Planner
 from kylinguard.policy import KINDS, PolicyStore
 from kylinguard.reviewer import Reviewer
 from kylinguard.rules import builtin_rules
+from kylinguard.alert_rules import AlertRuleStore
+from kylinguard.alert_pusher import push_channel
 from kylinguard.sessions import SessionStore
 from kylinguard.snapshot import SnapshotCache
 
@@ -54,6 +56,24 @@ class PolicyRequest(BaseModel):
     note: str = ""
 
 
+class AlertRuleRequest(BaseModel):
+    name: str
+    metric: str
+    operator: str = ">="
+    threshold: float = 90.0
+    severity: str = "warning"
+    silence_minutes: int = 10
+    channel_ids: list[int] = []
+    enabled: bool = True
+
+
+class AlertChannelRequest(BaseModel):
+    name: str
+    type: str
+    config: dict
+    enabled: bool = True
+
+
 def create_app(settings: Settings | None = None,
                *, with_tools: bool = True) -> FastAPI:
     settings = settings or get_settings()
@@ -66,6 +86,8 @@ def create_app(settings: Settings | None = None,
     tools = ToolManager()
     confirmations = Confirmations()
     snapshot_cache = SnapshotCache(settings.snapshot_interval)
+    alert_rule_store = AlertRuleStore(settings.db_path)
+    snapshot_cache.set_rule_store(alert_rule_store)
     planner_llm, reviewer_llm = build_clients(settings)
     pipeline = Pipeline(
         settings=settings, audit=audit, tools=tools,
@@ -88,6 +110,7 @@ def create_app(settings: Settings | None = None,
         sessions.close()
         auth_store.close()
         policies.close()
+        alert_rule_store.close()
         audit.close()
 
     app = FastAPI(title="麒盾 KylinGuard", lifespan=lifespan)
@@ -96,6 +119,7 @@ def create_app(settings: Settings | None = None,
     app.state.audit = audit
     app.state.sessions = sessions
     app.state.snapshot_cache = snapshot_cache
+    app.state.alert_rule_store = alert_rule_store
     app.state.auth = auth_store
     app.state.tokens = tokens
     app.state.policies = policies
@@ -219,6 +243,96 @@ def create_app(settings: Settings | None = None,
     async def ack_alert(alert_id: str, _user: str = Depends(require_auth)):
         if not app.state.snapshot_cache.alert_store.ack(alert_id):
             raise HTTPException(404, "告警不存在")
+        return {"ok": True}
+
+    # ---- 告警规则 ----
+
+    @app.get("/api/alert-rules")
+    async def list_alert_rules(_user: str = Depends(require_auth)):
+        rules = app.state.alert_rule_store.list_rules()
+        return {"rules": [vars(r) for r in rules]}
+
+    @app.post("/api/alert-rules")
+    async def create_alert_rule(req: AlertRuleRequest,
+                                _user: str = Depends(require_auth)):
+        rid = app.state.alert_rule_store.add_rule(
+            req.name, req.metric, req.operator, req.threshold,
+            req.severity, req.silence_minutes, req.channel_ids, req.enabled)
+        return {"id": rid}
+
+    @app.put("/api/alert-rules/{rule_id}")
+    async def update_alert_rule(rule_id: int, req: AlertRuleRequest,
+                                _user: str = Depends(require_auth)):
+        ok = app.state.alert_rule_store.update_rule(
+            rule_id, name=req.name, metric=req.metric, operator=req.operator,
+            threshold=req.threshold, severity=req.severity,
+            silence_minutes=req.silence_minutes,
+            channel_ids=req.channel_ids, enabled=req.enabled)
+        if not ok:
+            raise HTTPException(404, "规则不存在")
+        return {"ok": True}
+
+    @app.delete("/api/alert-rules/{rule_id}")
+    async def delete_alert_rule(rule_id: int, _user: str = Depends(require_auth)):
+        if not app.state.alert_rule_store.delete_rule(rule_id):
+            raise HTTPException(404, "规则不存在")
+        return {"ok": True}
+
+    # ---- 推送渠道 ----
+
+    @app.get("/api/alert-channels")
+    async def list_alert_channels(_user: str = Depends(require_auth)):
+        channels = app.state.alert_rule_store.list_channels()
+        return {"channels": [vars(c) for c in channels]}
+
+    @app.post("/api/alert-channels")
+    async def create_alert_channel(req: AlertChannelRequest,
+                                   _user: str = Depends(require_auth)):
+        cid = app.state.alert_rule_store.add_channel(
+            req.name, req.type, req.config, req.enabled)
+        return {"id": cid}
+
+    @app.put("/api/alert-channels/{ch_id}")
+    async def update_alert_channel(ch_id: int, req: AlertChannelRequest,
+                                   _user: str = Depends(require_auth)):
+        ok = app.state.alert_rule_store.update_channel(
+            ch_id, name=req.name, type=req.type,
+            config=req.config, enabled=req.enabled)
+        if not ok:
+            raise HTTPException(404, "渠道不存在")
+        return {"ok": True}
+
+    @app.delete("/api/alert-channels/{ch_id}")
+    async def delete_alert_channel(ch_id: int,
+                                   _user: str = Depends(require_auth)):
+        if not app.state.alert_rule_store.delete_channel(ch_id):
+            raise HTTPException(404, "渠道不存在")
+        return {"ok": True}
+
+    @app.post("/api/alert-channels/{ch_id}/test")
+    async def test_alert_channel(ch_id: int, _user: str = Depends(require_auth)):
+        ch = app.state.alert_rule_store.get_channel(ch_id)
+        if not ch:
+            raise HTTPException(404, "渠道不存在")
+        payload = {
+            "rule_name": "测试推送",
+            "metric": "test", "metric_value": "—",
+            "severity": "warning", "title": "KylinGuard 测试告警",
+            "message": "这是一条来自 KylinGuard 的测试推送，渠道配置正确。",
+        }
+        ok, msg = await push_channel(ch, payload)
+        return {"ok": ok, "message": msg}
+
+    # ---- 告警历史 ----
+
+    @app.get("/api/alert-history")
+    async def list_alert_history(_user: str = Depends(require_auth)):
+        entries = app.state.alert_rule_store.list_history()
+        return {"history": [vars(e) for e in entries]}
+
+    @app.delete("/api/alert-history")
+    async def clear_alert_history(_user: str = Depends(require_auth)):
+        app.state.alert_rule_store.clear_history()
         return {"ok": True}
 
     @app.get("/api/policies")

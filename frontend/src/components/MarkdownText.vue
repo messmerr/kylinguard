@@ -22,17 +22,25 @@ const md = new MarkdownIt({
   },
 })
 
-const SECTION_COLORS = {
-  '问题现象': 'sec-blue',
-  '根因定位': 'sec-red',
-  '处置操作': 'sec-green',
-  '后续建议': 'sec-yellow',
+const SECTION_RULES = [
+  { keywords: ['问题', '现象', '状态', '概况'], cls: 'sec-blue'   },
+  { keywords: ['根因', '原因', '分析', '定位'], cls: 'sec-red'    },
+  { keywords: ['处置', '操作', '执行', '步骤'], cls: 'sec-green'  },
+  { keywords: ['建议', '后续', '预防', '监控'], cls: 'sec-yellow' },
+]
+
+function sectionClass(title) {
+  const t = title.trim()
+  for (const { keywords, cls } of SECTION_RULES) {
+    if (keywords.some(k => t.includes(k))) return cls
+  }
+  return ''
 }
 
 const html = computed(() => {
   const rendered = md.render(props.text || '')
   return rendered.replace(/<h2>(.*?)<\/h2>/g, (_, title) => {
-    const cls = SECTION_COLORS[title.trim()] || ''
+    const cls = sectionClass(title)
     return `<h2 class="${cls}">${title}</h2>`
   })
 })
