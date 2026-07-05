@@ -203,9 +203,13 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/api/status")
     async def status(_user: str = Depends(require_auth)):
+        import json as _j
         snapshot, age = await app.state.snapshot_cache.get()
-        return {"snapshot": snapshot,
-                "collected_ago_seconds": round(age, 1)}
+        body = _j.dumps({"snapshot": snapshot,
+                          "collected_ago_seconds": round(age, 1)},
+                        ensure_ascii=False)
+        from fastapi.responses import Response as _R
+        return _R(content=body.encode("utf-8"), media_type="application/json")
 
     @app.get("/api/alerts")
     async def list_alerts(_user: str = Depends(require_auth)):

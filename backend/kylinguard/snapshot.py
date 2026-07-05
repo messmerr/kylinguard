@@ -293,7 +293,10 @@ class SnapshotCache:
         async with self._refresh_lock:
             self._snapshot = await collect_snapshot()
             self._collected_at = time.monotonic()
-            self._alert_store.ingest(detect_anomalies(self._snapshot))
+            try:
+                self._alert_store.ingest(detect_anomalies(self._snapshot))
+            except Exception:
+                pass  # 告警检测失败不影响快照本身
 
     async def get(self) -> tuple[dict[str, str], float]:
         if self._snapshot is None:
