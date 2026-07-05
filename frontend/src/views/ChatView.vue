@@ -36,6 +36,8 @@
                  class="assistant" :class="[it.role, { aborted: it.aborted }]">
               <MarkdownText :text="it.text" />
               <span v-if="it.streaming" class="cursor">▍</span>
+              <button v-if="it.isReport && !it.streaming"
+                      class="dl-btn" @click="downloadReport(it.text)">↓ 下载 Markdown</button>
             </div>
 
             <TraceStep v-else-if="it.kind === 'step'" :step="it" />
@@ -75,7 +77,11 @@
             <span v-else>↑</span>
           </button>
         </div>
-        <div class="composer-hint">Enter 发送 · 中高危操作请求确认 · 全程审计留痕</div>
+        <div class="composer-footer">
+          <span class="composer-hint">Enter 发送 · 中高危操作请求确认 · 全程审计留痕</span>
+          <button v-if="activeId && items.length" class="report-btn"
+                  :disabled="running" @click="genReport">生成运维报告</button>
+        </div>
       </div>
     </main>
     <StatusPanel v-if="showPanel" />
@@ -89,7 +95,7 @@ import MarkdownText from '../components/MarkdownText.vue'
 import Sidebar from '../components/Sidebar.vue'
 import StatusPanel from '../components/StatusPanel.vue'
 import TraceStep from '../components/TraceStep.vue'
-import { items, phase, running, sendMessage } from '../composables/useChat.js'
+import { activeId, generateReport, items, phase, running, sendMessage } from '../composables/useChat.js'
 
 defineProps({
   showSidebar: { type: Boolean, default: true },
@@ -160,6 +166,20 @@ async function submit() {
 async function sendHint(text) {
   if (running.value) return
   await sendMessage(text, { onUpdate: scrollToBottom })
+}
+
+async function genReport() {
+  await generateReport({ onUpdate: scrollToBottom })
+}
+
+function downloadReport(text) {
+  const date = new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')
+  const blob = new Blob([text], { type: 'text/markdown; charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `运维报告_${date}.md`
+  a.click()
+  URL.revokeObjectURL(a.href)
 }
 </script>
 
@@ -264,6 +284,22 @@ async function sendHint(text) {
   border: 2px solid #484f58; border-top-color: #e6edf3;
   animation: spin 0.7s linear infinite;
 }
-.composer-hint { max-width: 800px; margin: 5px auto 0; text-align: center;
-  font-size: 11px; color: #484f58; }
+.composer-footer { max-width: 800px; margin: 5px auto 0;
+  display: flex; align-items: center; justify-content: space-between; }
+.composer-hint { font-size: 11px; color: #484f58; }
+.report-btn {
+  background: none; border: 1px solid #30363d; border-radius: 5px;
+  color: #8b949e; font-size: 11px; padding: 3px 10px; cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.report-btn:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
+.report-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.dl-btn {
+  display: inline-block; margin-top: 10px;
+  background: none; border: 1px solid #30363d; border-radius: 5px;
+  color: #8b949e; font-size: 12px; padding: 4px 12px; cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.dl-btn:hover { border-color: #3fb950; color: #3fb950; }
 </style>
