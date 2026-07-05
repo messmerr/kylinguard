@@ -1,5 +1,22 @@
 <template>
   <aside class="status-panel">
+    <!-- 告警区 -->
+    <div v-if="alerts.length" class="alert-section">
+      <div class="panel-title">主动告警
+        <span class="alert-count">{{ alerts.length }}</span>
+      </div>
+      <div v-for="a in alerts" :key="a.id"
+           class="alert-card" :class="a.severity">
+        <div class="alert-head">
+          <span class="alert-dot"></span>
+          <span class="alert-title">{{ a.title }}</span>
+          <span class="alert-metric">{{ a.metric }}</span>
+        </div>
+        <div class="alert-msg">{{ a.message }}</div>
+        <button class="ack-btn" @click.stop="ack(a.id)">知道了</button>
+      </div>
+    </div>
+
     <div class="panel-title">系统实时状态
       <span class="age" v-if="status">{{ ageText }}</span>
     </div>
@@ -31,8 +48,10 @@ import { apiFetch } from '../composables/useAuth.js'
 import { stats } from '../composables/useChat.js'
 
 const status = ref(null)
+const alerts = ref([])
 const expanded = ref('')
 let timer = null
+let alertTimer = null
 
 const TITLES = {
   uptime_load: '负载', memory: '内存', disk: '磁盘',
@@ -110,11 +129,30 @@ async function poll() {
   } catch { /* 下轮重试 */ }
 }
 
+async function pollAlerts() {
+  try {
+    const r = await apiFetch('/api/alerts')
+    if (r.ok) alerts.value = (await r.json()).alerts
+  } catch { /* 下轮重试 */ }
+}
+
+async function ack(id) {
+  try {
+    await apiFetch(`/api/alerts/${id}/ack`, { method: 'POST' })
+    alerts.value = alerts.value.filter((a) => a.id !== id)
+  } catch { /* 忽略 */ }
+}
+
 onMounted(() => {
   poll()
+  pollAlerts()
   timer = setInterval(poll, 30000)
+  alertTimer = setInterval(pollAlerts, 30000)
 })
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => {
+  clearInterval(timer)
+  clearInterval(alertTimer)
+})
 </script>
 
 <style scoped>
@@ -136,6 +174,28 @@ onUnmounted(() => clearInterval(timer))
   margin: 6px 0 0; }
 .empty { color: #484f58; font-size: 12px; }
 .stats-title { margin-top: 18px; }
+
+.alert-section { margin-bottom: 14px; }
+.alert-count { background: #f85149; color: #fff; border-radius: 10px;
+  padding: 1px 6px; font-size: 10px; font-weight: 700; }
+.alert-card { border-radius: 8px; padding: 8px 10px; margin-bottom: 6px;
+  border: 1px solid; }
+.alert-card.warning { border-color: #d29922; background: #1a1500; }
+.alert-card.critical { border-color: #f85149; background: #1f1214; }
+.alert-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.alert-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.alert-card.warning .alert-dot { background: #d29922; }
+.alert-card.critical .alert-dot { background: #f85149; }
+.alert-title { font-size: 12px; font-weight: 600; flex: 1; }
+.alert-card.warning .alert-title { color: #e3b341; }
+.alert-card.critical .alert-title { color: #ffa198; }
+.alert-metric { font-size: 11px; font-family: ui-monospace, Consolas, monospace;
+  color: #8b949e; }
+.alert-msg { font-size: 11px; color: #c9d1d9; line-height: 1.5; }
+.ack-btn { margin-top: 6px; font-size: 11px; padding: 2px 8px;
+  border-radius: 4px; border: 1px solid #30363d; background: #161b22;
+  color: #8b949e; cursor: pointer; }
+.ack-btn:hover { border-color: #8b949e; color: #c9d1d9; }
 .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .stat { background: #0d1117; border: 1px solid #21262d; border-radius: 8px;
   padding: 8px 10px; font-size: 11px; color: #8b949e;

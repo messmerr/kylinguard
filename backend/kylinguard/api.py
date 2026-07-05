@@ -207,6 +207,16 @@ def create_app(settings: Settings | None = None,
         return {"snapshot": snapshot,
                 "collected_ago_seconds": round(age, 1)}
 
+    @app.get("/api/alerts")
+    async def list_alerts(_user: str = Depends(require_auth)):
+        return {"alerts": app.state.snapshot_cache.alert_store.active()}
+
+    @app.post("/api/alerts/{alert_id}/ack")
+    async def ack_alert(alert_id: str, _user: str = Depends(require_auth)):
+        if not app.state.snapshot_cache.alert_store.ack(alert_id):
+            raise HTTPException(404, "告警不存在")
+        return {"ok": True}
+
     @app.get("/api/policies")
     async def list_policies(_user: str = Depends(require_auth)):
         return {"custom": app.state.policies.list(),
