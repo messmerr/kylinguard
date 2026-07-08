@@ -30,6 +30,40 @@
 浏览器打开后端端口 → 登录（用户名 `admin` + 你设置的密码）→ 顶栏切换四个视图：
 **对话运维 / 审计回放 / 策略管理 / 仪表盘**。
 
+## Docker 启动（推荐快速体验）
+
+要求：已安装 Docker 与 Docker Compose 插件（`docker compose`）。
+
+最简单的方式：
+
+    ./start.sh
+
+`start.sh` 会自动检查：
+- `docker` / `docker compose` 是否可用
+- `.env` 是否存在
+- `KG_LLM_API_KEY` 与 `KG_ADMIN_PASSWORD` 是否仍是模板占位值
+
+若你想手动执行，也可以：
+
+    # 1. 配置：复制模板并填写至少两个必填项
+    cp .env.example .env
+    #   必填：KG_LLM_API_KEY、KG_ADMIN_PASSWORD
+
+    # 2. 构建并后台启动
+    docker compose up -d --build
+
+    # 3. 查看状态 / 停止
+    docker compose ps
+    docker compose logs -f
+    docker compose down
+
+浏览器访问 `http://127.0.0.1:8000`。
+
+说明：
+- Docker 方案会把 SQLite 数据库存到命名卷 `kylinguard-data`。
+- 容器内默认把 `KG_DB_PATH` 设为 `/app/data/kylinguard.db`，避免相对路径歧义。
+- 本项目的系统观测/服务管理能力面向 Linux 主机设计；放进普通容器后，`systemctl`、`journalctl` 等宿主机级能力会降级为容器内视角或采集失败，这属于预期。
+
 > Linux 专属命令（systemctl、journalctl、free 等）在 Windows 上会显示"采集失败"降级，
 > 属预期；在 WSL 或 Linux 下运行即真实工作。麒麟目标环境为 systemd 发行版。
 

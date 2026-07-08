@@ -1,0 +1,18 @@
+services:
+  kylinguard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kylinguard
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      KG_DB_PATH: /app/data/kylinguard.db
+    volumes:
+      - kylinguard-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  kylinguard-data:
