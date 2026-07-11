@@ -45,9 +45,19 @@ TOOL_REGISTRY: dict[str, ToolMeta] = dict([
     _meta("security", "sudo_history", RiskLevel.LOW, description="sudo 提权记录"),
     _meta("security", "critical_file_perms", RiskLevel.LOW,
           description="关键文件权限基线检查"),
+    # 结构化文件操作：写入不经 shell，修改类由权限模式决定是否需要确认。
+    _meta("files", "read_file", RiskLevel.LOW, description="读取 UTF-8 文本文件"),
+    _meta("files", "list_directory", RiskLevel.LOW, description="列出目录内容"),
+    _meta("files", "mkdir", RiskLevel.MEDIUM, description="创建目录"),
+    _meta("files", "write_file", RiskLevel.MEDIUM, description="原子创建或覆盖文本文件"),
+    _meta("files", "replace_text", RiskLevel.MEDIUM, description="精确替换文本文件内容"),
+    _meta("files", "move", RiskLevel.MEDIUM, description="移动文件或目录"),
+    _meta("files", "delete", RiskLevel.HIGH, description="删除文件或目录"),
     # 通用命令：风险随命令内容动态判定；未命中只读白名单时至少 MEDIUM
     _meta("run_command", "run_command", RiskLevel.MEDIUM, dynamic=True,
           description="执行自由 shell 命令（经三道闸校验）"),
+    _meta("run_command", "run_batch", RiskLevel.MEDIUM, dynamic=True,
+          description="按结构化 argv 顺序执行多条命令（不经 shell）"),
 ])
 
 

@@ -135,3 +135,32 @@ def test_解析失败或空命令fail_closed(cmd):
 
 def test_读ssh私钥目录不放行():
     assert check_command("cat /etc/ssh/ssh_host_rsa_key").decision != RuleDecision.ALLOW
+
+
+@pytest.mark.parametrize("command", [
+    "touch /tmp/note.md",
+    "python3 -c 'print(1)'",
+    "systemctl restart nginx",
+    "some-new-ops-tool --check",
+])
+def test_普通能力限制可由显式权限模式处理但不是自动允许(command):
+    verdict = check_command(command)
+    assert verdict.decision == RuleDecision.DENY
+    assert verdict.hard is False
+
+
+@pytest.mark.parametrize("command", [
+    "rm -rf /",
+    "/bin/rm -rf /",
+    "busybox rm -rf /",
+    "/usr/bin/env rm -rf /",
+    "nice -n 5 rm -rf /",
+    "timeout 5 rm -rf /",
+    "setsid rm -rf /",
+    "dd if=/dev/zero of=/dev/sda",
+    "echo x > /etc/passwd",
+])
+def test_不可恢复红线保持硬拒绝(command):
+    verdict = check_command(command)
+    assert verdict.decision == RuleDecision.DENY
+    assert verdict.hard is True

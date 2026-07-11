@@ -6,6 +6,8 @@
 import asyncio
 import json
 import logging
+import os
+import pwd
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -21,6 +23,19 @@ from kylinguard.auth import AuthStore, TokenManager
 from kylinguard.config import Settings, get_settings
 from kylinguard.llm import LLMError, build_clients, internal_error
 from kylinguard.mcp_client import ToolManager
+from kylinguard.models import (
+    PermissionDecision,
+    PermissionGrantScope,
+    PermissionMode,
+    PermissionResolution,
+)
+from kylinguard.permissions import (
+    PermissionError as SessionPermissionError,
+    PermissionRequests,
+    PermissionVersionConflict,
+    expires_after,
+    normalize_trusted_root,
+)
 from kylinguard.pipeline import Confirmations, Pipeline
 from kylinguard.planner import Planner
 from kylinguard.policy import KINDS, PolicyStore
@@ -30,6 +45,7 @@ from kylinguard.alert_rules import AlertRuleStore
 from kylinguard.alert_pusher import push_channel
 from kylinguard.sessions import SessionStore
 from kylinguard.snapshot import SnapshotCache
+from kylinguard.storage_security import secure_database_path
 
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 logger = logging.getLogger(__name__)
@@ -42,6 +58,24 @@ class ChatRequest(BaseModel):
         default="", max_length=128,
         pattern=r"^[A-Za-z0-9._:-]*$",
     )
+    permission_mode: PermissionMode | None = None
+    trusted_roots: list[str] = Field(default_factory=list, max_length=32)
+    permission_ttl_seconds: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_initial_permissions(self):
+        if self.permission_mode is None:
+            if self.trusted_roots or self.permission_ttl_seconds is not None:
+                raise ValueError("设置可信目录或有效期时必须同时指定 permission_mode")
+            return self
+        if self.permission_mode == PermissionMode.FULL_ACCESS:
+            raise ValueError("完全访问必须在会话创建后通过独立权限接口复验密码")
+        if self.permission_mode == PermissionMode.TRUSTED_WORKSPACE:
+            if not self.trusted_roots:
+                raise ValueError("信任目录模式至少需要一个可信目录")
+        elif self.trusted_roots or self.permission_ttl_seconds is not None:
+            raise ValueError("当前权限模式不能设置可信目录或有效期")
+        return self
 
 
 class ConfirmRequest(BaseModel):
@@ -52,6 +86,22 @@ class ConfirmRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class PermissionUpdateRequest(BaseModel):
+    mode: PermissionMode
+    version: int = Field(ge=1)
+    trusted_roots: list[str] = Field(default_factory=list, max_length=32)
+    ttl_seconds: int | None = Field(default=None, ge=1)
+    password: str = Field(default="", max_length=1024)
+
+
+class PermissionResolveRequest(BaseModel):
+    decision: PermissionDecision
+    context_version: int = Field(ge=1)
+    trusted_path: str = ""
+    ttl_seconds: int | None = Field(default=None, ge=1)
+    password: str = Field(default="", max_length=1024)
 
 
 class PolicyRequest(BaseModel):
@@ -88,14 +138,16 @@ class AlertChannelRequest(BaseModel):
 def create_app(settings: Settings | None = None,
                *, with_tools: bool = True) -> FastAPI:
     settings = settings or get_settings()
+    secure_database_path(settings.db_path)
     audit = AuditLog(settings.db_path)
     sessions = SessionStore(settings.db_path)
     auth_store = AuthStore(settings.db_path)
     auth_store.ensure_admin(settings.admin_user, settings.admin_password)
     tokens = TokenManager(settings.token_ttl)
     policies = PolicyStore(settings.db_path)
-    tools = ToolManager()
+    tools = ToolManager(exec_user=settings.exec_user)
     confirmations = Confirmations()
+    permission_requests = PermissionRequests()
     snapshot_cache = SnapshotCache(settings.snapshot_interval)
     alert_rule_store = AlertRuleStore(settings.db_path)
     snapshot_cache.set_rule_store(alert_rule_store)
@@ -107,6 +159,8 @@ def create_app(settings: Settings | None = None,
         confirmations=confirmations,
         snapshot_fn=snapshot_cache.get,
         policy_store=policies,
+        session_store=sessions,
+        permission_requests=permission_requests,
     )
 
     @asynccontextmanager
@@ -127,6 +181,7 @@ def create_app(settings: Settings | None = None,
     app = FastAPI(title="麒盾 KylinGuard", lifespan=lifespan)
     app.state.pipeline = pipeline
     app.state.confirmations = confirmations
+    app.state.permission_requests = permission_requests
     app.state.audit = audit
     app.state.sessions = sessions
     app.state.snapshot_cache = snapshot_cache
@@ -142,6 +197,79 @@ def create_app(settings: Settings | None = None,
         if not username:
             raise HTTPException(401, "未登录或登录已过期")
         return username
+
+    def permission_http_error(
+        error: SessionPermissionError, status_code: int = 400
+    ) -> HTTPException:
+        return HTTPException(
+            status_code,
+            detail={"code": error.code, "message": error.message},
+        )
+
+    def audited_permission_mutation(
+        session_id: str,
+        event_type: str,
+        mutation,
+    ):
+        """把权限状态变更与哈希链事件提交在同一个 SQLite 事务中。"""
+        with app.state.audit.serialized():
+            with app.state.sessions.transaction() as connection:
+                result, payload = mutation()
+                app.state.audit.append(
+                    session_id,
+                    event_type,
+                    payload,
+                    connection=connection,
+                    commit=False,
+                    lock_held=True,
+                )
+                return result
+
+    def full_access_status() -> tuple[bool, str]:
+        if not settings.allow_full_access:
+            return False, "服务端未启用完全访问模式。"
+        if not settings.exec_user:
+            return False, "完全访问需要配置独立执行账号。"
+        try:
+            account = pwd.getpwnam(settings.exec_user)
+        except KeyError:
+            return False, "配置的独立执行账号不存在。"
+        if account.pw_uid == 0 or account.pw_uid == os.geteuid():
+            return False, "完全访问的执行账号必须是不同于后端服务的非 root 账号。"
+        return True, ""
+
+    def permission_payload(context) -> dict:
+        enabled, reason = full_access_status()
+        return {
+            **context.model_dump(mode="json"),
+            "full_access_available": enabled,
+            "full_access_unavailable_reason": reason,
+            "full_access_max_ttl": settings.full_access_max_ttl,
+            "permission_max_ttl": settings.permission_max_ttl,
+            "execution_identity": settings.exec_user or "未配置独立执行账号",
+            "grants_root": False,
+        }
+
+    def permission_expiry(mode: PermissionMode, ttl_seconds: int | None) -> float | None:
+        if mode not in {
+            PermissionMode.TRUSTED_WORKSPACE,
+            PermissionMode.FULL_ACCESS,
+        }:
+            if ttl_seconds is not None:
+                raise SessionPermissionError(
+                    "permission_ttl_not_applicable", "当前权限模式不需要有效期。"
+                )
+            return None
+        ttl = ttl_seconds or settings.permission_default_ttl
+        maximum = (settings.full_access_max_ttl
+                   if mode == PermissionMode.FULL_ACCESS
+                   else settings.permission_max_ttl)
+        if ttl > maximum:
+            raise SessionPermissionError(
+                "permission_ttl_too_long",
+                f"该权限模式的有效期不能超过 {maximum} 秒。",
+            )
+        return expires_after(ttl)
 
     @app.get("/api/health")
     async def health():
@@ -161,15 +289,58 @@ def create_app(settings: Settings | None = None,
         return {"ok": True}
 
     @app.post("/api/chat")
-    async def chat(req: ChatRequest, _user: str = Depends(require_auth)):
+    async def chat(req: ChatRequest, user: str = Depends(require_auth)):
         created = not req.session_id
         if created:
             session_id = uuid.uuid4().hex
-            app.state.sessions.create(session_id, req.message)
+            initial_mode = req.permission_mode or PermissionMode.ASK
+            try:
+                initial_expiry = permission_expiry(
+                    initial_mode, req.permission_ttl_seconds)
+                if req.permission_mode is None:
+                    app.state.sessions.create(session_id, req.message)
+                else:
+                    def create_session_with_permissions():
+                        app.state.sessions.create(
+                            session_id,
+                            req.message,
+                            permission_mode=initial_mode,
+                            trusted_roots=req.trusted_roots,
+                            permission_expires_at=initial_expiry,
+                            updated_by=user,
+                            commit=False,
+                        )
+                        context = app.state.sessions.get_permissions(session_id)
+                        return context, {
+                            "operator": user,
+                            "source": "session_created",
+                            "from_mode": None,
+                            "to_mode": initial_mode.value,
+                            "trusted_roots": context.trusted_roots,
+                            "expires_at": context.expires_at,
+                            "version": context.version,
+                        }
+
+                    audited_permission_mutation(
+                        session_id,
+                        "permission_changed",
+                        create_session_with_permissions,
+                    )
+            except SessionPermissionError as exc:
+                raise permission_http_error(exc) from exc
         else:
             session_id = req.session_id
             if not app.state.sessions.exists(session_id):
                 raise HTTPException(404, "会话不存在")
+            if (req.permission_mode is not None or req.trusted_roots
+                    or req.permission_ttl_seconds is not None):
+                raise HTTPException(
+                    400,
+                    detail={
+                        "code": "permission_update_requires_endpoint",
+                        "message": "已有会话请通过权限接口更新权限。",
+                    },
+                )
             app.state.sessions.touch(session_id)
         queue: asyncio.Queue = asyncio.Queue()
         last_progress: dict = {}
@@ -319,6 +490,317 @@ def create_app(settings: Settings | None = None,
     @app.get("/api/sessions")
     async def list_sessions(_user: str = Depends(require_auth)):
         return {"sessions": app.state.sessions.list()}
+
+    @app.get("/api/sessions/{session_id}/permissions")
+    async def get_session_permissions(
+        session_id: str, _user: str = Depends(require_auth)
+    ):
+        context = app.state.sessions.get_permissions(session_id)
+        if context is None:
+            raise HTTPException(404, "会话不存在")
+        return permission_payload(context)
+
+    @app.put("/api/sessions/{session_id}/permissions")
+    async def update_session_permissions(
+        session_id: str,
+        req: PermissionUpdateRequest,
+        user: str = Depends(require_auth),
+    ):
+        previous = app.state.sessions.get_permissions(session_id)
+        if previous is None:
+            raise HTTPException(404, "会话不存在")
+        if req.mode == PermissionMode.FULL_ACCESS:
+            available, reason = full_access_status()
+            if not available:
+                code = ("full_access_disabled" if not settings.allow_full_access
+                        else "full_access_requires_isolated_executor")
+                raise HTTPException(
+                    403, detail={"code": code, "message": reason})
+            if not req.password or not app.state.auth.verify(user, req.password):
+                app.state.audit.append(session_id, "permission_reauthentication_failed", {
+                    "operator": user,
+                    "source": "settings",
+                    "requested_mode": PermissionMode.FULL_ACCESS.value,
+                })
+                raise HTTPException(403, detail={
+                    "code": "full_access_reauthentication_failed",
+                    "message": "管理员密码复验失败，完全访问未启用。",
+                })
+        try:
+            expiry = permission_expiry(req.mode, req.ttl_seconds)
+            def mutate_permissions():
+                context = app.state.sessions.set_permissions(
+                    session_id,
+                    mode=req.mode,
+                    trusted_roots=req.trusted_roots,
+                    expires_at=expiry,
+                    expected_version=req.version,
+                    updated_by=user,
+                    commit=False,
+                )
+                return context, {
+                    "operator": user,
+                    "source": "settings",
+                    "from_mode": previous.mode.value,
+                    "to_mode": context.mode.value,
+                    "trusted_roots": context.trusted_roots,
+                    "expires_at": context.expires_at,
+                    "previous_version": previous.version,
+                    "version": context.version,
+                }
+
+            context = audited_permission_mutation(
+                session_id, "permission_changed", mutate_permissions)
+        except PermissionVersionConflict as exc:
+            raise permission_http_error(exc, 409) from exc
+        except SessionPermissionError as exc:
+            status = 404 if exc.code == "session_not_found" else 400
+            raise permission_http_error(exc, status) from exc
+        cancelled_requests = app.state.permission_requests.revoke_session(
+            session_id, operator=user)
+        return permission_payload(context)
+
+    @app.get("/api/sessions/{session_id}/grants")
+    async def list_session_grants(
+        session_id: str,
+        include_inactive: bool = False,
+        _user: str = Depends(require_auth),
+    ):
+        if not app.state.sessions.exists(session_id):
+            raise HTTPException(404, "会话不存在")
+        grants = app.state.sessions.list_grants(
+            session_id, active_only=not include_inactive)
+        return {"grants": [grant.model_dump(mode="json") for grant in grants]}
+
+    @app.delete("/api/sessions/{session_id}/grants")
+    async def revoke_session_grants(
+        session_id: str, user: str = Depends(require_auth)
+    ):
+        if not app.state.sessions.exists(session_id):
+            raise HTTPException(404, "会话不存在")
+        def mutate_revoke_all():
+            count = app.state.sessions.revoke_grants(
+                session_id, commit=False)
+            return count, {
+                "operator": user,
+                "scope": "all",
+                "revoked_grants": count,
+            }
+
+        count = audited_permission_mutation(
+            session_id, "permission_grants_revoked", mutate_revoke_all)
+        cancelled_requests = app.state.permission_requests.revoke_session(
+            session_id, operator=user)
+        return {"ok": True, "revoked": count,
+                "cancelled_requests": cancelled_requests}
+
+    @app.delete("/api/sessions/{session_id}/grants/{grant_id}")
+    async def revoke_session_grant(
+        session_id: str, grant_id: str,
+        user: str = Depends(require_auth),
+    ):
+        if not app.state.sessions.exists(session_id):
+            raise HTTPException(404, "会话不存在")
+        def mutate_revoke_one():
+            count = app.state.sessions.revoke_grants(
+                session_id, grant_id, commit=False)
+            if not count:
+                raise HTTPException(404, detail={
+                    "code": "permission_grant_not_found",
+                    "message": "授权不存在、已使用或已撤销。",
+                })
+            return count, {
+                "operator": user,
+                "scope": "single",
+                "grant_id": grant_id,
+                "revoked_grants": count,
+            }
+
+        count = audited_permission_mutation(
+            session_id, "permission_grants_revoked", mutate_revoke_one)
+        return {"ok": True, "revoked": count}
+
+    @app.post("/api/permission-requests/{request_id}/resolve")
+    async def resolve_permission_request(
+        request_id: str,
+        req: PermissionResolveRequest,
+        user: str = Depends(require_auth),
+    ):
+        pending = app.state.permission_requests.get(request_id)
+        if pending is None:
+            raise HTTPException(404, detail={
+                "code": "permission_request_not_found",
+                "message": "权限请求不存在或已经处理。",
+            })
+        context = app.state.sessions.get_permissions(pending.session_id)
+        if context is None:
+            app.state.permission_requests.cancel(request_id, operator=user)
+            raise HTTPException(404, "会话不存在")
+        if (req.context_version != pending.context_version
+                or context.version != pending.context_version):
+            app.state.permission_requests.cancel(request_id, operator=user)
+            app.state.audit.append(pending.session_id,
+                                   "permission_request_stale", {
+                "operator": user,
+                "request_id": request_id,
+                "request_version": pending.context_version,
+                "current_version": context.version,
+            })
+            raise permission_http_error(PermissionVersionConflict(), 409)
+
+        if (pending.requires_reauthentication
+                and req.decision != PermissionDecision.DENY):
+            if req.decision != PermissionDecision.ALLOW_ONCE:
+                raise HTTPException(400, detail={
+                    "code": "high_risk_scope_not_allowed",
+                    "message": "高风险操作只能按当前动作单次授权。",
+                })
+            if not req.password or not app.state.auth.verify(user, req.password):
+                app.state.audit.append(pending.session_id,
+                                       "permission_reauthentication_failed", {
+                    "operator": user,
+                    "request_id": request_id,
+                    "action_fingerprint": pending.action_fingerprint,
+                    "capability": pending.capability,
+                })
+                raise HTTPException(403, detail={
+                    "code": "permission_reauthentication_failed",
+                    "message": "高风险操作需要重新验证管理员密码。",
+                })
+
+        grant = None
+        trusted_path = None
+        changed_context = None
+        try:
+            with app.state.audit.serialized():
+                with app.state.sessions.transaction() as connection:
+                    context = app.state.sessions.get_permissions(
+                        pending.session_id)
+                    if (context is None
+                            or context.version != pending.context_version):
+                        raise PermissionVersionConflict()
+                    if req.decision == PermissionDecision.DENY:
+                        if req.trusted_path or req.ttl_seconds is not None:
+                            raise SessionPermissionError(
+                                "unexpected_permission_options",
+                                "拒绝操作时不能附带可信目录或有效期。",
+                            )
+                    elif req.decision in {
+                        PermissionDecision.ALLOW_ONCE,
+                        PermissionDecision.ALLOW_SESSION,
+                    }:
+                        if req.trusted_path or req.ttl_seconds is not None:
+                            raise SessionPermissionError(
+                                "unexpected_permission_options",
+                                "单次或会话授权不能附带可信目录或自定义有效期。",
+                            )
+                        grant_expiry = expires_after(
+                            settings.permission_default_ttl)
+                        if (not context.expired
+                                and context.expires_at is not None):
+                            grant_expiry = min(
+                                grant_expiry, context.expires_at)
+                        grant = app.state.sessions.add_grant(
+                            pending.session_id,
+                            scope=(PermissionGrantScope.ONCE
+                                   if req.decision == PermissionDecision.ALLOW_ONCE
+                                   else PermissionGrantScope.SESSION),
+                            action_fingerprint=pending.action_fingerprint,
+                            capability=pending.capability,
+                            resource=pending.resource,
+                            context_version=pending.context_version,
+                            granted_by=user,
+                            expires_at=grant_expiry,
+                            commit=False,
+                        )
+                    elif req.decision == PermissionDecision.TRUST_PATH:
+                        trusted_path = normalize_trusted_root(
+                            req.trusted_path or pending.suggested_path)
+                        roots = (list(context.trusted_roots)
+                                 if context.mode == PermissionMode.TRUSTED_WORKSPACE
+                                 and not context.expired else [])
+                        roots.append(trusted_path)
+                        if (req.ttl_seconds is None
+                                and context.mode == PermissionMode.TRUSTED_WORKSPACE
+                                and not context.expired):
+                            expiry = context.expires_at
+                        else:
+                            expiry = permission_expiry(
+                                PermissionMode.TRUSTED_WORKSPACE,
+                                req.ttl_seconds,
+                            )
+                        changed_context = app.state.sessions.set_permissions(
+                            pending.session_id,
+                            mode=PermissionMode.TRUSTED_WORKSPACE,
+                            trusted_roots=roots,
+                            expires_at=expiry,
+                            expected_version=pending.context_version,
+                            updated_by=user,
+                            commit=False,
+                        )
+
+                    resolution = PermissionResolution(
+                        request_id=request_id,
+                        decision=req.decision,
+                        operator=user,
+                        context_version=pending.context_version,
+                        grant_id=grant.id if grant else None,
+                        trusted_path=trusted_path,
+                    )
+                    app.state.audit.append(
+                        pending.session_id,
+                        "permission_resolved",
+                        {
+                            "operator": user,
+                            "request_id": request_id,
+                            "decision": req.decision.value,
+                            "action_fingerprint": pending.action_fingerprint,
+                            "capability": pending.capability,
+                            "resource": pending.resource,
+                            "context_version": pending.context_version,
+                            "grant_id": grant.id if grant else None,
+                            "trusted_path": trusted_path,
+                            "new_context_version": (
+                                changed_context.version
+                                if changed_context else None),
+                        },
+                        connection=connection,
+                        commit=False,
+                        lock_held=True,
+                    )
+        except PermissionVersionConflict as exc:
+            app.state.permission_requests.cancel(request_id, operator=user)
+            raise permission_http_error(exc, 409) from exc
+        except SessionPermissionError as exc:
+            raise permission_http_error(exc) from exc
+        # Future 必须在 SQLite 状态与审计事件均提交成功后才能唤醒流水线。
+        # 此处到 resolve 之间没有 await，同一事件循环上的并发请求不能插入。
+        if not app.state.permission_requests.resolve(resolution):
+            if grant is not None:
+                def revoke_unclaimed_grant():
+                    count = app.state.sessions.revoke_grants(
+                        pending.session_id, grant.id, commit=False)
+                    return count, {
+                        "operator": "system",
+                        "scope": "unclaimed_resolution",
+                        "grant_id": grant.id,
+                        "revoked_grants": count,
+                    }
+                audited_permission_mutation(
+                    pending.session_id,
+                    "permission_grants_revoked",
+                    revoke_unclaimed_grant,
+                )
+            raise HTTPException(409, detail={
+                "code": "permission_request_already_resolved",
+                "message": "权限请求已被其他操作处理。",
+            })
+        return {
+            "ok": True,
+            "resolution": resolution.model_dump(mode="json"),
+            "permission": (permission_payload(changed_context)
+                           if changed_context else None),
+        }
 
     @app.get("/api/sessions/{session_id}/events")
     async def session_events(session_id: str,

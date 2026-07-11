@@ -74,9 +74,18 @@ def screen_user_intent(query: str) -> RuleVerdict:
         return RuleVerdict(decision=RuleDecision.DENY,
                            reason="空指令，拒绝执行", matched_rule="empty")
     candidates = (text, unicodedata.normalize("NFKC", text))
-    for pattern, label in _BYPASS_PATTERNS + _DESTRUCTIVE_PATTERNS:
+    for pattern, label in _BYPASS_PATTERNS:
         if any(re.search(pattern, candidate) for candidate in candidates):
             return RuleVerdict(decision=RuleDecision.DENY,
-                               reason=label, matched_rule=pattern)
+                               reason=label,
+                               matched_rule=f"bypass:{pattern}")
+    for pattern, label in _DESTRUCTIVE_PATTERNS:
+        if any(re.search(pattern, candidate) for candidate in candidates):
+            # 直接调用本函数的安全基准仍把破坏性请求分类为 DENY；流水线
+            # 会把 destructive:* 当作高风险信号继续进入参数级门控，而不是
+            # 在看见“重启/删除”几个字时就阉割 Agent 的通用能力。
+            return RuleVerdict(decision=RuleDecision.DENY,
+                               reason=label,
+                               matched_rule=f"destructive:{pattern}")
     return RuleVerdict(decision=RuleDecision.REVIEW,
                        reason="未命中自然语言红线，进入后续安全流水线")

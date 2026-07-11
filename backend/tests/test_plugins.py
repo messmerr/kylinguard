@@ -23,6 +23,9 @@ def test_run_command为动态风险():
     m = get_meta("run_command", "run_command")
     assert m.dynamic is True
     assert m.risk == RiskLevel.MEDIUM
+    batch = get_meta("run_command", "run_batch")
+    assert batch.dynamic is True
+    assert batch.risk == RiskLevel.MEDIUM
 
 
 async def test_sysinfo_top_processes(monkeypatch):
@@ -129,7 +132,7 @@ async def test_restart_service_uses_privileged_helper(monkeypatch):
         return ExecResult(exit_code=0, stdout="done", stderr="", duration_ms=1)
 
     monkeypatch.setattr(services, "run_command", fake_run)
-    monkeypatch.setattr(services, "get_settings", lambda: SimpleNamespace(
+    monkeypatch.setattr(services, "get_execution_settings", lambda: SimpleNamespace(
         command_timeout=30,
         exec_user="kylinguard-exec",
         privileged_helper="/usr/local/libexec/kylinguard/execctl",
@@ -185,6 +188,111 @@ async def test_run_command_非零退出显式失败(monkeypatch):
     monkeypatch.setattr(rc, "run_command_exec", fake_run)
     with pytest.raises(ToolError, match="exit_code=127"):
         await rc.run_command(command="missing-command")
+
+
+async def test_run_batch_逐条argv执行且遇错停止(monkeypatch):
+    import kylinguard.plugins.run_command as rc
+    captured = []
+
+    async def fake_run(argv, **kwargs):
+        captured.append(argv)
+        return ExecResult(
+            exit_code=7 if argv[0] == "false" else 0,
+            stdout=f"ran:{argv[0]}", stderr="", duration_ms=1,
+        )
+
+    monkeypatch.setattr(rc, "run_command_exec", fake_run)
+    with pytest.raises(ToolError, match="批量命令执行失败"):
+        await rc.run_batch(commands=[
+            ["ps", "aux"], ["false"], ["free", "-m"],
+        ])
+    assert captured == [["ps", "aux"], ["false"]]
+
+
+async def test_run_batch_可选择执行完所有命令(monkeypatch):
+    import kylinguard.plugins.run_command as rc
+    captured = []
+
+    async def fake_run(argv, **kwargs):
+        captured.append(argv)
+        return ExecResult(
+            exit_code=1 if argv[0] == "false" else 0,
+            stdout="", stderr="boom" if argv[0] == "false" else "",
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr(rc, "run_command_exec", fake_run)
+    with pytest.raises(ToolError, match='"commands_executed": 3'):
+        await rc.run_batch(
+            commands=[["uptime"], ["false"], ["free", "-m"]],
+            stop_on_error=False,
+        )
+    assert len(captured) == 3
+
+
+@pytest.mark.parametrize("commands", [
+    [], [[]], [["ok", ""]], [["ok\x00bad"]],
+])
+async def test_run_batch_拒绝非法argv(commands):
+    import kylinguard.plugins.run_command as rc
+    with pytest.raises(ToolError):
+        await rc.run_batch(commands=commands)
+
+
+async def test_run_batch_operators按短路语义执行(monkeypatch):
+    import json
+    import kylinguard.plugins.run_command as rc
+    captured = []
+
+    async def fake_run(argv, **kwargs):
+        captured.append(argv[0])
+        return ExecResult(
+            exit_code=1 if argv[0] == "false" else 0,
+            stdout="", stderr="", duration_ms=1,
+        )
+
+    monkeypatch.setattr(rc, "run_command_exec", fake_run)
+    output = await rc.run_batch(
+        commands=[["false"], ["then"], ["fallback"], ["always"]],
+        operators=["&&", "||", ";"],
+    )
+    result = json.loads(output)
+    assert captured == ["false", "fallback", "always"]
+    assert result["commands_executed"] == 3
+    assert result["commands_skipped"] == 1
+    assert result["results"][1]["skip_reason"] == "previous_failed"
+
+
+async def test_run_batch_operators最终失败才令工具失败(monkeypatch):
+    import kylinguard.plugins.run_command as rc
+
+    async def fake_run(argv, **kwargs):
+        return ExecResult(
+            exit_code=1 if argv[0] == "false" else 0,
+            stdout="", stderr="", duration_ms=1,
+        )
+
+    monkeypatch.setattr(rc, "run_command_exec", fake_run)
+    # 中间失败被 || 恢复，整个 AND-OR 列表成功。
+    await rc.run_batch(
+        commands=[["false"], ["true"]], operators=["||"])
+    with pytest.raises(ToolError, match="批量命令执行失败"):
+        await rc.run_batch(
+            commands=[["true"], ["false"]], operators=["&&"])
+
+
+@pytest.mark.parametrize(("commands", "operators"), [
+    ([["a"], ["b"]], [";​"]),
+    ([["a"], ["b"]], []),
+    ([["a"], ["b"]], [";", "&&"]),
+])
+async def test_run_batch_operators形状必须有效(commands, operators):
+    import kylinguard.plugins.run_command as rc
+    if operators == []:
+        # 空 operators 是合法的普通批处理。
+        return
+    with pytest.raises(ToolError):
+        await rc.run_batch(commands=commands, operators=operators)
 
 
 async def test_ping_host_主机名校验():
@@ -285,3 +393,13 @@ def test_新插件注册表齐全():
     assert get_meta("disk", "clean_file").needs_sudo is True
     assert get_meta("network", "ping_host").risk == RiskLevel.LOW
     assert get_meta("security", "critical_file_perms").risk == RiskLevel.LOW
+
+
+def test_结构化文件工具注册表齐全():
+    assert get_meta("files", "read_file").risk == RiskLevel.LOW
+    assert get_meta("files", "list_directory").risk == RiskLevel.LOW
+    assert get_meta("files", "mkdir").risk == RiskLevel.MEDIUM
+    assert get_meta("files", "write_file").risk == RiskLevel.MEDIUM
+    assert get_meta("files", "replace_text").risk == RiskLevel.MEDIUM
+    assert get_meta("files", "move").risk == RiskLevel.MEDIUM
+    assert get_meta("files", "delete").risk == RiskLevel.HIGH

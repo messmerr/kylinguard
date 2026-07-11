@@ -48,7 +48,17 @@ def test_自定义白名单参与判定(store):
     assert check_command("lsattr /var/log").decision == RuleDecision.DENY
     store.add("readonly", "lsattr", "")
     assert check_command("lsattr /var/log",
-                         extra=store.extra()).decision == RuleDecision.ALLOW
+                         extra=store.extra()).decision == RuleDecision.REVIEW
+
+
+@pytest.mark.parametrize("command", [
+    "git reset --hard",
+    "git push --force origin main",
+    "find /tmp -delete",
+])
+def test_自定义命令名不能把危险参数自动标为只读(store, command):
+    store.add("readonly", command.split()[0], "旧版可信命令")
+    assert check_command(command, extra=store.extra()).decision != RuleDecision.ALLOW
 
 
 def test_自定义保护路径参与判定(store):

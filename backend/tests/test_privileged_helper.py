@@ -13,7 +13,7 @@ async def test_restart_service_uses_privileged_helper(monkeypatch):
         return ExecResult(exit_code=0, stdout="done", stderr="", duration_ms=1)
 
     monkeypatch.setattr(services, "run_command", fake_run)
-    monkeypatch.setattr(services, "get_settings", lambda: SimpleNamespace(
+    monkeypatch.setattr(services, "get_execution_settings", lambda: SimpleNamespace(
         command_timeout=30,
         exec_user="kylinguard-exec",
         privileged_helper="/usr/local/libexec/kylinguard/execctl",
@@ -34,7 +34,7 @@ async def test_clean_file_uses_privileged_helper(monkeypatch):
         return ExecResult(exit_code=0, stdout="", stderr="", duration_ms=1)
 
     monkeypatch.setattr(disk, "run_command", fake_run)
-    monkeypatch.setattr(disk, "get_settings", lambda: SimpleNamespace(
+    monkeypatch.setattr(disk, "get_execution_settings", lambda: SimpleNamespace(
         command_timeout=30,
         exec_user="kylinguard-exec",
         privileged_helper="/usr/local/libexec/kylinguard/execctl",

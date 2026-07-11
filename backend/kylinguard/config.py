@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     exec_user: str = ""  # 生产环境设为 kylinguard-exec；空 = 当前用户（开发）
     privileged_helper: str = ""  # 生产环境设为 root-owned 受限 helper；空 = 不启用
 
+    # 会话权限。full_access 只跳过产品内确认，不会获得 root，且强制要求
+    # 与后端服务不同的非 root exec_user；控制面不能与执行面共用账户。
+    allow_full_access: bool = False
+    permission_default_ttl: int = 30 * 60
+    permission_max_ttl: int = 12 * 3600
+    full_access_max_ttl: int = 30 * 60
+
     # 鉴权（管理员账户在首次启动时创建；密码留空则不创建、无法登录）
     admin_user: str = "admin"
     admin_password: str = ""
@@ -46,3 +53,8 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     return Settings()
+
+
+def get_execution_settings() -> Settings:
+    """工具子进程仅读取显式环境，不加载含密钥的项目 ``.env``。"""
+    return Settings(_env_file=None)

@@ -21,7 +21,7 @@ _ACTION_BY_RISK = {
 
 def decide(meta: ToolMeta, rule: RuleVerdict, review: ReviewVerdict,
            planner_risk: RiskLevel) -> GateDecision:
-    if rule.decision == RuleDecision.DENY:
+    if rule.decision == RuleDecision.DENY and rule.hard:
         return GateDecision(action=GateAction.DENY, risk=RiskLevel.HIGH,
                             reason=f"规则引擎拒绝：{rule.reason}")
 
@@ -34,7 +34,9 @@ def decide(meta: ToolMeta, rule: RuleVerdict, review: ReviewVerdict,
         reason = "命中只读白名单，审查员无异议"
     else:
         risk = max_risk(meta.risk, review.risk, planner_risk)
-        reason = (f"综合风险 {risk.value}（工具声明 {meta.risk.value} / "
+        prefix = ("静态规则要求显式权限；" if
+                  rule.decision == RuleDecision.DENY else "")
+        reason = (f"{prefix}综合风险 {risk.value}（工具声明 {meta.risk.value} / "
                   f"审查员 {review.risk.value} / 规划自评 {planner_risk.value}）")
 
     return GateDecision(action=_ACTION_BY_RISK[risk], risk=risk, reason=reason)

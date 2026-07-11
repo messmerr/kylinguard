@@ -102,9 +102,9 @@ _IP_RO_OBJECTS = {"a", "addr", "address", "route", "link", "neigh", "-s"}
 _IP_MUTATING_VERBS = {"set", "add", "del", "delete", "flush", "replace", "change"}
 
 
-def _deny(reason: str, rule: str) -> RuleVerdict:
+def _deny(reason: str, rule: str, *, hard: bool = True) -> RuleVerdict:
     return RuleVerdict(decision=RuleDecision.DENY, reason=reason,
-                       matched_rule=rule)
+                       matched_rule=rule, hard=hard)
 
 
 def _has_forbidden_flag(argv: list[str], forbidden: set[str]) -> bool:
@@ -122,14 +122,65 @@ def _has_forbidden_flag(argv: list[str], forbidden: set[str]) -> bool:
 
 def _is_rm_root(argv: list[str]) -> bool:
     """argv 级判定"递归删除根目录"，不受空格/选项顺序变体影响。"""
-    if argv[0] != "rm":
+    effective = _effective_argv(argv)
+    if not effective or effective[0] != "rm":
         return False
     short_flags = set("".join(
-        t[1:] for t in argv[1:] if t.startswith("-") and not t.startswith("--")))
-    recursive = bool(short_flags & {"r", "R"}) or "--recursive" in argv[1:]
+        t[1:] for t in effective[1:]
+        if t.startswith("-") and not t.startswith("--")))
+    recursive = (bool(short_flags & {"r", "R"})
+                 or "--recursive" in effective[1:])
     hits_root = any(re.fullmatch(r"/+", t)
-                    for t in argv[1:] if not t.startswith("-"))
+                    for t in effective[1:] if not t.startswith("-"))
     return recursive and hits_root
+
+
+def _basename(value: str) -> str:
+    # PurePath on Windows does not recognize '/' as the active separator；命令
+    # 最终运行在 Linux/WSL，显式兼容两种分隔符。
+    return value.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _effective_argv(argv: list[str]) -> list[str]:
+    """展开常见 multicall/环境包装器，仅用于识别不可覆盖的硬红线。"""
+    if not argv:
+        return []
+    values = [_basename(argv[0]), *argv[1:]]
+    if values[0] in {"busybox", "toybox"} and len(values) > 1:
+        return [_basename(values[1]), *values[2:]]
+    if values[0] == "env":
+        index = 1
+        while index < len(values):
+            token = values[index]
+            if token == "--":
+                index += 1
+                break
+            if token.startswith("-") or ("=" in token and not token.startswith("/")):
+                index += 1
+                continue
+            break
+        if index < len(values):
+            return _effective_argv(values[index:])
+    if values[0] in {"nice", "stdbuf", "setsid", "nohup"}:
+        index = 1
+        while index < len(values) and values[index].startswith("-"):
+            if values[0] == "nice" and values[index] in {"-n", "--adjustment"}:
+                index += 2
+            else:
+                index += 1
+        if index < len(values):
+            return _effective_argv(values[index:])
+    if values[0] == "timeout":
+        index = 1
+        while index < len(values) and values[index].startswith("-"):
+            # -k/--kill-after 与 -s/--signal 各自还消费一个参数。
+            if values[index] in {"-k", "--kill-after", "-s", "--signal"}:
+                index += 2
+            else:
+                index += 1
+        if index + 1 < len(values):
+            return _effective_argv(values[index + 1:])
+    return values
 
 
 def _is_readonly_whitelisted(argv: list[str]) -> bool:
@@ -184,6 +235,7 @@ def check_command(command: str,
         return _deny(f"命令无法安全解析（{e}），按安全原则拒绝", "unparseable")
     if not argv:
         return _deny("空命令，拒绝执行", "empty")
+    argv[0] = _basename(argv[0])
 
     # ④ argv 级黑名单：递归删根（字符串正则易被空格/选项顺序绕过）
     if _is_rm_root(argv):
@@ -193,12 +245,13 @@ def check_command(command: str,
     if argv[0] in _PRIVILEGE_ESCALATORS:
         return _deny(
             f"禁止经 {argv[0]!r} 提权或启动子 shell；"
-            "提权由系统受限执行器统一管理", "privilege_escalator")
+            "提权由系统受限执行器统一管理", "privilege_escalator",
+            hard=False)
 
     if argv[0] in _PAYLOAD_EXECUTORS:
         return _deny(
             f"禁止经 {argv[0]!r} 执行脚本、远端载荷或二级命令；"
-            "请改用受控 MCP 插件工具", "payload_executor")
+            "请改用受控 MCP 插件工具", "payload_executor", hard=False)
 
     # ⑤ 保护路径写操作：安全红线（自定义保护路径合并）
     protected = _PROTECTED_PREFIXES + (extra.protected if extra else ())
@@ -208,8 +261,10 @@ def check_command(command: str,
                 for t in argv[1:])
     )
     touches = any(arg.startswith(protected) for arg in argv[1:])
-    whitelisted = _is_readonly_whitelisted(argv) or (
-        extra is not None and argv[0] in extra.readonly)
+    builtin_whitelisted = _is_readonly_whitelisted(argv)
+    custom_declared_readonly = (
+        extra is not None and argv[0] in extra.readonly
+    )
     if writes and touches:
         return _deny("疑似修改关键（保护）配置文件，安全红线禁止",
                      "protected_path")
@@ -217,21 +272,23 @@ def check_command(command: str,
     if writes:
         return _deny(
             f"自由命令禁止执行写操作 {argv[0]!r}；"
-            "请改用具备参数约束和白名单的结构化 MCP 插件", "mutating_command")
+            "请改用具备参数约束和白名单的结构化 MCP 插件", "mutating_command",
+            hard=False)
 
     if argv[0] in _CONTROL_COMMANDS or _is_systemctl_mutation(argv):
         return _deny(
             f"自由命令禁止执行控制型操作 {argv[0]!r}；"
-            "服务启停等动作必须走结构化 MCP 插件和最小权限代理", "control_command")
+            "服务启停等动作必须走结构化 MCP 插件和最小权限代理", "control_command",
+            hard=False)
 
-    if argv[0] in _INPLACE_EDITORS and not whitelisted:
+    if argv[0] in _INPLACE_EDITORS and not builtin_whitelisted:
         return _deny(
             f"自由命令禁止执行解释/编辑器类命令 {argv[0]!r}；"
-            "请改用只读工具或结构化插件", "editor_command")
+            "请改用只读工具或结构化插件", "editor_command", hard=False)
 
     # ⑥ 只读白名单（命令+参数级）；触及保护路径的读操作降级交后续闸门
     #    自定义白名单为命令名级（管理员显式放行决策）
-    if whitelisted:
+    if builtin_whitelisted:
         if touches:
             return RuleVerdict(
                 decision=RuleDecision.REVIEW,
@@ -240,10 +297,23 @@ def check_command(command: str,
                            reason="命中只读命令白名单（命令与参数均只读）",
                            matched_rule=argv[0])
 
+    # 旧版自定义“只读白名单”只有命令名，没有参数语义。把 git/find 等命令
+    # 按名称直接自动放行会让 --force、-delete 等写型参数绕过校验。保留其
+    # 管理员意图，但只降到人工/权限引擎复核，不能再视为确定的只读操作。
+    if custom_declared_readonly:
+        return RuleVerdict(
+            decision=RuleDecision.REVIEW,
+            reason="管理员将该命令标为可信，但规则无法证明参数只读，需权限复核",
+            matched_rule=f"custom:{argv[0]}",
+        )
+
     # ⑦ 其余未知命令：不靠“确认”放行。需要扩展能力时应新增结构化插件或只读白名单。
     return RuleVerdict(
         decision=RuleDecision.DENY,
-        reason="未知自由命令未进入只读白名单，拒绝执行；请改用结构化 MCP 插件")
+        reason="未知自由命令未进入只读白名单，需显式权限或结构化 MCP 插件",
+        matched_rule="unknown_command",
+        hard=False,
+    )
 
 
 def builtin_rules() -> dict:

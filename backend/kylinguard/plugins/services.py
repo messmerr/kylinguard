@@ -7,7 +7,7 @@ import re
 
 from mcp.server.fastmcp import FastMCP
 
-from kylinguard.config import get_settings
+from kylinguard.config import get_execution_settings
 from kylinguard.executor import run_command
 from kylinguard.plugins._result import reject, require_success
 
@@ -23,7 +23,7 @@ def _bad_name(name: str) -> bool:
 async def _systemctl(action: str, name: str, *, sudo: bool) -> str:
     if _bad_name(name):
         reject(f"服务名不合法：{name!r}（只允许字母数字及 .@:-_）")
-    settings = get_settings()
+    settings = get_execution_settings()
     if sudo and settings.privileged_helper:
         # 生产部署中，真正需要 root 的动作只允许通过 root-owned helper。
         # helper 再做服务名/动作白名单校验，sudoers 只放行这个窄入口。

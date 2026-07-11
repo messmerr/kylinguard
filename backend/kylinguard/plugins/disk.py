@@ -3,7 +3,7 @@ import posixpath
 
 from mcp.server.fastmcp import FastMCP
 
-from kylinguard.config import get_settings
+from kylinguard.config import get_execution_settings
 from kylinguard.executor import run_command
 from kylinguard.plugins._result import (
     format_exec_result,
@@ -84,7 +84,7 @@ async def clean_file(path: str) -> str:
     if not p.startswith(_CLEAN_PREFIXES):
         reject("拒绝：仅允许清理 /tmp、/var/tmp、/var/cache、/var/log "
                f"下的文件，{p!r} 不在白名单内")
-    settings = get_settings()
+    settings = get_execution_settings()
     if settings.privileged_helper:
         r = await run_command(
             f"sudo -n {settings.privileged_helper} clean-file {p}",

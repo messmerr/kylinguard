@@ -56,6 +56,13 @@ def test_run_command未命中白名单至少确认():
     assert d.action == GateAction.CONFIRM
 
 
+def test_非硬策略拒绝转为权限确认():
+    rule = RuleVerdict(decision=RuleDecision.DENY, reason="需要权限", hard=False)
+    d = decide(_meta(RiskLevel.MEDIUM, dynamic=True), rule,
+               _review(), RiskLevel.LOW)
+    assert d.action == GateAction.CONFIRM
+
+
 def test_未注册工具高危需二次确认():
     d = decide(_meta(RiskLevel.HIGH), _rule(), _review(), RiskLevel.LOW)
     assert d.action == GateAction.DOUBLE_CONFIRM

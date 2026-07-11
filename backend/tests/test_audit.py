@@ -58,9 +58,11 @@ def test_全局统计(log):
                {"decision": {"action": "auto", "risk": "low"}})
     log.append("s2", "confirm_result", {"approved": True, "operator": "admin"})
     log.append("s2", "confirm_result", {"approved": False, "operator": "admin"})
+    log.append("s2", "permission_result", {"approved": True, "operator": "admin"})
+    log.append("s2", "permission_result", {"approved": False, "operator": "admin"})
     s = log.stats()
-    assert s["total_events"] == 5
+    assert s["total_events"] == 7
     assert s["by_type"]["verification"] == 2
     assert s["denied"] == 1
-    assert s["confirm_approved"] == 1
-    assert s["confirm_rejected"] == 1
+    assert s["confirm_approved"] == 2
+    assert s["confirm_rejected"] == 2

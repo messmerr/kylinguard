@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 _SCHEMA = """
@@ -45,13 +46,29 @@ class AuditLog:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
-    def append(self, session_id: str, event_type: str, payload: dict) -> str:
-        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    @contextmanager
+    def serialized(self):
+        """与权限状态事务统一锁序：先审计锁，再会话存储锁。"""
         with self._lock:
+            yield
+
+    def append(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: dict,
+        *,
+        connection: sqlite3.Connection | None = None,
+        commit: bool = True,
+        lock_held: bool = False,
+    ) -> str:
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        def write() -> str:
+            conn = connection or self._conn
             try:
-                row = self._conn.execute(
+                row = conn.execute(
                     "SELECT seq, hash FROM audit_events "
                     "WHERE session_id=? ORDER BY seq DESC LIMIT 1",
                     (session_id,),
@@ -60,16 +77,21 @@ class AuditLog:
                 prev_hash = row[1] if row else self.GENESIS
                 ts = datetime.now(timezone.utc).isoformat()
                 h = _digest(prev_hash, session_id, seq, ts, event_type, payload_json)
-                self._conn.execute(
+                conn.execute(
                     "INSERT INTO audit_events"
                     "(session_id, seq, ts, event_type, payload, prev_hash, hash) "
                     "VALUES (?,?,?,?,?,?,?)",
                     (session_id, seq, ts, event_type, payload_json, prev_hash, h),
                 )
-                self._conn.commit()
+                if commit:
+                    conn.commit()
             except sqlite3.Error as e:
                 raise AuditError(f"审计写入失败：{e}") from e
             return h
+        if lock_held:
+            return write()
+        with self._lock:
+            return write()
 
     def events(self, session_id: str) -> list[dict]:
         try:
@@ -116,10 +138,12 @@ class AuditLog:
             ).fetchone()[0]
             approved = self._conn.execute(
                 "SELECT COUNT(*) FROM audit_events WHERE "
-                "event_type='confirm_result' AND "
+                "event_type IN ('confirm_result','permission_result') AND "
                 "json_extract(payload, '$.approved')"
             ).fetchone()[0]
-            rejected = by_type.get("confirm_result", 0) - approved
+            decisions = (by_type.get("confirm_result", 0)
+                         + by_type.get("permission_result", 0))
+            rejected = decisions - approved
         except sqlite3.Error as e:
             raise AuditError(f"审计读取失败：{e}") from e
         return {"total_events": total, "by_type": by_type, "denied": denied,

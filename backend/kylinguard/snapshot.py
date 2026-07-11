@@ -59,7 +59,9 @@ _SNAPSHOT_COMMANDS_LINUX: dict[str, str] = {
     "uptime_load": "uptime",
     "memory": "free -m",
     "disk": "df -h",
-    "top_cpu": "ps aux --sort=-%cpu",
+    # 自动送入规划模型的快照只包含可执行文件名，不包含完整 argv；后者经常
+    # 携带数据库密码、访问令牌或临时签名 URL。
+    "top_cpu": "ps -eo pid,ppid,user,stat,%cpu,%mem,comm --sort=-%cpu",
     "failed_units": "systemctl --failed --no-pager --plain",
     "recent_errors": "journalctl -p err -n 20 --no-pager",
 }
