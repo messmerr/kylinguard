@@ -1,7 +1,6 @@
 import pytest
 
-from kylinguard.config import Settings
-from kylinguard.llm import LLMClient, LLMError, build_clients
+from kylinguard.llm import LLMClient, LLMError
 
 
 class _StatusError(RuntimeError):
@@ -142,14 +141,6 @@ async def test_408与409会重试且进度可见(monkeypatch, status, code):
     assert retry["error"]["code"] == code
     assert retry["error"]["retryable"] is True
     assert fake.calls == 2
-
-
-def test_双实例配置():
-    s = Settings(_env_file=None, llm_api_key="k",
-                 planner_model="deepseek-v4-pro", reviewer_model="qwen-max")
-    planner, reviewer = build_clients(s)
-    assert planner.model == "deepseek-v4-pro"
-    assert reviewer.model == "qwen-max"
 
 
 class _FakeStream:

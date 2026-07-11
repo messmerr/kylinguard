@@ -21,6 +21,23 @@ class FakePipeline:
         await emit({"type": "final_answer", "answer": "完成", "aborted": False})
 
 
+def _configure_test_model(app):
+    """权限测试显式建立 GUI 模型配置，不依赖环境变量回退。"""
+    app.state.llm_config.create_provider(
+        name="测试模型",
+        adapter="openai_compatible",
+        base_url="https://llm.example.test/v1",
+        models=[{
+            "id": "test-model",
+            "label": "test-model",
+            "enabled": True,
+            "supported_efforts": [],
+            "supports_temperature": False,
+        }],
+    )
+    return app
+
+
 @pytest.mark.parametrize("placeholder", [
     "请设置强密码", "change-me", "changeme", "password",
 ])
@@ -40,6 +57,7 @@ def app(tmp_path):
         admin_password=PW,
     )
     value = create_app(settings, with_tools=False)
+    _configure_test_model(value)
     value.state.pipeline = FakePipeline()
     return value
 
@@ -372,6 +390,7 @@ async def test_首条消息前原子创建完全访问草稿并在首轮finalize
         full_access_max_ttl=600,
     )
     draft_app = create_app(settings, with_tools=False)
+    _configure_test_model(draft_app)
     draft_app.state.pipeline = FakePipeline()
     session_id = "a" * 32
 
@@ -431,6 +450,7 @@ async def test_草稿创建先校验且冲突不会覆盖已有会话(tmp_path):
         full_access_max_ttl=60,
     )
     draft_app = create_app(settings, with_tools=False)
+    _configure_test_model(draft_app)
     session_id = "b" * 32
 
     async with _client(draft_app) as client:
@@ -507,6 +527,7 @@ async def test_草稿创建审计失败会整体回滚(tmp_path, monkeypatch):
         workspace_root=str(workspace),
         command_shell="/bin/bash",
     ), with_tools=False)
+    _configure_test_model(draft_app)
     session_id = "c" * 32
 
     def fail_audit(*_args, **_kwargs):

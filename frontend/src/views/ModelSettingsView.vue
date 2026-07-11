@@ -63,9 +63,9 @@
             <template #default="{ row }">
               <div class="row-actions">
                 <el-button text :disabled="actionBusy" @click="testProvider(row)">测试</el-button>
-                <el-button text :disabled="actionBusy || row.readOnly" @click="discoverModels(row)">读取模型</el-button>
-                <el-button text :disabled="actionBusy || row.readOnly" @click="openProviderDialog(row)">编辑</el-button>
-                <el-button text type="danger" :disabled="actionBusy || row.readOnly" @click="deleteProvider(row)">删除</el-button>
+                <el-button text :disabled="actionBusy" @click="discoverModels(row)">读取模型</el-button>
+                <el-button text :disabled="actionBusy" @click="openProviderDialog(row)">编辑</el-button>
+                <el-button text type="danger" :disabled="actionBusy" @click="deleteProvider(row)">删除</el-button>
               </div>
             </template>
           </el-table-column>

@@ -1,7 +1,7 @@
 """可热更新的模型提供商配置、会话路由与只写凭据存储。
 
 模型元数据保存在主 SQLite 数据库；API Key 则保存在工作区外、仅控制面
-账户可读的独立文件中。环境变量配置只作为只读兼容提供商存在，不会被复制。
+账户可读的独立文件中。提供商、模型和默认值均以图形界面的持久化配置为准。
 """
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ import httpx
 from kylinguard.config import Settings
 from kylinguard.llm import LLMClient
 
-LEGACY_PROVIDER_ID = "legacy-env"
 ADAPTERS = {"openai", "deepseek", "dashscope", "openai_compatible"}
 EFFORTS = {"auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"}
 _REF_RE = re.compile(r"^[a-f0-9]{32}$")
@@ -328,17 +327,6 @@ class ProviderSecretStore:
             self._dir_fd = None
 
 
-def infer_adapter(base_url: str) -> str:
-    host = (urlsplit(base_url).hostname or "").lower()
-    if host == "api.openai.com" or host.endswith(".openai.azure.com"):
-        return "openai"
-    if "deepseek" in host:
-        return "deepseek"
-    if "dashscope" in host or "aliyuncs.com" in host:
-        return "dashscope"
-    return "openai_compatible"
-
-
 def normalize_base_url(value: str, *, allow_insecure_http: bool = False) -> str:
     raw = value.strip()
     if not raw or any(ord(char) < 32 for char in raw):
@@ -410,12 +398,22 @@ class LLMConfigStore:
 
     def __init__(self, db_path: str, settings: Settings,
                  secrets_dir: str | Path | None = None):
-        self._settings = settings
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        # 0.1 版曾把 .env 映射成虚拟 legacy-env 提供商，并允许默认值或
+        # 会话固定到该 ID。模型现已完全改由 GUI 管理；启动时清除这些悬空
+        # 绑定，让旧会话在配置好新默认值后重新绑定，不再暗中读取环境变量。
+        self._conn.execute(
+            "DELETE FROM session_llm_settings WHERE provider_id='legacy-env'"
+        )
+        self._conn.execute(
+            "DELETE FROM llm_defaults WHERE agent_provider_id='legacy-env' "
+            "OR reviewer_provider_id='legacy-env'"
+        )
+        self._conn.commit()
         self._lock = threading.RLock()
         configured_secrets = (
             secrets_dir if secrets_dir is not None else settings.llm_secrets_dir or None
@@ -448,48 +446,6 @@ class LLMConfigStore:
                 self._conn.rollback()
                 raise
 
-    def _environment_provider(self) -> dict:
-        raw_base_url = self._settings.llm_base_url
-        adapter = infer_adapter(raw_base_url)
-        try:
-            public_base_url = normalize_base_url(
-                raw_base_url, allow_insecure_http=True)
-            valid_base_url = True
-        except LLMConfigError:
-            # legacy env 可能来自旧部署；拒绝把 userinfo/query 中潜在秘密
-            # 回显到 GUI，也不继续向该地址发送 Key。
-            public_base_url = ""
-            valid_base_url = False
-        # DeepSeek 当前统一协议明确声明这些档位；OpenAI/DashScope 的能力
-        # 随具体模型变化，legacy env 又没有能力元数据，因此只开放自动。
-        efforts = ["none", "high", "max"] if adapter == "deepseek" else []
-        model_ids = list(dict.fromkeys(filter(None, [
-            self._settings.planner_model.strip(),
-            self._settings.reviewer_model.strip(),
-        ])))
-        return {
-            "id": LEGACY_PROVIDER_ID,
-            "name": "环境变量（兼容）",
-            "adapter": adapter,
-            "base_url": public_base_url,
-            "enabled": valid_base_url,
-            "allow_insecure_http": raw_base_url.startswith("http://"),
-            "read_only": True,
-            "api_key_configured": bool(self._settings.llm_api_key.strip()),
-            "version": 1,
-            "created_at": None,
-            "updated_at": None,
-            "last_tested_at": None,
-            "last_test_ok": None,
-            "models": [{
-                "id": model_id,
-                "label": model_id,
-                "enabled": True,
-                "supported_efforts": efforts,
-                "supports_temperature": False,
-            } for model_id in model_ids],
-        }
-
     def _models_locked(self, provider_id: str) -> list[dict]:
         rows = self._conn.execute(
             "SELECT model_id, label, enabled, supported_efforts, "
@@ -520,7 +476,6 @@ class LLMConfigStore:
             "base_url": row["base_url"],
             "enabled": bool(row["enabled"]),
             "allow_insecure_http": bool(row["allow_insecure_http"]),
-            "read_only": False,
             "api_key_configured": self.secrets.exists(row["secret_ref"]),
             "version": row["version"],
             "created_at": row["created_at"],
@@ -536,13 +491,9 @@ class LLMConfigStore:
             rows = self._conn.execute(
                 "SELECT * FROM llm_providers ORDER BY created_at, id"
             ).fetchall()
-            return [self._environment_provider(), *[
-                self._public_provider_locked(row) for row in rows
-            ]]
+            return [self._public_provider_locked(row) for row in rows]
 
     def get_provider(self, provider_id: str, *, public: bool = True):
-        if provider_id == LEGACY_PROVIDER_ID:
-            return self._environment_provider()
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM llm_providers WHERE id=?", (provider_id,)
@@ -652,8 +603,6 @@ class LLMConfigStore:
                         api_key: str | None = None,
                         clear_api_key: bool = False,
                         updated_by: str = "", audit=None) -> dict:
-        if provider_id == LEGACY_PROVIDER_ID:
-            raise LLMConfigError("provider_read_only", "环境变量提供商是只读配置。")
         if adapter not in ADAPTERS:
             raise LLMConfigError("provider_adapter_invalid", "未知的模型协议适配器。")
         name = name.strip()
@@ -737,8 +686,6 @@ class LLMConfigStore:
 
     def delete_provider(self, provider_id: str, *,
                         expected_version: int | None = None, audit=None) -> None:
-        if provider_id == LEGACY_PROVIDER_ID:
-            raise LLMConfigError("provider_read_only", "环境变量提供商不能删除。")
         secret_ref = ""
         with self.transaction():
             row = self._conn.execute(
@@ -767,12 +714,8 @@ class LLMConfigStore:
         if row is None:
             return {
                 "version": 0,
-                "agent": ModelSelection(
-                    LEGACY_PROVIDER_ID, self._settings.planner_model, "auto"
-                ).public_payload(),
-                "reviewer": ModelSelection(
-                    LEGACY_PROVIDER_ID, self._settings.reviewer_model, "auto"
-                ).public_payload(),
+                "agent": ModelSelection("", "", "auto").public_payload(),
+                "reviewer": ModelSelection("", "", "auto").public_payload(),
             }
         return {
             "version": row["version"],
@@ -791,25 +734,18 @@ class LLMConfigStore:
             return self._defaults_locked()
 
     def _model_locked(self, provider_id: str, model_id: str) -> tuple[dict, dict]:
-        if provider_id == LEGACY_PROVIDER_ID:
-            provider = self._environment_provider()
+        row = self._conn.execute(
+            "SELECT * FROM llm_providers WHERE id=?", (provider_id,)
+        ).fetchone()
+        if row is None:
+            provider = None
+            model = None
+        else:
+            provider = self._public_provider_locked(row)
             model = next(
                 (item for item in provider["models"] if item["id"] == model_id),
                 None,
             )
-        else:
-            row = self._conn.execute(
-                "SELECT * FROM llm_providers WHERE id=?", (provider_id,)
-            ).fetchone()
-            if row is None:
-                provider = None
-                model = None
-            else:
-                provider = self._public_provider_locked(row)
-                model = next(
-                    (item for item in provider["models"] if item["id"] == model_id),
-                    None,
-                )
         if provider is None:
             raise LLMConfigError(
                 "provider_not_found", "所选模型提供商不存在。", status_code=404)
@@ -918,6 +854,12 @@ class LLMConfigStore:
                 return self._session_payload(row)
             if selection is None:
                 default = self._defaults_locked()["agent"]
+                if not default["provider_id"] or not default["model_id"]:
+                    raise LLMConfigError(
+                        "model_configuration_required",
+                        "尚未配置默认模型，请先在“模型服务”中添加提供商和模型。",
+                        status_code=409,
+                    )
                 selection = ModelSelection(
                     default["provider_id"], default["model_id"],
                     default["reasoning_effort"],
@@ -949,32 +891,26 @@ class LLMConfigStore:
         """在调用方的同库事务中创建模型绑定，用于原子会话创建。"""
         if selection.reasoning_effort not in EFFORTS:
             raise LLMConfigError("reasoning_effort_invalid", "未知的推理强度。")
-        if selection.provider_id == LEGACY_PROVIDER_ID:
-            provider = self._environment_provider()
-            model = next((item for item in provider["models"]
-                          if item["id"] == selection.model_id), None)
-            provider_enabled = provider["enabled"]
-        else:
-            row = connection.execute(
-                "SELECT p.enabled, m.enabled, m.supported_efforts "
-                "FROM llm_providers p JOIN llm_models m ON m.provider_id=p.id "
-                "WHERE p.id=? AND m.model_id=?",
-                (selection.provider_id, selection.model_id),
-            ).fetchone()
-            if row is None:
-                raise LLMConfigError(
-                    "model_not_configured", "所选提供商或模型不存在。",
-                    status_code=404,
-                )
-            provider_enabled = bool(row[0])
-            try:
-                efforts = json.loads(row[2])
-            except (TypeError, ValueError):
-                efforts = []
-            model = {
-                "enabled": bool(row[1]),
-                "supported_efforts": efforts if isinstance(efforts, list) else [],
-            }
+        row = connection.execute(
+            "SELECT p.enabled, m.enabled, m.supported_efforts "
+            "FROM llm_providers p JOIN llm_models m ON m.provider_id=p.id "
+            "WHERE p.id=? AND m.model_id=?",
+            (selection.provider_id, selection.model_id),
+        ).fetchone()
+        if row is None:
+            raise LLMConfigError(
+                "model_not_configured", "所选提供商或模型不存在。",
+                status_code=404,
+            )
+        provider_enabled = bool(row[0])
+        try:
+            efforts = json.loads(row[2])
+        except (TypeError, ValueError):
+            efforts = []
+        model = {
+            "enabled": bool(row[1]),
+            "supported_efforts": efforts if isinstance(efforts, list) else [],
+        }
         if not provider_enabled:
             raise LLMConfigError("provider_disabled", "所选模型提供商已禁用。")
         if model is None:
@@ -1068,12 +1004,6 @@ class LLMConfigStore:
         return {"providers": self.list_providers(), "defaults": self.get_defaults()}
 
     def provider_connection(self, provider_id: str) -> dict:
-        if provider_id == LEGACY_PROVIDER_ID:
-            provider = self._environment_provider()
-            return {
-                **provider,
-                "api_key": self._settings.llm_api_key,
-            }
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM llm_providers WHERE id=?", (provider_id,)
@@ -1087,8 +1017,6 @@ class LLMConfigStore:
     def add_discovered_models(self, provider_id: str, model_ids: list[str],
                               *, expected_version: int | None = None,
                               updated_by: str = "", audit=None) -> dict:
-        if provider_id == LEGACY_PROVIDER_ID:
-            raise LLMConfigError("provider_read_only", "环境变量提供商不能写入模型列表。")
         cleaned_ids = []
         for value in model_ids[:_MAX_MODELS]:
             model_id = str(value).strip()
@@ -1133,8 +1061,6 @@ class LLMConfigStore:
         return provider
 
     def mark_test(self, provider_id: str, ok: bool) -> None:
-        if provider_id == LEGACY_PROVIDER_ID:
-            return
         with self._lock:
             self._conn.execute(
                 "UPDATE llm_providers SET last_tested_at=?, last_test_ok=? "
@@ -1159,20 +1085,17 @@ class LLMConfigStore:
 
             def endpoint(selection: ModelSelection) -> dict:
                 provider, model = self._validate_selection_locked(selection)
-                if selection.provider_id == LEGACY_PROVIDER_ID:
-                    api_key = self._settings.llm_api_key
-                else:
-                    row = self._conn.execute(
-                        "SELECT secret_ref FROM llm_providers WHERE id=?",
-                        (selection.provider_id,),
-                    ).fetchone()
-                    assert row is not None
-                    try:
-                        api_key = self.secrets.read(row[0])
-                    except LLMConfigError as exc:
-                        if exc.code != "api_key_unavailable":
-                            raise
-                        api_key = ""
+                row = self._conn.execute(
+                    "SELECT secret_ref FROM llm_providers WHERE id=?",
+                    (selection.provider_id,),
+                ).fetchone()
+                assert row is not None
+                try:
+                    api_key = self.secrets.read(row[0])
+                except LLMConfigError as exc:
+                    if exc.code != "api_key_unavailable":
+                        raise
+                    api_key = ""
                 return {
                     "provider_id": selection.provider_id,
                     "provider_name": provider["name"],

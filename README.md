@@ -74,8 +74,8 @@ DeepSeek 的 `thinking/reasoning_effort`、DashScope 的
 GUI Key 不进入 SQLite、审计、SSE 或工具子进程，而是保存到工作区外的受限独立
 文件；数据库只保存随机引用。此处的文件权限不能替代账户隔离：完全访问与后端
 共用同一 UID 时仍可能读取同身份文件，生产环境应配置独立 `KG_EXEC_USER`。
-旧 `.env` Key 不会自动迁移或删除；确认 GUI 提供商可用并设为默认后，应清空
-`KG_LLM_API_KEY` 并重启服务，避免项目工作区继续留有兼容凭据。
+模型提供商、API Key、可用模型与 Agent/Reviewer 默认值只从图形界面的持久化
+配置读取；`.env` 不再提供模型配置或回退路径。
 
 ## Docker 启动（推荐快速体验）
 

@@ -15,7 +15,25 @@ PW = "test-pw-123"
 def app(tmp_path):
     settings = Settings(_env_file=None, db_path=str(tmp_path / "kg.db"),
                         admin_password=PW)
-    return create_app(settings, with_tools=False)
+    value = create_app(settings, with_tools=False)
+    _configure_test_model(value)
+    return value
+
+
+def _configure_test_model(app):
+    """接口测试显式建立 GUI 模型配置，不依赖环境变量回退。"""
+    app.state.llm_config.create_provider(
+        name="测试模型",
+        adapter="openai_compatible",
+        base_url="https://llm.example.test/v1",
+        models=[{
+            "id": "test-model",
+            "label": "test-model",
+            "enabled": True,
+            "supported_efforts": [],
+            "supports_temperature": False,
+        }],
+    )
 
 
 def _client(app):

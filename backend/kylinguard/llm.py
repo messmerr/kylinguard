@@ -16,8 +16,6 @@ from typing import Awaitable, Callable
 import httpx
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 
-from kylinguard.config import Settings
-
 ProgressCallback = Callable[[dict], Awaitable[None]]
 
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
@@ -398,18 +396,3 @@ class LLMClient:
                                  started=started)
             return
         raise AssertionError("unreachable")
-
-
-def build_clients(settings: Settings) -> tuple[LLMClient, LLMClient]:
-    """规划与审查双实例：系统提示词彼此独立，模型可分别配置。"""
-    planner = LLMClient(
-        settings.llm_base_url, settings.llm_api_key,
-        settings.planner_model, settings.llm_max_retries,
-        settings.llm_timeout,
-    )
-    reviewer = LLMClient(
-        settings.llm_base_url, settings.llm_api_key,
-        settings.reviewer_model, settings.llm_max_retries,
-        settings.llm_timeout,
-    )
-    return planner, reviewer

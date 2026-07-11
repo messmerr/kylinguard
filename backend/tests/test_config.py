@@ -5,8 +5,6 @@ from kylinguard.config import Settings, get_execution_settings
 
 def test_默认值():
     s = Settings(_env_file=None)
-    assert s.llm_base_url == "https://api.deepseek.com"
-    assert s.planner_model == "deepseek-v4-pro"
     assert s.llm_timeout == 60.0
     assert Path(s.workspace_root).resolve() == Path(__file__).resolve().parents[2]
     assert s.command_shell == "/bin/bash"
@@ -18,7 +16,6 @@ def test_默认值():
 
 
 def test_环境变量覆盖(monkeypatch):
-    monkeypatch.setenv("KG_PLANNER_MODEL", "qwen-max")
     monkeypatch.setenv("KG_COMMAND_TIMEOUT", "10")
     monkeypatch.setenv("KG_COMMAND_MAX_TIMEOUT", "1200")
     monkeypatch.setenv("KG_COMMAND_SHELL", "/bin/zsh")
@@ -27,7 +24,6 @@ def test_环境变量覆盖(monkeypatch):
     monkeypatch.setenv("KG_ALLOW_FULL_ACCESS", "false")
     monkeypatch.setenv("KG_FULL_ACCESS_MAX_TTL", "600")
     s = Settings(_env_file=None)
-    assert s.planner_model == "qwen-max"
     assert s.command_timeout == 10
     assert s.command_max_timeout == 1200
     assert s.command_shell == "/bin/zsh"
@@ -45,5 +41,4 @@ def test_执行子进程配置不读取当前目录dotenv(tmp_path, monkeypatch)
     )
     monkeypatch.chdir(tmp_path)
     settings = get_execution_settings()
-    assert settings.llm_api_key == ""
     assert settings.admin_password == ""

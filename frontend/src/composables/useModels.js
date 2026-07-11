@@ -67,7 +67,6 @@ function normalizeProvider(raw = {}) {
       raw.allow_insecure_http ?? raw.allowInsecureHttp,
     ),
     enabled: raw.enabled !== false,
-    readOnly: Boolean(raw.read_only ?? raw.readOnly),
     apiKeyConfigured: Boolean(
       raw.api_key_configured ?? raw.apiKeyConfigured,
     ),

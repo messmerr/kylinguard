@@ -582,6 +582,12 @@ def create_app(settings: Settings | None = None,
 
     def default_agent_selection() -> ModelSelection:
         raw = app.state.llm_config.get_defaults()["agent"]
+        if not raw["provider_id"] or not raw["model_id"]:
+            raise llm_http_error(LLMConfigError(
+                "model_configuration_required",
+                "尚未配置默认模型，请先在“模型服务”中添加提供商和模型。",
+                status_code=409,
+            ))
         return ModelSelection(
             raw["provider_id"], raw["model_id"], raw["reasoning_effort"])
 

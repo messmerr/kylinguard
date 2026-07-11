@@ -11,7 +11,6 @@ from kylinguard.audit import AuditError
 from kylinguard.config import Settings
 from kylinguard.llm import LLMClient
 from kylinguard.llm_config import (
-    LEGACY_PROVIDER_ID,
     LLMConfigError,
     LLMConfigStore,
     LLMRuntime,
@@ -37,6 +36,42 @@ def _model(model_id="agent-model", efforts=None):
         "supported_efforts": efforts or [],
         "supports_temperature": False,
     }
+
+
+def test环境变量不再生成提供商且旧绑定会在启动时清理(tmp_path, monkeypatch):
+    monkeypatch.setenv("KG_LLM_BASE_URL", "https://legacy.example.test/v1")
+    monkeypatch.setenv("KG_LLM_API_KEY", "legacy-secret-must-not-load")
+    monkeypatch.setenv("KG_PLANNER_MODEL", "legacy-agent")
+    monkeypatch.setenv("KG_REVIEWER_MODEL", "legacy-reviewer")
+    settings = _settings(tmp_path)
+    store = LLMConfigStore(settings.db_path, settings)
+    assert store.list_providers() == []
+    assert store.get_defaults()["agent"]["provider_id"] == ""
+
+    now = 1.0
+    store._conn.execute(
+        "INSERT INTO llm_defaults(singleton, agent_provider_id, agent_model_id, "
+        "agent_reasoning_effort, reviewer_provider_id, reviewer_model_id, "
+        "reviewer_reasoning_effort, version, updated_at, updated_by) "
+        "VALUES (1,'legacy-env','legacy-agent','auto','legacy-env',"
+        "'legacy-reviewer','auto',1,?,'migration-test')",
+        (now,),
+    )
+    store._conn.execute(
+        "INSERT INTO session_llm_settings(session_id, provider_id, model_id, "
+        "reasoning_effort, version, updated_at, updated_by) "
+        "VALUES ('old-session','legacy-env','legacy-agent','auto',1,?,"
+        "'migration-test')",
+        (now,),
+    )
+    store._conn.commit()
+    store.close()
+
+    reopened = LLMConfigStore(settings.db_path, settings)
+    assert reopened.get_defaults()["version"] == 0
+    assert reopened.get_session("old-session", ensure=False) is None
+    assert reopened.list_providers() == []
+    reopened.close()
 
 
 def test_api_key只写入受限文件且不进入数据库或公开结构(tmp_path):
@@ -210,7 +245,16 @@ async def test图形化配置API与会话切换且响应不泄漏key(tmp_path):
     ) as client:
         headers = await _login(client)
         initial = (await client.get("/api/llm/config", headers=headers)).json()
-        assert initial["providers"][0]["id"] == LEGACY_PROVIDER_ID
+        assert initial["providers"] == []
+        assert initial["defaults"] == {
+            "version": 0,
+            "agent": {
+                "provider_id": "", "model_id": "", "reasoning_effort": "auto",
+            },
+            "reviewer": {
+                "provider_id": "", "model_id": "", "reasoning_effort": "auto",
+            },
+        }
 
         secret = "sk-api-only-secret-abcdef"
         created = await client.post("/api/llm/providers", headers=headers, json={
@@ -265,6 +309,23 @@ async def test图形化配置API与会话切换且响应不泄漏key(tmp_path):
     assert secret not in audit_text
 
 
+async def test未配置图形化模型时拒绝创建任务且不留下会话(tmp_path):
+    settings = _settings(tmp_path)
+    app = create_app(settings, with_tools=False)
+    app.state.pipeline = _FakePipeline()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        headers = await _login(client)
+        response = await client.post(
+            "/api/chat", headers=headers, json={"message": "hello"},
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "model_configuration_required"
+        sessions = await client.get("/api/sessions", headers=headers)
+        assert sessions.json()["sessions"] == []
+
+
 async def test模型配置变更与审计同事务失败会完整回滚(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
     app = create_app(settings, with_tools=False)
@@ -289,8 +350,7 @@ async def test模型配置变更与审计同事务失败会完整回滚(tmp_path
                 "models": [_model("m1")], "enabled": True,
             })
         assert app.state.llm_config.get_defaults()["version"] == 0
-        assert [p for p in app.state.llm_config.list_providers()
-                if p["id"] != LEGACY_PROVIDER_ID] == []
+        assert app.state.llm_config.list_providers() == []
         assert list(app.state.llm_config.secrets.directory.iterdir()) == []
 
         monkeypatch.setattr(app.state.audit, "append", original_append)
@@ -327,6 +387,13 @@ async def test模型配置变更与审计同事务失败会完整回滚(tmp_path
 async def test会话模型绑定失败不会留下普通或完全访问幽灵会话(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
     app = create_app(settings, with_tools=False)
+    app.state.llm_config.create_provider(
+        name="测试提供商",
+        adapter="openai_compatible",
+        base_url="https://gateway.example.test/v1",
+        api_key="sk-binding-test",
+        models=[_model("m1")],
+    )
 
     def fail_model_binding(*_args, **_kwargs):
         raise LLMConfigError("model_binding_failed", "模拟模型绑定失败。")

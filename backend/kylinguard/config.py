@@ -14,11 +14,8 @@ class Settings(BaseSettings):
         env_file=(str(_ROOT_ENV), ".env"), env_prefix="KG_", extra="ignore"
     )
 
-    # LLM 网关（OpenAI 兼容；规划与审查双实例可用不同模型）
-    llm_base_url: str = "https://api.deepseek.com"
-    llm_api_key: str = ""
-    planner_model: str = "deepseek-v4-pro"
-    reviewer_model: str = "deepseek-v4-pro"
+    # 模型提供商、API Key、可用模型和 Agent/Reviewer 默认值只通过
+    # “模型服务”界面管理。环境变量仅保留进程级重试/超时与凭据目录参数。
     llm_max_retries: int = 3
     llm_timeout: float = 60.0
     # GUI 保存的模型凭据不再写回项目 .env。留空时放到
