@@ -225,16 +225,16 @@
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item v-if="providerForm.adapter === 'deepseek'" command="deepseek">
-                      DeepSeek 推荐：关闭 / 高 / 最大
+                      DeepSeek 推荐：none / high / max
                     </el-dropdown-item>
                     <el-dropdown-item command="standard">
-                      兼容常用：低 / 中 / 高
+                      兼容常用：low / medium / high
                     </el-dropdown-item>
                     <el-dropdown-item command="full">
                       全部档位：由网关自行校验
                     </el-dropdown-item>
                     <el-dropdown-item command="clear" divided>
-                      仅自动：不声明可调档位
+                      仅 auto：不声明可调档位
                     </el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
@@ -366,9 +366,9 @@ const nonLocalInsecureHttp = computed(() => {
   }
 })
 const discoveryEffortHint = computed(() => ({
-  openai: '读取后默认开放低 / 中 / 高；扩展档位可批量设置。',
-  openai_compatible: '兼容接口读取后默认开放低 / 中 / 高；仍可逐模型调整。',
-  deepseek: '读取后使用官方的关闭 / 高 / 最大三档。',
+  openai: '读取后默认开放 low / medium / high；扩展档位可批量设置。',
+  openai_compatible: '兼容接口读取后默认开放 low / medium / high；仍可逐模型调整。',
+  deepseek: '读取后使用官方的 none / high / max 三档。',
   dashscope: 'DashScope 能力因模型而异，可批量设置后逐模型调整。',
 })[providerForm.adapter] || '模型接口通常不返回推理档位，可在这里手动声明。')
 

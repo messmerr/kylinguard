@@ -274,10 +274,7 @@ export function modelSelectionSnapshot(raw = sessionModel) {
 }
 
 export function effortLabel(value) {
-  return ({
-    auto: '自动', none: '关闭', minimal: '最少', low: '低', medium: '中',
-    high: '高', xhigh: '极高', max: '最大',
-  })[value] || value || '自动'
+  return value || 'auto'
 }
 
 export async function loadSessionModel(sessionId = sessionModel.sessionId) {
