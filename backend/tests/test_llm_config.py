@@ -153,6 +153,40 @@ def test更换提供商主机必须重新输入key(tmp_path):
     store.close()
 
 
+def test模型发现为兼容协议填入常用档位并保留DeepSeek语义(tmp_path):
+    settings = _settings(tmp_path)
+    store = LLMConfigStore(settings.db_path, settings)
+    deepseek = store.create_provider(
+        name="DeepSeek",
+        adapter="deepseek",
+        base_url="https://api.deepseek.com",
+        api_key="key-deepseek",
+        models=[_model("deepseek-v4-pro")],
+    )
+    compatible = store.create_provider(
+        name="兼容网关",
+        adapter="openai_compatible",
+        base_url="https://gateway.example.test/v1",
+        api_key="key-compatible",
+        models=[],
+    )
+
+    deepseek = store.add_discovered_models(
+        deepseek["id"], ["deepseek-v4-pro"],
+        expected_version=deepseek["version"],
+    )
+    compatible = store.add_discovered_models(
+        compatible["id"], ["custom-reasoner"],
+        expected_version=compatible["version"],
+    )
+
+    assert deepseek["models"][0]["supported_efforts"] == ["none", "high", "max"]
+    assert compatible["models"][0]["supported_efforts"] == [
+        "low", "medium", "high",
+    ]
+    store.close()
+
+
 async def test并发会话的contextvar路由不会串模型(tmp_path):
     settings = _settings(tmp_path)
     store = LLMConfigStore(settings.db_path, settings)

@@ -32,6 +32,15 @@ _REF_RE = re.compile(r"^[a-f0-9]{32}$")
 _MAX_SECRET_BYTES = 16 * 1024
 _MAX_MODELS = 256
 
+# `/models` 没有标准化能力字段。OpenAI Compatible 生态普遍以 low / medium /
+# high 作为最小公分母（Chatbox 也采用这组三档）；更特殊的 minimal / xhigh /
+# max 不自动猜测。DeepSeek 使用其官方明确的开关与 high / max 语义。
+_DISCOVERED_EFFORTS_BY_ADAPTER = {
+    "openai": ["low", "medium", "high"],
+    "openai_compatible": ["low", "medium", "high"],
+    "deepseek": ["none", "high", "max"],
+}
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS llm_providers (
     id TEXT PRIMARY KEY,
@@ -1035,17 +1044,34 @@ class LLMConfigStore:
             if (expected_version is not None
                     and row["version"] != expected_version):
                 raise LLMConfigVersionConflict()
-            existing = {model["id"] for model in self._models_locked(provider_id)}
+            existing_models = self._models_locked(provider_id)
+            existing = {model["id"] for model in existing_models}
+            discovered_efforts = _DISCOVERED_EFFORTS_BY_ADAPTER.get(
+                row["adapter"], [])
+            capability_updates = 0
+            if discovered_efforts:
+                # 对此前已读取但能力为空的 DeepSeek 模型补齐新默认值；管理员
+                # 手工声明过的列表不覆盖，避免重新读取时丢失显式配置。
+                for model in existing_models:
+                    if (model["id"] in cleaned_ids
+                            and not model["supported_efforts"]):
+                        self._conn.execute(
+                            "UPDATE llm_models SET supported_efforts=? "
+                            "WHERE provider_id=? AND model_id=?",
+                            (json.dumps(discovered_efforts),
+                             provider_id, model["id"]),
+                        )
+                        capability_updates += 1
             additions = [{
                 "id": model_id,
                 "label": model_id,
                 "enabled": True,
-                # /models 不声明推理协议能力，发现模型时绝不凭名称猜档位。
-                "supported_efforts": [],
+                # 除协议能统一保证的能力外，不根据模型名猜测档位。
+                "supported_efforts": list(discovered_efforts),
                 "supports_temperature": False,
             } for model_id in cleaned_ids if model_id not in existing]
             self._insert_models_locked(provider_id, additions)
-            if additions:
+            if additions or capability_updates:
                 now = time.time()
                 self._conn.execute(
                     "UPDATE llm_providers SET version=version+1, updated_at=?, "

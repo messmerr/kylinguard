@@ -211,9 +211,36 @@
           <div class="models-editor-head">
             <div>
               <strong>可用模型</strong>
-              <span>模型发现不可用时，可以手动填写模型 ID。</span>
+              <span>{{ discoveryEffortHint }}</span>
             </div>
-            <el-button size="small" @click="addModelRow">添加模型</el-button>
+            <div class="models-editor-actions">
+              <el-dropdown trigger="click" @command="applyEffortPreset">
+                <el-button
+                  size="small"
+                  aria-label="批量设置推理档位"
+                  :disabled="!providerForm.models.length"
+                >
+                  批量设置推理档位<KgIcon name="chevron" :size="11" />
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-if="providerForm.adapter === 'deepseek'" command="deepseek">
+                      DeepSeek 推荐：关闭 / 高 / 最大
+                    </el-dropdown-item>
+                    <el-dropdown-item command="standard">
+                      兼容常用：低 / 中 / 高
+                    </el-dropdown-item>
+                    <el-dropdown-item command="full">
+                      全部档位：由网关自行校验
+                    </el-dropdown-item>
+                    <el-dropdown-item command="clear" divided>
+                      仅自动：不声明可调档位
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+              <el-button size="small" @click="addModelRow">添加模型</el-button>
+            </div>
           </div>
           <div v-if="providerForm.models.length" class="model-rows">
             <div v-for="(model, index) in providerForm.models" :key="model.rowKey" class="model-row">
@@ -274,6 +301,12 @@ import {
 } from '../composables/useModels.js'
 
 const EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+const EFFORT_PRESETS = {
+  deepseek: ['none', 'high', 'max'],
+  standard: ['low', 'medium', 'high'],
+  full: [...EFFORT_VALUES],
+  clear: [],
+}
 const ADAPTER_DEFAULT_URLS = {
   openai: 'https://api.openai.com/v1',
   deepseek: 'https://api.deepseek.com',
@@ -332,6 +365,12 @@ const nonLocalInsecureHttp = computed(() => {
     return false
   }
 })
+const discoveryEffortHint = computed(() => ({
+  openai: '读取后默认开放低 / 中 / 高；扩展档位可批量设置。',
+  openai_compatible: '兼容接口读取后默认开放低 / 中 / 高；仍可逐模型调整。',
+  deepseek: '读取后使用官方的关闭 / 高 / 最大三档。',
+  dashscope: 'DashScope 能力因模型而异，可批量设置后逐模型调整。',
+})[providerForm.adapter] || '模型接口通常不返回推理档位，可在这里手动声明。')
 
 watch(() => [
   modelDefaults.version,
@@ -448,6 +487,19 @@ function clearProviderForm() {
 function addModelRow() { providerForm.models.push(modelFormRow()) }
 function removeModelRow(index) { providerForm.models.splice(index, 1) }
 
+function applyEffortPreset(preset) {
+  const efforts = EFFORT_PRESETS[preset]
+  if (!efforts || !providerForm.models.length) return
+  providerForm.models.forEach((model) => {
+    model.supportedEfforts = [...efforts]
+  })
+  ElMessage.success(
+    preset === 'clear'
+      ? '已设为仅使用提供商默认推理行为'
+      : `已为 ${providerForm.models.length} 个模型设置推理档位`,
+  )
+}
+
 function providerPayload() {
   return {
     name: providerForm.name.trim(),
@@ -532,9 +584,11 @@ async function providerAction(provider, action, successText) {
     if (!response.ok) throw await responseError(response, `${successText}失败`)
     await loadModelConfig()
     ElMessage.success(successText)
+    return true
   } catch (error) {
     await loadModelConfig().catch(() => {})
     ElMessage.error(error.message || `${successText}失败`)
+    return false
   } finally {
     actionBusy.value = false
   }
@@ -544,8 +598,11 @@ function testProvider(provider) {
   return providerAction(provider, 'test', '连接测试完成')
 }
 
-function discoverModels(provider) {
-  return providerAction(provider, 'discover-models', '模型列表已更新')
+async function discoverModels(provider) {
+  const updated = await providerAction(provider, 'discover-models', '模型列表已读取')
+  if (!updated) return
+  const refreshed = modelProviders.value.find((item) => item.id === provider.id)
+  if (refreshed) openProviderDialog(refreshed)
 }
 
 async function deleteProvider(provider) {
@@ -672,6 +729,8 @@ function originChanged() {
 .models-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .models-editor-head strong { display: block; color: var(--kg-text-secondary); font-size: 12px; font-weight: 550; }
 .models-editor-head span { display: block; margin-top: 1px; color: var(--kg-text-tertiary); font-size: 11px; }
+.models-editor-actions { display: flex; flex: none; align-items: center; gap: 7px; }
+.models-editor-actions :deep(.el-button .kg-icon) { margin-left: 5px; }
 .model-rows { display: grid; gap: 7px; margin-top: 10px; }
 .model-row { display: grid; grid-template-columns: minmax(110px, 1.1fr) minmax(105px, 1fr) minmax(120px, .9fr) 50px 34px 28px; align-items: center; gap: 7px; }
 .temperature-capability { margin-right: 0; }
@@ -701,6 +760,8 @@ function originChanged() {
   .row-actions :deep(.el-button) { padding-right: 3px; padding-left: 3px; font-size: 11px; }
   .default-row { grid-template-columns: 1fr; gap: 8px; padding: 14px 0; }
   .form-grid { grid-template-columns: 1fr; gap: 0; }
+  .models-editor-head { align-items: flex-start; flex-direction: column; }
+  .models-editor-actions { width: 100%; }
   .model-row { grid-template-columns: 1fr 1fr 50px 28px; }
   .model-row :deep(.el-select),
   .model-row :deep(.el-switch) { display: none; }
