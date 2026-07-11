@@ -74,6 +74,22 @@ class FailingPlanner:
         raise LLMError(error, attempts=1)
 
 
+class DecisionProgressPlanner:
+    async def next_actions(self, conversation, on_delta=None,
+                           on_progress=None):
+        await on_progress({
+            "state": "constructing_tool_call",
+            "activity": "generating_file_content",
+            "generated_chars": 2048,
+            "generated_bytes": 4096,
+            # 即使内部调用方误传敏感字段，pipeline 也不能带入 SSE。
+            "content": "secret-body",
+            "path": "/secret/path",
+            "arguments": {"token": "secret-token"},
+        })
+        return FINAL
+
+
 class BlockOnSecondPlanner:
     def __init__(self):
         self.calls = 0
@@ -386,6 +402,50 @@ async def test_服务重启后从审计链重建历史(tmp_path):
     assert "第一个问题" in joined and "磁盘使用正常。" in joined
 
 
+def test_服务重启后只恢复已脱敏的工具失败摘要(tmp_path):
+    audit = AuditLog(str(tmp_path / "a.db"))
+    audit.append("s1", "user_query", {"query": "创建文档"})
+    audit.append("s1", "execution", {
+        "ok": False,
+        "step": {
+            "tool": "files.write_file",
+            "arguments": {"content": "正文不应恢复", "path": "/tmp/a.md"},
+        },
+        "output": "expected_sha256 不接受 null；sk-1234567890abcdef",
+        "error": {
+            "code": "tool_call_failed",
+            "message": "工具参数不合法。",
+            "incident_id": "err-history",
+        },
+    })
+    audit.append("s1", "execution", {
+        "ok": True,
+        "step": {"tool": "files.write_file"},
+        "output": "成功输出不应恢复",
+        "error": None,
+    })
+    audit.append("s1", "final_answer", {
+        "answer": "随后已完成。", "outcome": "completed",
+    })
+
+    pipeline = Pipeline(
+        settings=Settings(_env_file=None), audit=audit,
+        tools=FakeTools(), planner=FakePlanner([FINAL]),
+        reviewer=FakeReviewer(), confirmations=Confirmations(),
+        snapshot_fn=_fake_snapshot,
+    )
+    joined = "\n".join(
+        message["content"] for message in pipeline._get_conversation("s1"))
+
+    assert "<untrusted_historical_tool_failure>" in joined
+    assert "files.write_file" in joined
+    assert "expected_sha256 不接受 null" in joined
+    assert "err-history" in joined
+    assert "sk-[REDACTED]" in joined
+    assert "正文不应恢复" not in joined
+    assert "成功输出不应恢复" not in joined
+
+
 async def test_流式增量事件不落审计链(tmp_path):
     planner = FakePlanner([FINAL], deltas=["思考", "中…"])
     audit = AuditLog(str(tmp_path / "a.db"))
@@ -403,6 +463,21 @@ async def test_流式增量事件不落审计链(tmp_path):
     audit_types = {e["event_type"] for e in audit.events("s1")}
     assert "assistant_delta" not in audit_types  # 增量只走 UI，不进审计
     assert audit.verify_chain("s1") is True
+
+
+async def test_隐藏决策进度仅透传安全摘要(tmp_path):
+    p, audit, tools = _pipeline(
+        tmp_path, [], planner=DecisionProgressPlanner())
+    events = await _collect(p)
+    event = next(e for e in events
+                 if e.get("state") == "constructing_tool_call")
+
+    assert event["stage"] == "planning"
+    assert event["activity"] == "generating_file_content"
+    assert event["generated_chars"] == 2048
+    assert event["generated_bytes"] == 4096
+    assert not ({"content", "path", "arguments"} & event.keys())
+    assert "progress" not in {e["event_type"] for e in audit.events("s1")}
 
 
 async def test_execution事件带耗时(tmp_path):

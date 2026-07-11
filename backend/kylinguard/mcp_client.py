@@ -2,6 +2,7 @@
 
 标准 MCP 协议——第三方 MCP 工具同样可挂载（未注册工具按最高危门控）。
 """
+import json
 import sys
 from contextlib import AsyncExitStack
 
@@ -33,6 +34,111 @@ def split_qualified(qualified: str) -> tuple[str, str]:
     if not sep or not server or not tool:
         raise ValueError(f"工具名须为 server.tool 限定名：{qualified!r}")
     return server, tool
+
+
+def _json_literal(value) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _schema_type(schema: dict) -> tuple[str, bool]:
+    """把常见 JSON Schema 类型压缩成适合放进提示词的一行文本。"""
+    nullable = bool(schema.get("nullable", False))
+    raw_type = schema.get("type")
+    if isinstance(raw_type, list):
+        nullable = nullable or "null" in raw_type
+        types = [value for value in raw_type if value != "null"]
+    elif isinstance(raw_type, str):
+        nullable = nullable or raw_type == "null"
+        types = [] if raw_type == "null" else [raw_type]
+    else:
+        types = []
+
+    variants = schema.get("anyOf") or schema.get("oneOf") or []
+    if variants:
+        types = []
+        for variant in variants:
+            variant_type, variant_nullable = _schema_type(variant)
+            nullable = nullable or variant_nullable
+            if variant_type != "null" and variant_type not in types:
+                types.append(variant_type)
+
+    if not types:
+        if "enum" in schema:
+            inferred = {
+                "boolean" if isinstance(value, bool)
+                else "integer" if isinstance(value, int)
+                else "number" if isinstance(value, float)
+                else "string" if isinstance(value, str)
+                else "null" if value is None
+                else "object" if isinstance(value, dict)
+                else "array" if isinstance(value, list)
+                else "unknown"
+                for value in schema["enum"]
+            }
+            nullable = nullable or "null" in inferred
+            types = sorted(inferred - {"null"})
+        elif nullable:
+            return "null", True
+        else:
+            types = ["any"]
+
+    rendered: list[str] = []
+    for value in types:
+        if value == "array":
+            item_type, item_nullable = _schema_type(schema.get("items", {}))
+            if item_nullable:
+                item_type += "|null"
+            rendered.append(f"array<{item_type}>")
+        else:
+            rendered.append(value)
+    return " | ".join(rendered), nullable
+
+
+def format_input_schema(schema: dict) -> str:
+    """完整但紧凑地呈现工具参数契约，供规划模型直接遵循。"""
+    properties = schema.get("properties", {})
+    if not properties:
+        return "无参数"
+
+    required = set(schema.get("required", []))
+    constraint_labels = (
+        ("enum", "可选值"),
+        ("const", "固定值"),
+        ("minimum", "最小值"),
+        ("exclusiveMinimum", "严格大于"),
+        ("maximum", "最大值"),
+        ("exclusiveMaximum", "严格小于"),
+        ("multipleOf", "倍数"),
+        ("minLength", "最短长度"),
+        ("maxLength", "最长长度"),
+        ("pattern", "格式正则"),
+        ("minItems", "最少项数"),
+        ("maxItems", "最多项数"),
+        ("uniqueItems", "元素唯一"),
+        ("format", "格式"),
+    )
+    arguments: list[str] = []
+    for name, property_schema in properties.items():
+        type_name, nullable = _schema_type(property_schema)
+        attributes = [
+            "必填" if name in required else "可省略",
+            "可为 null" if nullable else "不可为 null",
+        ]
+        if "default" in property_schema:
+            attributes.append(f"默认={_json_literal(property_schema['default'])}")
+        for key, label in constraint_labels:
+            if key in property_schema:
+                attributes.append(
+                    f"{label}={_json_literal(property_schema[key])}"
+                )
+        rendered = f"{name}: {type_name} ({', '.join(attributes)})"
+        description = " ".join(
+            str(property_schema.get("description", "")).split()
+        )
+        if description:
+            rendered += f" — {description}"
+        arguments.append(rendered)
+    return "; ".join(arguments)
 
 
 def server_parameters(
@@ -101,12 +207,11 @@ class ToolManager:
             tools = await session.list_tools()
             for t in tools.tools:
                 meta = get_meta(name, t.name)
-                schema = t.inputSchema.get("properties", {})
-                args = ", ".join(schema.keys()) or "无参数"
                 lines.append(
-                    f"- {name}.{t.name}({args}) [risk={meta.risk.value}"
+                    f"- {name}.{t.name} [risk={meta.risk.value}"
                     f"{', 需提权' if meta.needs_sudo else ''}]: "
-                    f"{t.description or meta.description}"
+                    f"{t.description or meta.description}\n"
+                    f"  参数: {format_input_schema(t.inputSchema)}"
                 )
         self._catalog = "\n".join(lines)
 

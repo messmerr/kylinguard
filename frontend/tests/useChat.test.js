@@ -182,6 +182,82 @@ test('取消执行中的步骤会明确标记结果未知', async () => {
   assert.match(step.error.message, /结果暂时未知/)
 })
 
+test('planning 进度只保留白名单活动与生成计数', async () => {
+  reset()
+  const sse = controlledSse()
+  chatResponses.push(sse)
+  const request = chat.sendMessage('WRITE-A-LONG-FILE')
+  await tick()
+
+  sse.event({
+    type: 'progress', stage: 'planning', state: 'constructing_tool_call',
+    operation_id: 'planning:0', activity: 'preparing_file_path',
+    message: '不应直接采用后端自由文本', path: '/srv/private/note.md',
+    content: '<html>不应进入前端状态</html>',
+  })
+  await tick()
+
+  const activity = chat.currentTurn.value.activities.at(-1)
+  assert.equal(activity.planningActivity, 'preparing_file_path')
+  assert.equal(activity.generatedChars, null)
+  assert.equal(activity.generatedBytes, null)
+  assert.equal(Object.hasOwn(activity, 'message'), false)
+  assert.equal(Object.hasOwn(activity, 'path'), false)
+  assert.equal(Object.hasOwn(activity, 'content'), false)
+
+  sse.event({
+    type: 'progress', stage: 'planning', state: 'constructing_tool_call',
+    operation_id: 'planning:0', activity: 'generating_file_content',
+    generated_chars: 6709, generated_bytes: 7041,
+  })
+  await tick()
+
+  assert.equal(chat.currentTurn.value.activities.length, 1)
+  assert.equal(activity.planningActivity, 'generating_file_content')
+  assert.equal(activity.generatedChars, 6709)
+  assert.equal(activity.generatedBytes, 7041)
+
+  sse.event({
+    type: 'progress', stage: 'planning', state: 'retry_wait',
+    operation_id: 'planning:0', attempt: 1, max_attempts: 3,
+    error: { message: '模型服务暂时不可用' }, retry_in_ms: 1000,
+  })
+  sse.event({
+    type: 'progress', stage: 'planning', state: 'connecting',
+    operation_id: 'planning:0', attempt: 2, max_attempts: 3,
+  })
+  await tick()
+
+  assert.equal(activity.planningActivity, '')
+  assert.equal(activity.generatedChars, null)
+  assert.equal(activity.generatedBytes, null)
+
+  sse.event({
+    type: 'progress', stage: 'planning', state: 'constructing_tool_call',
+    operation_id: 'planning:0', activity: 'generating_file_content',
+    generated_chars: 128, generated_bytes: 144,
+  })
+  sse.event({
+    type: 'progress', stage: 'planning', state: 'retry_wait',
+    operation_id: 'planning:0', attempt: 2, max_attempts: 3,
+    error: { message: '模型流中断' }, retry_in_ms: 1000,
+  })
+  sse.event({
+    type: 'progress', stage: 'planning', state: 'streaming',
+    operation_id: 'planning:0', attempt: 3, max_attempts: 3,
+  })
+  await tick()
+
+  assert.equal(activity.planningActivity, '')
+  assert.equal(activity.generatedChars, null)
+  assert.equal(activity.generatedBytes, null)
+
+  sse.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
+  sse.event({ type: 'done' })
+  sse.close()
+  await request
+})
+
 test('task_error 与失败 final_answer 只渲染一个错误项', async () => {
   reset()
   const sse = controlledSse()

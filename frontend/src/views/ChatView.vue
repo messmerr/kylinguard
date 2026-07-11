@@ -150,6 +150,10 @@ import {
   activeId, cancelCurrentTurn, currentTurn, generateReport, items,
   retryMessage, running, sendMessage,
 } from '../composables/useChat.js'
+import {
+  planningProgressCount,
+  planningProgressText,
+} from '../utils/progressPresentation.js'
 
 const WELCOME_HINTS = [
   { icon: 'disk', title: '检查磁盘使用', description: '只读取状态', text: '查看磁盘使用情况' },
@@ -202,7 +206,10 @@ const activityText = computed(() => {
     if (stage === 'reviewing') return '安全检查已完成…'
     if (stage === 'executing') return '操作已完成，正在整理结果…'
   }
-  if (stage === 'planning') return state === 'streaming' ? '正在分析请求…' : '正在连接规划模型…'
+  if (stage === 'planning') {
+    return planningProgressText(activity)
+      || (state === 'streaming' ? '正在分析请求…' : '正在连接规划模型…')
+  }
   if (stage === 'reviewing') return '正在检查操作是否安全…'
   if (stage === 'executing') return '正在执行操作…'
   if (stage === 'confirmation') return '等待你的确认'
@@ -226,10 +233,13 @@ const activityMeta = computed(() => {
       ? ` · 已尝试 ${activity.attempt}/${activity.maxAttempts} 次` : ''
     return `${remaining} 秒后重试${attempt}`
   }
+  const detail = []
+  const generated = planningProgressCount(activity)
+  if (generated) detail.push(generated)
   if (activity?.attempt && activity.maxAttempts > 1) {
-    return `第 ${activity.attempt}/${activity.maxAttempts} 次尝试`
+    detail.push(`第 ${activity.attempt}/${activity.maxAttempts} 次尝试`)
   }
-  return ''
+  return detail.join(' · ')
 })
 
 const elapsedText = computed(() => {
@@ -258,7 +268,14 @@ watch(() => items.value.length, () => {
     if (element) element.scrollTop = element.scrollHeight
   })
 })
-watch(() => `${currentTurn.value?.status}:${currentActivity.value?.id}:${currentActivity.value?.state}`,
+watch(() => [
+  currentTurn.value?.status,
+  currentActivity.value?.id,
+  currentActivity.value?.state,
+  currentActivity.value?.planningActivity,
+  currentActivity.value?.generatedChars,
+  currentActivity.value?.generatedBytes,
+].join(':'),
   scrollToBottom)
 
 async function submit() {

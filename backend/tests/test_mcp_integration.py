@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from kylinguard.mcp_client import (
-    ToolCallError, ToolManager, server_parameters, split_qualified,
+    ToolCallError, ToolManager, format_input_schema, server_parameters,
+    split_qualified,
 )
 
 
@@ -40,6 +41,47 @@ def test_其他MCP服务器不重复sudo():
         "sysinfo", "kylinguard.plugins.sysinfo", exec_user="kylinguard-exec")
     assert params.command == sys.executable
     assert params.args == ["-m", "kylinguard.plugins.sysinfo"]
+
+
+def test_工具参数schema紧凑呈现完整契约():
+    rendered = format_input_schema({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "目标文件的绝对路径。",
+                "minLength": 1,
+            },
+            "mode": {
+                "type": ["string", "null"],
+                "enum": ["safe", "fast", None],
+                "default": None,
+            },
+            "limit": {
+                "type": "integer",
+                "default": 10,
+                "minimum": 1,
+                "maximum": 50,
+            },
+            "commands": {
+                "type": "array",
+                "items": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "required": ["path", "commands"],
+    })
+
+    assert "path: string (必填, 不可为 null, 最短长度=1)" in rendered
+    assert "目标文件的绝对路径。" in rendered
+    assert "mode: string (可省略, 可为 null, 默认=null" in rendered
+    assert '可选值=["safe","fast",null]' in rendered
+    assert "limit: integer (可省略, 不可为 null, 默认=10" in rendered
+    assert "最小值=1" in rendered and "最大值=50" in rendered
+    assert "commands: array<array<string>> (必填, 不可为 null)" in rendered
+
+
+def test_无参数schema明确标注():
+    assert format_input_schema({"type": "object"}) == "无参数"
 
 
 async def test_未知服务器与MCP错误结果显式失败():
@@ -89,6 +131,12 @@ async def test_启动_列举_调用_关闭(tmp_path):
                       "files.write_file", "files.replace_text",
                       "risk=high"):
             assert token in desc
+        # 默认值与 null 约束直接暴露给规划模型，避免用 null 给可选字符串占位。
+        assert "path: string (必填, 不可为 null)" in desc
+        assert ('expected_sha256: string '
+                '(可省略, 不可为 null, 默认=\"\")') in desc
+        assert "operators: array<array<string>>" not in desc
+        assert "operators: array<string> (可省略, 可为 null, 默认=null)" in desc
         # 真实经 stdio 调一个工具：成功必须返回文本，底层命令不可用时
         # 必须显式抛错，不能再把失败字符串伪装成成功结果。
         try:

@@ -34,6 +34,12 @@ let activeController = null
 let _nextIsReport = false // 下一条 final_answer 标记为报告
 let _loadRequest = 0
 
+const PLANNING_ACTIVITIES = new Set([
+  'constructing_tool_call',
+  'preparing_file_path',
+  'generating_file_content',
+])
+
 export const stats = computed(() => {
   const s = { steps: 0, auto: 0, confirmed: 0, denied: 0 }
   for (const it of items.value) {
@@ -426,6 +432,16 @@ function activityId(ev) {
   return ev.operation_id || `${ev.stage || 'request'}:${ev.step_id || 'current'}`
 }
 
+function progressCount(value) {
+  if (value == null || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) && number >= 0 ? Math.floor(number) : null
+}
+
+function planningActivity(value) {
+  return PLANNING_ACTIVITIES.has(value) ? value : ''
+}
+
 function upsertActivity(ev) {
   const turn = currentTurn.value
   if (!turn) return null
@@ -437,6 +453,9 @@ function upsertActivity(ev) {
       operationId: ev.operation_id || '', stepId: ev.step_id || '',
       attempt: ev.attempt ?? null, maxAttempts: ev.max_attempts ?? null,
       elapsedMs: ev.elapsed_ms ?? 0, retryInMs: ev.retry_in_ms ?? 0,
+      planningActivity: planningActivity(ev.activity),
+      generatedChars: progressCount(ev.generated_chars),
+      generatedBytes: progressCount(ev.generated_bytes),
       error: null, startedAt: Date.now(), updatedAt: Date.now(), deadlineAt: null,
     })
     activitiesById[id] = activity
@@ -450,9 +469,31 @@ function upsertActivity(ev) {
   activity.maxAttempts = ev.max_attempts ?? activity.maxAttempts
   activity.elapsedMs = ev.elapsed_ms ?? activity.elapsedMs
   activity.retryInMs = ev.retry_in_ms ?? 0
+  // planning 进度只接收约定的活动枚举与计数。正文、路径和原始 JSON
+  // 即便出现在事件中也不会进入响应式状态，更不会被界面意外渲染。
+  const startsPlanningAttempt = activity.stage === 'planning'
+    && ['connecting', 'streaming'].includes(ev.state)
+    && !Object.hasOwn(ev, 'activity')
+  if (startsPlanningAttempt) {
+    // 同一 operation_id 的模型重试会复用活动记录。新 attempt 尚未产生
+    // 工具参数时，不能沿用上一轮的“正在生成文件”及其计数。
+    activity.planningActivity = ''
+    activity.generatedChars = null
+    activity.generatedBytes = null
+  } else if (Object.hasOwn(ev, 'activity')) {
+    activity.planningActivity = planningActivity(ev.activity)
+  }
+  if (!startsPlanningAttempt && Object.hasOwn(ev, 'generated_chars')) {
+    activity.generatedChars = progressCount(ev.generated_chars)
+  }
+  if (!startsPlanningAttempt && Object.hasOwn(ev, 'generated_bytes')) {
+    activity.generatedBytes = progressCount(ev.generated_bytes)
+  }
   if (ev.error) {
     activity.error = normalizeError(ev.error, '本次尝试失败。', { stage: activity.stage })
-  } else if (['connecting', 'streaming', 'completed'].includes(activity.state)) {
+  } else if ([
+    'connecting', 'streaming', 'constructing_tool_call', 'generating_content', 'completed',
+  ].includes(activity.state)) {
     // 新尝试已经开始或成功，旧的退避原因不再属于当前状态。
     activity.error = null
   }
