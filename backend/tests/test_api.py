@@ -220,3 +220,19 @@ async def test_策略CRUD端点(app):
         assert r4.json()["ok"] is True
         r5 = await c.delete("/api/policies/99999", headers=h)
         assert r5.status_code == 404
+
+
+async def test_失败服务告警规则归一为布尔条件(app):
+    async with _client(app) as c:
+        h = await _login(c)
+        created = await c.post("/api/alert-rules", headers=h, json={
+            "name": "自动启动服务停止",
+            "metric": "failed_services",
+            "operator": ">=",
+            "threshold": 85,
+        })
+        assert created.status_code == 200
+        listed = await c.get("/api/alert-rules", headers=h)
+    rule = listed.json()["rules"][0]
+    assert rule["operator"] == ">="
+    assert rule["threshold"] == 1.0

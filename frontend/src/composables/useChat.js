@@ -14,6 +14,7 @@ let stepsById = {}
 let confirmsById = {}
 let streamingItem = null // 当前正在流式累积的 assistant 文本项
 let _nextIsReport = false // 下一条 final_answer 标记为报告
+let _loadRequest = 0
 
 export const stats = computed(() => {
   const s = { steps: 0, auto: 0, confirmed: 0, denied: 0 }
@@ -163,6 +164,11 @@ export async function refreshSessions() {
 
 export function newSession() {
   if (running.value) return
+  _loadRequest++
+  resetSessionState()
+}
+
+function resetSessionState() {
   activeId.value = ''
   items.value = []
   stepsById = {}
@@ -172,16 +178,27 @@ export function newSession() {
 
 export async function loadSession(id) {
   if (running.value) return
-  newSession()
+  const requestId = ++_loadRequest
+  resetSessionState()
   activeId.value = id
-  const r = await apiFetch(`/api/sessions/${id}/events`)
-  for (const ev of (await r.json()).events) {
-    handleEvent({ type: ev.event_type, ...ev.payload })
+  try {
+    const r = await apiFetch(`/api/sessions/${id}/events`)
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    const body = await r.json()
+    if (requestId !== _loadRequest || activeId.value !== id) return
+    for (const ev of body.events || []) {
+      handleEvent({ type: ev.event_type, ...ev.payload })
+    }
+  } catch (error) {
+    if (requestId === _loadRequest && activeId.value === id) {
+      push({ kind: 'fatal', error: `任务记录读取失败：${error.message}` })
+    }
   }
 }
 
 export async function sendMessage(text, { onUpdate } = {}) {
   if (!text.trim() || running.value) return
+  _loadRequest++
   running.value = true
   stepsById = {}
   confirmsById = {}

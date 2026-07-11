@@ -1,5 +1,7 @@
 import kylinguard.snapshot as snap
+import kylinguard.alert_pusher as alert_pusher
 from kylinguard.models import ExecResult
+from kylinguard.alert_rules import AlertRule
 
 
 def _result(code: int, out: str, err: str = "") -> ExecResult:
@@ -35,6 +37,53 @@ def test_格式化截断():
     text = snap.format_snapshot(s, per_item=100)
     assert "memory" in text and "disk" in text
     assert len(text) < 700
+
+
+def test_未读同类告警不会重复堆积(monkeypatch):
+    now = {"value": 1000.0}
+    monkeypatch.setattr(snap.time, "time", lambda: now["value"])
+    store = snap.AlertStore()
+    alert = {"kind": "disk_C", "severity": "warning", "title": "磁盘紧张",
+             "message": "首次", "metric": "90%"}
+
+    assert len(store.ingest([alert])) == 1
+    now["value"] = 2000.0  # 即使超过冷却期，未读同类告警仍更新原记录
+    store.ingest([{**alert, "message": "仍然紧张", "metric": "92%"}])
+    active = store.active()
+    assert len(active) == 1
+    assert active[0]["message"] == "仍然紧张"
+
+    assert store.ack(active[0]["id"]) is True
+    assert store.ingest([alert]) == []  # 确认后从当前时刻重新计算冷却期
+
+
+async def test_规则评估使用磁盘最高值并正确表达失败服务(monkeypatch):
+    histories = []
+
+    class Store:
+        def list_rules(self):
+            base = dict(severity="warning", silence_minutes=10,
+                        channel_ids=[], enabled=True, created_at=0)
+            return [
+                AlertRule(1, "任意磁盘过高", "disk_pct", ">=", 95, **base),
+                AlertRule(2, "失败服务", "failed_services", ">=", 85, **base),
+            ]
+
+        def get_last_fired(self, _rule_id): return 0
+        def update_last_fired(self, _rule_id): pass
+        def get_channel(self, _channel_id): return None
+        def add_history(self, **entry): histories.append(entry)
+
+    async def fake_push_all(_channels, _payload): return []
+
+    monkeypatch.setattr(snap, "_IS_WINDOWS", True)
+    monkeypatch.setattr(alert_pusher, "push_all", fake_push_all)
+    await snap._evaluate_rules({
+        "disk": "C total=100G used=95G free=5G\nD total=100G used=90G free=10G",
+        "failed_units": "Name DisplayName Status\n---- ----------- ------\nsvc Demo Stopped",
+    }, Store())
+
+    assert [item["metric_value"] for item in histories] == ["95%", "存在"]
 
 
 async def test_并发采集互不阻塞(monkeypatch):

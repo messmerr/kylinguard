@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from kylinguard.audit import AuditError, AuditLog
 from kylinguard.auth import AuthStore, TokenManager
@@ -63,8 +63,15 @@ class AlertRuleRequest(BaseModel):
     threshold: float = 90.0
     severity: str = "warning"
     silence_minutes: int = 10
-    channel_ids: list[int] = []
+    channel_ids: list[int] = Field(default_factory=list)
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def normalize_boolean_metric(self):
+        if self.metric == "failed_services":
+            self.operator = ">="
+            self.threshold = 1.0
+        return self
 
 
 class AlertChannelRequest(BaseModel):

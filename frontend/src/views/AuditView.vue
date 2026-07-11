@@ -1,104 +1,365 @@
 <template>
-  <div class="audit-layout">
-    <aside class="audit-side">
-      <div class="side-title">审计会话</div>
-      <div class="audit-list">
-        <div v-for="s in sessions" :key="s.id" class="audit-item"
-             :class="{ active: s.id === selectedId }" @click="select(s.id)">
-          <span class="item-title">{{ s.title }}</span>
+  <div class="kg-page audit-page">
+    <div class="kg-page-inner audit-inner">
+      <header class="page-head">
+        <div>
+          <p class="page-description">按任务查看操作、确认与执行记录。</p>
         </div>
-        <div v-if="!sessions.length" class="empty">暂无会话</div>
-      </div>
-    </aside>
+        <el-button :disabled="!selectedId || !events.length" @click="exportReport">
+          <KgIcon name="download" :size="15" />
+          导出 JSON
+        </el-button>
+      </header>
 
-    <main class="audit-main">
-      <template v-if="selectedId">
-        <div class="audit-head">
-          <el-tag v-if="chainOk === true" type="success">✓ 哈希链完整，未检测到篡改</el-tag>
-          <el-tag v-else-if="chainOk === false" type="danger">⚠ 校验失败：审计链已被篡改！</el-tag>
-          <el-tag v-else type="info">校验中…</el-tag>
+      <div class="audit-toolbar">
+        <label class="session-picker">
+          <span>任务</span>
+          <el-select
+            :model-value="selectedId"
+            filterable
+            placeholder="选择一项任务"
+            @change="select"
+          >
+            <el-option
+              v-for="session in sessions"
+              :key="session.id"
+              :label="session.title"
+              :value="session.id"
+            />
+          </el-select>
+        </label>
+
+        <div v-if="selectedId" class="chain-summary" aria-live="polite">
+          <span class="chain-status" :class="chainStatusClass">
+            <KgIcon :name="chainStatusIcon" :size="14" />
+            {{ chainStatusText }}
+          </span>
           <span class="event-count">{{ events.length }} 条事件</span>
-          <el-button size="small" @click="exportReport">导出报告</el-button>
         </div>
+      </div>
 
-        <div class="timeline">
-          <div v-for="ev in events" :key="ev.seq" class="event"
-               :class="typeClass(ev.event_type)">
-            <div class="event-head" @click="toggle(ev.seq)">
-              <span class="event-seq">#{{ ev.seq }}</span>
-              <span class="event-type">{{ typeLabel(ev.event_type) }}</span>
-              <span class="event-brief">{{ brief(ev) }}</span>
-              <span class="event-ts">{{ tsText(ev.ts) }}</span>
-              <code class="event-hash">{{ ev.hash.slice(0, 12) }}…</code>
+      <div v-if="loading" class="kg-empty audit-empty">
+        <span class="kg-spinner" aria-hidden="true"></span>
+        <strong>正在读取审计记录</strong>
+      </div>
+
+      <div v-else-if="loadError" class="kg-empty audit-empty is-error">
+        <KgIcon name="warning" :size="22" />
+        <strong>无法读取审计记录</strong>
+        <span>{{ loadError }}</span>
+      </div>
+
+      <section v-else-if="selectedId && events.length" class="timeline" aria-label="审计事件">
+        <article
+          v-for="ev in events"
+          :key="ev.seq"
+          class="event"
+          :class="eventTone(ev)"
+        >
+          <span class="event-marker" aria-hidden="true">
+            <KgIcon :name="eventIcon(ev.event_type)" :size="13" />
+          </span>
+
+          <button
+            class="event-head"
+            type="button"
+            :aria-expanded="expanded.has(ev.seq)"
+            @click="toggle(ev.seq)"
+          >
+            <span class="event-seq">#{{ ev.seq }}</span>
+            <span class="event-type">{{ typeLabel(ev.event_type) }}</span>
+            <span class="event-brief">{{ brief(ev) }}</span>
+            <span class="event-ts">
+              <span class="event-date">{{ tsParts(ev.ts).date }}</span>
+              {{ tsParts(ev.ts).time }}
+            </span>
+            <code class="event-hash" :title="ev.hash">{{ shortHash(ev.hash) }}</code>
+            <KgIcon
+              name="chevron"
+              :size="14"
+              class="event-chevron"
+              :class="{ open: expanded.has(ev.seq) }"
+            />
+          </button>
+
+          <div v-if="expanded.has(ev.seq)" class="event-detail">
+            <dl v-if="detailRows(ev).length" class="detail-list">
+              <div v-for="row in detailRows(ev)" :key="row.label" class="detail-row">
+                <dt>{{ row.label }}</dt>
+                <dd :class="{ 'kg-mono': row.mono }">{{ row.value }}</dd>
+              </div>
+            </dl>
+
+            <div class="hash-chain">
+              <div>
+                <span>前一事件</span>
+                <code>{{ ev.prev_hash }}</code>
+              </div>
+              <KgIcon name="chevron" :size="13" />
+              <div>
+                <span>当前事件</span>
+                <code>{{ ev.hash }}</code>
+              </div>
             </div>
-            <pre v-if="expanded.has(ev.seq)" class="event-payload">{{
-              JSON.stringify(ev.payload, null, 2) }}</pre>
+
+            <button class="raw-toggle" type="button" @click.stop="toggleRaw(ev.seq)">
+              {{ rawExpanded.has(ev.seq) ? '收起原始数据' : '查看原始数据' }}
+              <KgIcon
+                name="chevron"
+                :size="13"
+                :class="{ open: rawExpanded.has(ev.seq) }"
+              />
+            </button>
+            <pre v-if="rawExpanded.has(ev.seq)" class="event-payload">{{
+              JSON.stringify(ev.payload, null, 2)
+            }}</pre>
           </div>
-        </div>
-      </template>
-      <div v-else class="placeholder">← 选择一个会话查看完整审计链</div>
-    </main>
+        </article>
+      </section>
+
+      <div v-else-if="selectedId" class="kg-empty audit-empty">
+        <KgIcon name="audit" :size="24" />
+        <strong>这项任务还没有审计事件</strong>
+      </div>
+
+      <div v-else class="kg-empty audit-empty">
+        <KgIcon name="audit" :size="24" />
+        <strong>{{ sessions.length ? '选择一项任务查看审计记录' : '还没有可审计的任务' }}</strong>
+        <span v-if="sessions.length">每次检查、确认和执行都会记录在这里。</span>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
+import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useAuth.js'
 import { refreshSessions, sessions } from '../composables/useChat.js'
 
 const selectedId = ref('')
 const events = ref([])
 const chainOk = ref(null)
+const loading = ref(false)
+const loadError = ref('')
 const expanded = reactive(new Set())
+const rawExpanded = reactive(new Set())
+let selectRequest = 0
 
 const TYPE_LABELS = {
-  user_query: '管理员指令', snapshot: '① 感知快照', plan: '② 规划',
-  verification: '③ 三道闸校验', confirm_request: '⚠ 请求确认',
-  confirm_result: '确认决断', execution: '④ 执行', final_answer: '最终结论',
+  user_query: '管理员指令',
+  intent_filter: '意图检查',
+  snapshot: '系统状态',
+  plan: '执行计划',
+  verification: '安全检查',
+  confirm_request: '请求确认',
+  confirm_result: '确认结果',
+  execution: '执行结果',
+  final_answer: '最终回复',
 }
 
-const typeLabel = (t) => TYPE_LABELS[t] || t
-const typeClass = (t) => ({
-  verification: 'is-verify', confirm_request: 'is-confirm',
-  confirm_result: 'is-confirm', execution: 'is-exec',
-  final_answer: 'is-final',
-}[t] || '')
+const ACTION_LABELS = {
+  auto: '自动执行',
+  confirm: '请求确认',
+  double_confirm: '二次确认',
+  deny: '已阻止',
+}
+
+const RISK_LABELS = { low: '低风险', medium: '中等风险', high: '高风险' }
+const RULE_LABELS = { allow: '通过', review: '需复核', deny: '未通过' }
+
+const chainStatusText = computed(() => {
+  if (chainOk.value === true) return '链路校验通过'
+  if (chainOk.value === false) return '链路校验失败'
+  return '正在校验'
+})
+
+const chainStatusClass = computed(() => ({
+  'is-ok': chainOk.value === true,
+  'is-bad': chainOk.value === false,
+  'is-pending': chainOk.value == null,
+}))
+
+const chainStatusIcon = computed(() => {
+  if (chainOk.value === true) return 'check'
+  if (chainOk.value === false) return 'warning'
+  return 'refresh'
+})
+
+const typeLabel = (type) => TYPE_LABELS[type] || type
+const actionLabel = (action) => ACTION_LABELS[action] || action || '—'
+const riskLabel = (risk) => RISK_LABELS[risk] || risk || '—'
+
+function eventIcon(type) {
+  return {
+    user_query: 'task', intent_filter: 'shield', snapshot: 'server', plan: 'task', verification: 'shield',
+    confirm_request: 'warning', confirm_result: 'check', execution: 'terminal',
+    final_answer: 'info',
+  }[type] || 'audit'
+}
+
+function eventTone(ev) {
+  const action = ev.payload?.decision?.action
+  if (ev.event_type === 'intent_filter'
+      || (ev.event_type === 'final_answer' && ev.payload?.aborted)
+      || action === 'deny'
+      || (ev.event_type === 'confirm_result' && !ev.payload?.approved)) {
+    return 'is-danger'
+  }
+  if (ev.event_type === 'confirm_request' || action === 'confirm' || action === 'double_confirm') {
+    return 'is-warning'
+  }
+  if (ev.event_type === 'execution') return 'is-info'
+  if (ev.event_type === 'final_answer' || ev.event_type === 'confirm_result') return 'is-success'
+  return ''
+}
 
 function brief(ev) {
-  const p = ev.payload
+  const p = ev.payload || {}
   switch (ev.event_type) {
-    case 'user_query': return p.query
-    case 'plan': return p.steps?.length
-      ? `${p.steps.length} 个步骤` : '给出结论'
-    case 'verification':
-      return `${p.step?.tool} → ${p.decision?.action}（${p.decision?.risk}）`
-    case 'confirm_result':
-      return `${p.approved ? '批准' : '拒绝'} · 操作人 ${p.operator || '—'}`
-    case 'confirm_request': return p.step?.tool
-    case 'execution': return `${p.step?.tool} · ${p.duration_ms ?? '—'}ms`
-    case 'final_answer': return (p.answer || '').slice(0, 60)
-    case 'snapshot': return `${Object.keys(p.snapshot || {}).length} 项指标`
-    default: return ''
+    case 'user_query': return p.query || '—'
+    case 'intent_filter': return compactText(p.decision?.reason || '请求未通过意图检查', 72)
+    case 'snapshot': return `已读取 ${Object.keys(p.snapshot || {}).length} 项指标`
+    case 'plan': return p.steps?.length ? `${p.steps.length} 个步骤` : '直接给出结论'
+    case 'verification': {
+      const tool = p.step?.tool || '未知工具'
+      return `${tool} · ${actionLabel(p.decision?.action)} · ${riskLabel(p.decision?.risk)}`
+    }
+    case 'confirm_request': return `${p.step?.purpose || p.step?.tool || '操作'} · ${riskLabel(p.decision?.risk)}`
+    case 'confirm_result': return `${p.approved ? '已批准' : '已拒绝'} · 操作人 ${p.operator || '—'}`
+    case 'execution': return `${p.step?.tool || '执行操作'} · ${durationText(p.duration_ms)}`
+    case 'final_answer': return compactText(p.answer || '', 72) || '已生成回复'
+    default: return '—'
   }
 }
 
-const tsText = (ts) => new Date(ts).toLocaleString('zh-CN', { hour12: false })
+function detailRows(ev) {
+  const p = ev.payload || {}
+  switch (ev.event_type) {
+    case 'user_query':
+      return [{ label: '指令', value: p.query || '—' }]
+    case 'intent_filter':
+      return [
+        { label: '结果', value: RULE_LABELS[p.decision?.decision] || p.decision?.decision || '未通过' },
+        { label: '原因', value: p.decision?.reason || '—' },
+        { label: '命中规则', value: p.decision?.matched_rule || '—', mono: true },
+      ]
+    case 'snapshot':
+      return [{ label: '采集项', value: Object.keys(p.snapshot || {}).join('、') || '—' }]
+    case 'plan':
+      return [
+        ...(p.thought ? [{ label: '说明', value: compactText(p.thought, 240) }] : []),
+        { label: '步骤', value: planStepsText(p.steps) },
+      ]
+    case 'verification':
+      return [
+        { label: '工具', value: p.step?.tool || '—', mono: true },
+        { label: '参数', value: argsText(p.step), mono: true },
+        { label: '规则检查', value: `${RULE_LABELS[p.rule?.decision] || p.rule?.decision || '—'} · ${p.rule?.reason || '无说明'}` },
+        { label: '模型复核', value: `${p.review?.safe && p.review?.matches_intent ? '通过' : '未通过'} · ${p.review?.reason || '无说明'}` },
+        { label: '处理方式', value: `${actionLabel(p.decision?.action)} · ${riskLabel(p.decision?.risk)} · ${p.decision?.reason || '无说明'}` },
+      ]
+    case 'confirm_request':
+      return [
+        { label: '工具', value: p.step?.tool || '—', mono: true },
+        { label: '参数', value: argsText(p.step), mono: true },
+        { label: '目的', value: p.step?.purpose || '—' },
+        { label: '原因', value: p.decision?.reason || '—' },
+      ]
+    case 'confirm_result':
+      return [
+        { label: '结果', value: p.approved ? '批准执行' : '拒绝执行' },
+        { label: '操作人', value: p.operator || '—' },
+      ]
+    case 'execution':
+      return [
+        { label: '工具', value: p.step?.tool || '—', mono: true },
+        { label: '参数', value: argsText(p.step), mono: true },
+        { label: '耗时', value: durationText(p.duration_ms), mono: true },
+        ...(p.output != null ? [{ label: '输出', value: compactText(String(p.output), 500), mono: true }] : []),
+      ]
+    case 'final_answer':
+      return [{ label: '回复', value: p.answer || '—' }]
+    default:
+      return []
+  }
+}
+
+function planStepsText(steps = []) {
+  if (!steps.length) return '无执行步骤'
+  return steps.map((step, index) => `${index + 1}. ${step.purpose || step.tool}`).join('；')
+}
+
+function argsText(step) {
+  const args = step?.arguments ?? step?.args ?? {}
+  return Object.keys(args).length ? JSON.stringify(args) : '—'
+}
+
+function compactText(value, max) {
+  const text = String(value).replace(/\s+/g, ' ').trim()
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
+function durationText(ms) {
+  if (ms == null) return '—'
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+}
+
+function shortHash(hash = '') {
+  return hash ? `${hash.slice(0, 10)}…` : '—'
+}
+
+function tsParts(ts) {
+  const date = new Date(ts)
+  const dateText = date.toLocaleDateString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  })
+  const timeText = date.toLocaleTimeString('zh-CN', {
+    hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+  return { date: dateText, time: timeText }
+}
 
 function toggle(seq) {
   expanded.has(seq) ? expanded.delete(seq) : expanded.add(seq)
 }
 
+function toggleRaw(seq) {
+  rawExpanded.has(seq) ? rawExpanded.delete(seq) : rawExpanded.add(seq)
+}
+
 async function select(id) {
-  selectedId.value = id
+  const requestId = ++selectRequest
+  selectedId.value = id || ''
   events.value = []
   chainOk.value = null
+  loadError.value = ''
   expanded.clear()
-  const [evR, vfR] = await Promise.all([
-    apiFetch(`/api/sessions/${id}/events`),
-    apiFetch(`/api/sessions/${id}/verify`),
-  ])
-  events.value = (await evR.json()).events
-  chainOk.value = (await vfR.json()).ok
+  rawExpanded.clear()
+  if (!id) {
+    loading.value = false
+    return
+  }
+
+  loading.value = true
+  try {
+    const [eventResponse, verifyResponse] = await Promise.all([
+      apiFetch(`/api/sessions/${id}/events`),
+      apiFetch(`/api/sessions/${id}/verify`),
+    ])
+    if (!eventResponse.ok || !verifyResponse.ok) throw new Error('服务器返回了错误状态')
+    const eventBody = await eventResponse.json()
+    const verifyBody = await verifyResponse.json()
+    if (requestId !== selectRequest || selectedId.value !== id) return
+    events.value = eventBody.events || []
+    chainOk.value = verifyBody.ok
+  } catch (error) {
+    if (requestId === selectRequest && selectedId.value === id) {
+      loadError.value = error.message || '请稍后重试'
+    }
+  } finally {
+    if (requestId === selectRequest) loading.value = false
+  }
 }
 
 function exportReport() {
@@ -108,61 +369,279 @@ function exportReport() {
     chain_verified: chainOk.value,
     events: events.value,
   }
-  const blob = new Blob([JSON.stringify(report, null, 2)],
-                        { type: 'application/json' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = `kylinguard-audit-${selectedId.value.slice(0, 8)}.json`
-  a.click()
-  URL.revokeObjectURL(a.href)
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })
+  const anchor = document.createElement('a')
+  anchor.href = URL.createObjectURL(blob)
+  anchor.download = `kylinguard-audit-${selectedId.value.slice(0, 8)}.json`
+  anchor.click()
+  URL.revokeObjectURL(anchor.href)
 }
 
 onMounted(refreshSessions)
 </script>
 
 <style scoped>
-.audit-layout { display: flex; flex: 1; min-height: 0; }
-.audit-side { width: 230px; flex-shrink: 0; border-right: 1px solid #21262d;
-  background: #010409; display: flex; flex-direction: column; }
-.side-title { padding: 14px 16px 8px; font-size: 12px; color: #8b949e;
-  font-weight: 600; }
-.audit-list { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
-.audit-item { padding: 8px 10px; border-radius: 8px; cursor: pointer;
-  color: #c9d1d9; font-size: 13px; }
-.audit-item:hover { background: #161b22; }
-.audit-item.active { background: #1c2733; }
-.item-title { display: block; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; }
-.empty { color: #484f58; font-size: 12px; text-align: center; padding: 20px 0; }
+.audit-inner {
+  width: min(100%, 1100px);
+  min-height: 100%;
+}
 
-.audit-main { flex: 1; min-width: 0; display: flex; flex-direction: column;
-  padding: 14px 20px; overflow: hidden; }
-.audit-head { display: flex; align-items: center; gap: 12px;
-  margin-bottom: 12px; }
-.event-count { color: #8b949e; font-size: 12px; flex: 1; }
-.placeholder { color: #484f58; margin: auto; font-size: 14px; }
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--kg-space-6);
+}
 
-.timeline { flex: 1; overflow-y: auto; border-left: 2px solid #21262d;
-  padding-left: 14px; }
-.event { margin-bottom: 4px; position: relative; }
-.event::before { content: ''; position: absolute; left: -19px; top: 10px;
-  width: 8px; height: 8px; border-radius: 50%; background: #30363d; }
-.event.is-verify::before { background: #d29922; }
-.event.is-confirm::before { background: #f0883e; }
-.event.is-exec::before { background: #58a6ff; }
-.event.is-final::before { background: #3fb950; }
-.event-head { display: flex; align-items: baseline; gap: 10px;
-  padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-.event-head:hover { background: #161b22; }
-.event-seq { color: #484f58; font-size: 11px; width: 30px; flex-shrink: 0; }
-.event-type { color: #e6edf3; flex-shrink: 0; }
-.event-brief { color: #8b949e; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; flex: 1; }
-.event-ts { color: #484f58; font-size: 11px; flex-shrink: 0; }
-.event-hash { color: #484f58; font-size: 11px; flex-shrink: 0;
-  font-family: ui-monospace, Consolas, monospace; }
-.event-payload { margin: 2px 0 8px 40px; padding: 8px 12px;
-  background: #161b22; border-radius: 8px; font-size: 11px; color: #c9d1d9;
-  font-family: ui-monospace, Consolas, monospace; white-space: pre-wrap;
-  word-break: break-all; max-height: 300px; overflow-y: auto; }
+.page-head :deep(.el-button) {
+  gap: 7px;
+}
+
+.page-description {
+  margin: 0;
+  color: var(--kg-text-tertiary);
+  font-size: 13px;
+}
+
+.audit-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--kg-space-5);
+  margin-top: var(--kg-space-6);
+  padding-bottom: var(--kg-space-4);
+  border-bottom: 1px solid var(--kg-border-subtle);
+}
+
+.session-picker {
+  display: grid;
+  gap: 6px;
+  width: min(380px, 45%);
+  color: var(--kg-text-tertiary);
+  font-size: 12px;
+}
+
+.chain-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--kg-space-3);
+  min-height: 32px;
+}
+
+.chain-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.chain-status.is-ok { color: var(--kg-success); }
+.chain-status.is-bad { color: var(--kg-danger); }
+.chain-status.is-pending { color: var(--kg-text-tertiary); }
+.chain-status.is-pending :deep(.kg-icon) { animation: kg-spin .8s linear infinite; }
+.event-count { color: var(--kg-text-tertiary); font-size: 12px; }
+
+.timeline {
+  padding: var(--kg-space-4) 0 var(--kg-space-6);
+}
+
+.event {
+  position: relative;
+  padding-left: 28px;
+}
+
+.event:not(:last-child)::before {
+  position: absolute;
+  top: 27px;
+  bottom: -7px;
+  left: 8px;
+  width: 1px;
+  background: var(--kg-border-subtle);
+  content: '';
+}
+
+.event-marker {
+  position: absolute;
+  z-index: 1;
+  top: 10px;
+  left: 0;
+  display: grid;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+  border: 1px solid var(--kg-border-default);
+  border-radius: var(--kg-radius-pill);
+  background: var(--kg-bg-canvas);
+  color: var(--kg-text-tertiary);
+}
+
+.event.is-warning .event-marker { border-color: var(--kg-warning-border); color: var(--kg-warning); }
+.event.is-danger .event-marker { border-color: var(--kg-danger-border); color: var(--kg-danger); }
+.event.is-info .event-marker { border-color: var(--kg-info-border); color: var(--kg-info); }
+.event.is-success .event-marker { border-color: var(--kg-success-border); color: var(--kg-success); }
+
+.event-head {
+  display: grid;
+  grid-template-columns: 34px 112px minmax(120px, 1fr) 174px 108px 14px;
+  align-items: center;
+  gap: var(--kg-space-2);
+  width: 100%;
+  min-height: 38px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--kg-radius-sm);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--kg-motion-fast) var(--kg-ease-standard);
+}
+
+.event-head:hover { background: var(--kg-bg-surface-1); }
+.event-seq { color: var(--kg-text-disabled); font-family: var(--kg-font-mono); font-size: 11px; }
+.event-type { color: var(--kg-text-primary); font-size: 13px; font-weight: 500; }
+
+.event-brief {
+  overflow: hidden;
+  color: var(--kg-text-secondary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.event-ts {
+  color: var(--kg-text-tertiary);
+  font-family: var(--kg-font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.event-date { margin-right: 5px; }
+
+.event-hash {
+  overflow: hidden;
+  color: var(--kg-text-disabled);
+  font-family: var(--kg-font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.event-chevron,
+.raw-toggle :deep(.kg-icon) {
+  color: var(--kg-text-disabled);
+  transition: transform var(--kg-motion-base) var(--kg-ease-standard);
+}
+
+.event-chevron.open,
+.raw-toggle :deep(.kg-icon.open) { transform: rotate(90deg); }
+
+.event-detail {
+  margin: 2px 8px var(--kg-space-3);
+  padding: var(--kg-space-4);
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-bg-surface-1);
+}
+
+.detail-list { display: grid; gap: 9px; margin: 0; }
+
+.detail-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: var(--kg-space-3);
+}
+
+.detail-row dt {
+  color: var(--kg-text-tertiary);
+  font-size: 12px;
+}
+
+.detail-row dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--kg-text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.hash-chain {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 14px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--kg-space-2);
+  margin-top: var(--kg-space-4);
+  padding-top: var(--kg-space-3);
+  border-top: 1px solid var(--kg-border-subtle);
+  color: var(--kg-text-disabled);
+}
+
+.hash-chain > div { min-width: 0; }
+.hash-chain span { display: block; margin-bottom: 3px; font-size: 11px; }
+
+.hash-chain code {
+  display: block;
+  overflow: hidden;
+  color: var(--kg-text-tertiary);
+  font-family: var(--kg-font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.raw-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: var(--kg-space-3);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kg-text-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.raw-toggle:hover { color: var(--kg-text-primary); }
+
+.event-payload {
+  max-height: 320px;
+  margin: var(--kg-space-3) 0 0;
+  padding: var(--kg-space-3);
+  overflow: auto;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-sm);
+  background: var(--kg-bg-code);
+  color: var(--kg-text-secondary);
+  font-family: var(--kg-font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.audit-empty { min-height: 280px; align-content: center; }
+.audit-empty.is-error { color: var(--kg-danger); }
+
+@media (max-width: 1320px) {
+  .event-head {
+    grid-template-columns: 30px 104px minmax(100px, 1fr) 82px 102px 14px;
+  }
+
+  .event-date { display: none; }
+}
+
+@media (max-width: 1080px) {
+  .session-picker { width: min(340px, 52%); }
+
+  .event-head {
+    grid-template-columns: 28px 96px minmax(100px, 1fr) 72px 14px;
+  }
+
+  .event-hash { display: none; }
+  .event-detail { margin-right: 0; }
+}
 </style>

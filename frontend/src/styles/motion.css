@@ -1,0 +1,28 @@
+@keyframes kg-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes kg-pulse-node {
+  0%, 100% { opacity: .55; }
+  50% { opacity: 1; }
+}
+
+.kg-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--kg-border-default);
+  border-top-color: var(--kg-info);
+  border-radius: 50%;
+  animation: kg-spin 800ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

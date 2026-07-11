@@ -1,70 +1,84 @@
 <template>
-  <div class="step-block">
-    <div class="step-header" @click="step.expanded = !step.expanded">
-      <span class="bullet" :class="riskClass">●</span>
-      <span class="tool-name">{{ shortTool }}</span>
-      <span v-if="argsText" class="args">{{ argsText }}</span>
+  <article class="step-block" :class="[`risk-${riskClass}`, `is-${step.status}`, { open: step.expanded }]">
+    <button type="button" class="step-header" :aria-expanded="step.expanded"
+            @click="step.expanded = !step.expanded">
+      <span class="status-node" :class="step.status">
+        <span v-if="isActive" class="node-spinner" aria-hidden="true"></span>
+        <KgIcon v-else :name="statusIcon" :size="13" />
+      </span>
+      <span class="step-identity">
+        <strong>{{ step.purpose || shortTool }}</strong>
+        <code>{{ shortTool }}</code>
+      </span>
       <span class="spacer"></span>
-      <span class="status-badge" :class="step.status">{{ statusText }}</span>
+      <span class="risk-badge" :class="riskClass">{{ riskLabel }}</span>
+      <span v-if="step.status !== 'denied' && step.status !== 'skipped'"
+            class="status-text" :class="step.status">{{ statusText }}</span>
       <span v-if="step.durationMs != null" class="duration">{{ durationText }}</span>
-      <span class="chevron" :class="{ open: step.expanded }">›</span>
-    </div>
+      <KgIcon name="chevron" :size="14" class="chevron"
+              :class="{ open: step.expanded }" />
+    </button>
 
-    <!-- 折叠时：输出首行预览 -->
-    <div v-if="preview && !step.expanded" class="preview-line"
-         @click="step.expanded = true">
-      <span class="tree-indent">│</span>
-      <span class="preview-text">{{ preview }}</span>
-    </div>
+    <button v-if="preview && !step.expanded" type="button" class="preview-line"
+            @click="step.expanded = true">
+      <KgIcon name="terminal" :size="12" />
+      <span>{{ preview }}</span>
+      <small>查看输出</small>
+    </button>
 
-    <!-- 展开时：三道闸 + 完整输出 -->
     <div v-if="step.expanded" class="step-body">
-      <template v-if="step.verification">
-        <div class="guard-row">
-          <span class="tree-indent">├─</span>
-          <span class="guard-label">规则引擎</span>
-          <span class="guard-text">{{ step.verification.rule.reason }}</span>
-        </div>
-        <div class="guard-row">
-          <span class="tree-indent">├─</span>
-          <span class="guard-label">LLM 审查</span>
-          <span class="guard-text">{{ step.verification.review.reason }}</span>
-        </div>
-        <div class="guard-row">
-          <span class="tree-indent">└─</span>
-          <span class="guard-label">门控结论</span>
-          <span class="guard-text">{{ step.verification.decision.reason }}</span>
-        </div>
-      </template>
-      <div v-else class="guard-row">
-        <span class="tree-indent">└─</span>
-        <span class="guard-text muted">三道闸校验中…</span>
+      <div v-if="argsText" class="detail-row parameter-row">
+        <span class="detail-label">参数</span>
+        <code>{{ argsText }}</code>
       </div>
 
+      <section class="checks" aria-label="安全检查">
+        <h4>安全检查</h4>
+        <template v-if="step.verification">
+          <div class="check-row">
+            <span class="detail-label">规则检查</span>
+            <span class="check-result" :class="ruleClass">{{ ruleLabel }}</span>
+            <span class="check-reason">{{ step.verification.rule.reason }}</span>
+          </div>
+          <div class="check-row">
+            <span class="detail-label">模型复核</span>
+            <span class="check-result" :class="reviewClass">{{ reviewLabel }}</span>
+            <span class="check-reason">{{ step.verification.review.reason }}</span>
+          </div>
+          <div class="check-row">
+            <span class="detail-label">处理方式</span>
+            <span class="check-result" :class="decisionClass">{{ decisionLabel }}</span>
+            <span class="check-reason">{{ step.verification.decision.reason }}</span>
+          </div>
+        </template>
+        <div v-else class="check-pending">
+          <span class="node-spinner" aria-hidden="true"></span>
+          <span>正在检查操作风险…</span>
+        </div>
+      </section>
+
       <template v-if="step.output != null">
-        <div class="output-header">
-          <span class="tree-indent">│</span>
-          <span class="guard-label">输出</span>
+        <div class="output-head">
+          <span>原始输出</span>
+          <span v-if="step.durationMs != null">{{ durationText }}</span>
         </div>
         <pre class="output-block">{{ step.output }}</pre>
       </template>
     </div>
-  </div>
+  </article>
 </template>
 
 <script setup>
 import { computed } from 'vue'
+import KgIcon from './KgIcon.vue'
 
 const props = defineProps({ step: { type: Object, required: true } })
 const step = props.step
 
 const shortTool = computed(() => step.tool.split('.').pop())
-
 const argsText = computed(() => {
   const entries = Object.entries(step.args || {})
-  if (!entries.length) return ''
-  const s = entries.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ')
-  return s.length > 72 ? s.slice(0, 72) + '…' : s
+  return entries.length ? JSON.stringify(step.args) : ''
 })
 
 const riskClass = computed(() => {
@@ -72,17 +86,30 @@ const riskClass = computed(() => {
   return step.verification?.decision.risk || step.risk || 'low'
 })
 
+const riskLabel = computed(() => {
+  if (step.status === 'skipped') return '已取消'
+  return ({
+    low: '低风险', medium: '中风险', high: '高风险', deny: '已阻止',
+  }[riskClass.value] || '待检查')
+})
+
+const isActive = computed(() => ['verifying', 'reviewing', 'running'].includes(step.status))
+const statusIcon = computed(() => {
+  if (step.status === 'done') return 'check'
+  if (step.status === 'denied' || step.status === 'skipped') return 'close'
+  if (step.status === 'waiting') return 'warning'
+  return 'terminal'
+})
+
 const statusText = computed(() => {
-  const risk = { low: '低危', medium: '中危', high: '高危' }[
-    step.verification?.decision.risk || step.risk] || ''
   switch (step.status) {
-    case 'verifying': return '校验中'
-    case 'reviewing': return '审查中'
-    case 'waiting':   return `${risk} · 等待确认`
-    case 'running':   return '执行中'
-    case 'done':      return step.autoAllowed ? `${risk} · 自动放行` : `${risk} · 已执行`
-    case 'denied':    return `已拒绝`
-    case 'skipped':   return '已跳过'
+    case 'verifying': return '检查中'
+    case 'reviewing': return '复核中'
+    case 'waiting': return '等待确认'
+    case 'running': return '执行中'
+    case 'done': return step.autoAllowed ? '自动执行' : '已执行'
+    case 'denied': return '已阻止'
+    case 'skipped': return '已取消'
     default: return ''
   }
 })
@@ -94,83 +121,155 @@ const durationText = computed(() => {
 
 const preview = computed(() => {
   if (step.status !== 'done' || !step.output) return ''
-  const lines = step.output.split('\n').filter(l => l.trim())
+  const lines = step.output.split('\n').filter((line) => line.trim())
   const head = lines.slice(0, 2).join('  ')
-  return lines.length > 2 ? head + '  …' : head
+  return lines.length > 2 ? `${head}  …` : head
 })
+
+const ruleLabel = computed(() => {
+  const decision = step.verification?.rule?.decision
+  if (decision === 'deny') return '未通过'
+  if (decision === 'allow') return '通过'
+  return '需复核'
+})
+const ruleClass = computed(() => (
+  step.verification?.rule?.decision === 'deny' ? 'danger'
+    : step.verification?.rule?.decision === 'allow' ? 'success' : 'info'
+))
+
+const reviewLabel = computed(() => (
+  step.verification?.review?.safe && step.verification?.review?.matches_intent
+    ? '通过' : '未通过'
+))
+const reviewClass = computed(() => (reviewLabel.value === '通过' ? 'success' : 'danger'))
+
+const decisionLabel = computed(() => ({
+  auto: '自动执行', confirm: '需要确认', double_confirm: '再次确认', deny: '已阻止',
+}[step.verification?.decision?.action] || '待确定'))
+const decisionClass = computed(() => ({
+  auto: 'success', confirm: 'warning', double_confirm: 'danger', deny: 'danger',
+}[step.verification?.decision?.action] || 'info'))
 </script>
 
 <style scoped>
-.step-block { margin: 3px 0; }
+.step-block { position: relative; margin: 6px 0; }
+.step-block::before { content: ''; position: absolute; top: 36px; bottom: -9px; left: 20px; width: 1px; background: var(--kg-border-subtle); }
 
 .step-header {
-  display: flex; align-items: center; gap: 7px;
-  padding: 4px 6px; border-radius: 5px;
-  font-size: 13px; cursor: pointer; user-select: none;
-  transition: background 0.1s;
+  width: 100%;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--kg-radius-sm);
+  background: transparent;
+  color: var(--kg-text-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--kg-motion-fast), border-color var(--kg-motion-fast);
 }
-.step-header:hover { background: #0d1117; }
 
-.bullet { font-size: 9px; flex-shrink: 0; line-height: 1; }
-.bullet.low    { color: #3fb950; }
-.bullet.medium { color: #d29922; }
-.bullet.high   { color: #f85149; }
-.bullet.deny   { color: #f85149; }
+.step-header:hover,
+.step-block.open .step-header { border-color: var(--kg-border-subtle); background: var(--kg-bg-surface-1); }
 
-.tool-name {
-  color: #79c0ff; font-size: 12px; font-weight: 600;
-  font-family: ui-monospace, Consolas, monospace; flex-shrink: 0;
+.status-node {
+  position: relative;
+  z-index: 1;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--kg-border-default);
+  border-radius: 50%;
+  background: var(--kg-bg-canvas);
+  color: var(--kg-text-tertiary);
 }
-.args {
-  color: #6e7681; font-size: 11px;
-  font-family: ui-monospace, Consolas, monospace;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
-}
+
+.status-node.done { border-color: var(--kg-success-border); background: var(--kg-success-soft); color: var(--kg-success); }
+.status-node.waiting { border-color: var(--kg-warning-border); background: var(--kg-warning-soft); color: var(--kg-warning); }
+.status-node.denied,
+.status-node.skipped { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); color: var(--kg-danger); }
+.status-node.verifying,
+.status-node.reviewing,
+.status-node.running { border-color: var(--kg-info-border); background: var(--kg-info-soft); color: var(--kg-info); }
+
+.node-spinner { width: 12px; height: 12px; flex: none; border: 2px solid var(--kg-border-default); border-top-color: currentColor; border-radius: 50%; animation: kg-spin 800ms linear infinite; }
+
+.step-identity { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.step-identity strong { overflow: hidden; color: var(--kg-text-primary); font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.step-identity code { color: var(--kg-text-tertiary); font: 12px/1 var(--kg-font-mono); }
 .spacer { flex: 1; }
 
-.status-badge { font-size: 11px; flex-shrink: 0; color: #6e7681; }
-.status-badge.done    { color: #3fb950; }
-.status-badge.denied,
-.status-badge.skipped { color: #f85149; }
-.status-badge.waiting { color: #d29922; }
-.status-badge.verifying,
-.status-badge.reviewing { color: #58a6ff; }
-
-.duration { font-size: 11px; color: #484f58; font-family: ui-monospace, Consolas, monospace; flex-shrink: 0; }
-.chevron { font-size: 13px; color: #484f58; flex-shrink: 0; transition: transform 0.15s; }
+.risk-badge { flex: none; padding: 1px 6px; border: 1px solid var(--kg-success-border); border-radius: var(--kg-radius-xs); background: var(--kg-success-soft); color: var(--kg-success); font-size: 12px; }
+.risk-badge.medium { border-color: var(--kg-warning-border); background: var(--kg-warning-soft); color: var(--kg-warning); }
+.risk-badge.high,
+.risk-badge.deny { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); color: var(--kg-danger); }
+.status-text { flex: none; color: var(--kg-text-tertiary); font-size: 12px; }
+.status-text.done { color: var(--kg-success); }
+.status-text.waiting { color: var(--kg-warning); }
+.status-text.denied,
+.status-text.skipped { color: var(--kg-danger); }
+.status-text.verifying,
+.status-text.reviewing,
+.status-text.running { color: var(--kg-info); }
+.duration { flex: none; color: var(--kg-text-tertiary); font: 12px/1 var(--kg-font-mono); }
+.chevron { flex: none; color: var(--kg-text-tertiary); transition: transform var(--kg-motion-base); }
 .chevron.open { transform: rotate(90deg); }
 
-.tree-indent {
-  color: #30363d; font-family: ui-monospace, Consolas, monospace;
-  font-size: 12px; flex-shrink: 0; width: 22px;
-}
-
 .preview-line {
-  display: flex; align-items: baseline; gap: 6px;
-  padding: 1px 6px 1px 16px; cursor: pointer;
+  width: calc(100% - 39px);
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -1px 0 5px 39px;
+  padding: 4px 7px;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--kg-radius-sm);
+  background: transparent;
+  color: var(--kg-text-tertiary);
+  text-align: left;
+  cursor: pointer;
 }
-.preview-text {
-  font-size: 11px; color: #484f58; font-family: ui-monospace, Consolas, monospace;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  transition: color 0.1s;
+.preview-line:hover { background: var(--kg-bg-surface-1); color: var(--kg-text-secondary); }
+.preview-line > span { min-width: 0; flex: 1; overflow: hidden; font: 12px/1.5 var(--kg-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.preview-line small { flex: none; color: var(--kg-accent); font-size: 12px; }
+
+.step-body {
+  margin: 3px 0 14px 39px;
+  overflow: hidden;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-bg-surface-1);
 }
-.preview-line:hover .preview-text { color: #8b949e; }
 
-.step-body { padding: 2px 6px 6px 16px; }
+.detail-row,
+.check-row { display: grid; grid-template-columns: 74px 74px minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 9px 12px; }
+.parameter-row { grid-template-columns: 74px minmax(0, 1fr); border-bottom: 1px solid var(--kg-border-subtle); }
+.parameter-row code { color: var(--kg-text-secondary); font: 12px/1.55 var(--kg-font-mono); word-break: break-all; }
+.detail-label { color: var(--kg-text-tertiary); font-size: 12px; }
 
-.guard-row { display: flex; align-items: baseline; gap: 6px; padding: 1px 0; }
-.guard-label {
-  color: #6e7681; font-size: 11px; font-weight: 600; flex-shrink: 0; width: 52px;
-}
-.guard-text { font-size: 12px; color: #8b949e; }
-.guard-text.muted { color: #484f58; }
+.checks h4,
+.output-head { margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--kg-border-subtle); color: var(--kg-text-secondary); font-size: 12px; font-weight: 600; }
+.check-row + .check-row { border-top: 1px solid var(--kg-border-subtle); }
+.check-result { font-size: 12px; }
+.check-result.success { color: var(--kg-success); }
+.check-result.warning { color: var(--kg-warning); }
+.check-result.danger { color: var(--kg-danger); }
+.check-result.info { color: var(--kg-info); }
+.check-reason { color: var(--kg-text-secondary); font-size: 12px; line-height: 1.55; }
+.check-pending { display: flex; align-items: center; gap: 8px; padding: 12px; color: var(--kg-text-tertiary); font-size: 12px; }
 
-.output-header { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
-.output-block {
-  margin: 3px 0 0 22px; padding: 8px 10px;
-  background: #010409; border: 1px solid #1e2430; border-radius: 6px;
-  font-family: ui-monospace, Consolas, monospace; font-size: 11px;
-  color: #8b949e; white-space: pre-wrap; word-break: break-all;
-  max-height: 280px; overflow-y: auto; line-height: 1.5;
+.output-head { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--kg-border-subtle); }
+.output-head span:last-child { color: var(--kg-text-tertiary); font: 12px/1 var(--kg-font-mono); font-weight: 400; }
+.output-block { max-height: 280px; margin: 0; padding: 11px 12px; overflow: auto; background: var(--kg-bg-code); color: var(--kg-text-secondary); font: 12px/1.55 var(--kg-font-mono); white-space: pre-wrap; word-break: break-all; }
+
+@media (max-width: 1080px) {
+  .step-identity code,
+  .status-text { display: none; }
 }
 </style>

@@ -224,6 +224,11 @@ class AlertStore:
         new = []
         for a in raw_alerts:
             kind = a["kind"]
+            active = next((item for item in self._alerts.values()
+                           if item["kind"] == kind and not item["acked"]), None)
+            if active is not None:
+                active.update(a)
+                continue
             last = self._last_fired.get(kind, 0)
             if now - last < self.COOLDOWN:
                 continue
@@ -246,6 +251,7 @@ class AlertStore:
         if a is None:
             return False
         a["acked"] = True
+        self._last_fired[a["kind"]] = time.time()
         return True
 
 
@@ -329,7 +335,7 @@ async def _evaluate_rules(snapshot: dict[str, str], rule_store) -> None:
     }
     for name, pct in _parse_disk_pcts(snapshot):
         metrics[f"disk_pct_{name}"] = float(pct)
-        metrics["disk_pct"] = float(pct)  # 任意磁盘最大值覆盖
+        metrics["disk_pct"] = max(metrics.get("disk_pct") or 0.0, float(pct))
 
     now = time.time()
     for rule in rule_store.list_rules():
@@ -339,10 +345,13 @@ async def _evaluate_rules(snapshot: dict[str, str], rule_store) -> None:
         if val is None:
             continue
         # 评估条件
-        triggered = (rule.operator == ">=" and val >= rule.threshold) or \
-                    (rule.operator == ">"  and val >  rule.threshold) or \
-                    (rule.operator == "<=" and val <= rule.threshold) or \
-                    (rule.operator == "<"  and val <  rule.threshold)
+        if rule.metric == "failed_services":
+            triggered = val >= 1.0
+        else:
+            triggered = (rule.operator == ">=" and val >= rule.threshold) or \
+                        (rule.operator == ">"  and val >  rule.threshold) or \
+                        (rule.operator == "<=" and val <= rule.threshold) or \
+                        (rule.operator == "<"  and val <  rule.threshold)
         if not triggered:
             continue
         # 检查冷却期
@@ -353,7 +362,7 @@ async def _evaluate_rules(snapshot: dict[str, str], rule_store) -> None:
         rule_store.update_last_fired(rule.id)
 
         # 构建推送载荷
-        metric_value = f"{val:.0f}%"
+        metric_value = "存在" if rule.metric == "failed_services" else f"{val:.0f}%"
         payload = {
             "rule_name": rule.name,
             "metric": rule.metric,

@@ -1,0 +1,143 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+html {
+  background: var(--kg-bg-canvas);
+}
+
+body {
+  overflow: hidden;
+  background: var(--kg-bg-canvas);
+  color: var(--kg-text-primary);
+  font-family: var(--kg-font-ui);
+  font-size: 14px;
+  line-height: 1.55;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button,
+[role="button"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--kg-focus);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: rgb(107 194 177 / 28%);
+  color: var(--kg-text-primary);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: var(--kg-radius-pill);
+  background: #394142;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #56605f;
+  background-clip: padding-box;
+}
+
+.kg-page {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.kg-page-inner {
+  width: min(100%, var(--kg-content-max));
+  margin: 0 auto;
+  padding: var(--kg-space-6) var(--kg-space-8) var(--kg-space-10);
+}
+
+.kg-page-title {
+  margin: 0;
+  color: var(--kg-text-primary);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.kg-section-title {
+  margin: 0;
+  color: var(--kg-text-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.kg-meta {
+  color: var(--kg-text-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.kg-mono {
+  font-family: var(--kg-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.kg-empty {
+  display: grid;
+  justify-items: center;
+  gap: var(--kg-space-2);
+  padding: var(--kg-space-10) var(--kg-space-6);
+  color: var(--kg-text-tertiary);
+  text-align: center;
+}
+
+.kg-empty strong {
+  color: var(--kg-text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+@media (max-width: 1320px) {
+  .kg-page-inner {
+    padding-right: var(--kg-space-6);
+    padding-left: var(--kg-space-6);
+  }
+}
+
+@media (max-width: 1080px) {
+  .kg-page-inner {
+    padding: var(--kg-space-5);
+  }
+}

@@ -1,59 +1,108 @@
 <template>
-  <aside class="sidebar">
-    <!-- 品牌 -->
-    <div class="brand">KylinGuard</div>
+  <aside ref="sidebar" class="sidebar" aria-label="主导航" @keydown.esc="historyOpen = false">
+    <div class="brand">
+      <span class="brand-mark"><KgLogo :size="22" /></span>
+      <span class="brand-copy">
+        <strong>麒盾</strong>
+        <span>KylinGuard</span>
+      </span>
+    </div>
 
-    <!-- 新对话 -->
-    <button class="new-btn" :disabled="running" @click="newSession">
-      <span class="new-icon">+</span> 新对话
+    <button class="new-btn" type="button" :disabled="running"
+            title="新建任务" @click="startTask">
+      <KgIcon name="plus" :size="16" />
+      <span class="new-label">新建任务</span>
     </button>
 
-    <!-- 主导航 -->
-    <nav class="nav-section">
+    <nav class="nav-section" aria-label="工作区">
       <button v-for="v in VIEWS" :key="v.key" class="nav-item"
-              :class="{ active: view === v.key }"
-              @click="$emit('change-view', v.key)">
-        <span class="nav-icon">{{ v.icon }}</span>
-        <span>{{ v.label }}</span>
+              :class="{ active: view === v.key }" type="button"
+              :title="v.label" :aria-current="view === v.key ? 'page' : undefined"
+              @click="navigate(v.key)">
+        <KgIcon :name="v.icon" :size="16" />
+        <span class="nav-label">{{ v.label }}</span>
       </button>
     </nav>
 
+    <button class="rail-history" :class="{ active: historyOpen }" type="button"
+            title="最近任务" aria-controls="recent-tasks" :aria-expanded="historyOpen"
+            @click="historyOpen = !historyOpen">
+      <KgIcon name="audit" :size="16" />
+      <span class="sr-only">最近任务</span>
+    </button>
+
     <div class="divider"></div>
 
-    <!-- 会话列表 -->
-    <div class="section-label">历史会话</div>
-    <div class="session-list">
-      <button v-for="s in sessions" :key="s.id" class="session-item"
-           :class="{ active: s.id === activeId }"
-           @click="loadSession(s.id)">
-        <span class="session-title">{{ s.title }}</span>
-        <span class="session-time">{{ timeText(s.updated_at) }}</span>
-      </button>
-      <div v-if="!sessions.length" class="empty">暂无历史会话</div>
-    </div>
+    <section id="recent-tasks" class="session-section" :class="{ open: historyOpen }"
+             aria-labelledby="recent-title">
+      <div id="recent-title" class="section-label">最近任务</div>
+      <div class="session-list">
+        <button v-for="s in sessions" :key="s.id" class="session-item"
+                :class="{ active: view === 'chat' && s.id === activeId }"
+                type="button" :title="s.title" @click="openSession(s.id)">
+          <span class="session-title">{{ s.title }}</span>
+          <time class="session-time">{{ timeText(s.updated_at) }}</time>
+        </button>
+        <div v-if="!sessions.length" class="session-empty">还没有任务记录</div>
+      </div>
+    </section>
 
-    <!-- 底部用户区 -->
     <div class="user-bar">
-      <span class="username">{{ username }}</span>
-      <button class="logout-btn" @click="logout">退出</button>
+      <span class="user-avatar" aria-hidden="true">{{ userInitial }}</span>
+      <span class="username" :title="username">{{ username }}</span>
+      <button class="logout-btn" type="button" title="退出登录"
+              aria-label="退出登录" @click="logout">
+        <KgIcon name="logout" :size="16" />
+      </button>
     </div>
   </aside>
 </template>
 
 <script setup>
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { activeId, loadSession, newSession, running, sessions } from '../composables/useChat.js'
 import { logout, username } from '../composables/useAuth.js'
+import KgIcon from './KgIcon.vue'
+import KgLogo from './KgLogo.vue'
 
 defineProps({ view: { type: String, required: true } })
-defineEmits(['change-view'])
+const emit = defineEmits(['change-view'])
+const historyOpen = ref(false)
+const sidebar = ref(null)
 
 const VIEWS = [
-  { key: 'chat',      icon: '⌘', label: '对话运维' },
-  { key: 'audit',     icon: '◎', label: '审计回放' },
-  { key: 'policy',    icon: '⊞', label: '策略管理' },
-  { key: 'dashboard', icon: '▤', label: '仪表盘'   },
-  { key: 'alerts',    icon: '⚑', label: '告警配置' },
+  { key: 'chat', icon: 'task', label: '任务' },
+  { key: 'audit', icon: 'audit', label: '审计记录' },
+  { key: 'policy', icon: 'shield', label: '安全策略' },
+  { key: 'dashboard', icon: 'dashboard', label: '总览' },
+  { key: 'alerts', icon: 'bell', label: '告警' },
 ]
+
+const userInitial = computed(() => (username.value || 'U').trim().slice(0, 1).toUpperCase())
+
+function startTask() {
+  historyOpen.value = false
+  emit('change-view', 'chat')
+  newSession()
+}
+
+function openSession(id) {
+  historyOpen.value = false
+  emit('change-view', 'chat')
+  loadSession(id)
+}
+
+function navigate(next) {
+  historyOpen.value = false
+  emit('change-view', next)
+}
+
+function closeHistoryOnOutside(event) {
+  if (historyOpen.value && !sidebar.value?.contains(event.target)) historyOpen.value = false
+}
+
+onMounted(() => document.addEventListener('pointerdown', closeHistoryOnOutside))
+onUnmounted(() => document.removeEventListener('pointerdown', closeHistoryOnOutside))
 
 function timeText(ts) {
   const d = new Date(ts * 1000)
@@ -66,67 +115,352 @@ function timeText(ts) {
 
 <style scoped>
 .sidebar {
-  width: 220px; flex-shrink: 0; display: flex; flex-direction: column;
-  border-right: 1px solid #1e2430; background: #0a0d12;
-  font-size: 13px; overflow: hidden;
+  width: var(--kg-sidebar-width);
+  min-width: var(--kg-sidebar-width);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--kg-border-subtle);
+  background: var(--kg-bg-sidebar);
+  color: var(--kg-text-secondary);
+  transition: width var(--kg-motion-base) var(--kg-ease-standard),
+    min-width var(--kg-motion-base) var(--kg-ease-standard);
 }
 
 .brand {
-  padding: 18px 16px 10px;
-  font-size: 13px; font-weight: 700; letter-spacing: 0.04em;
-  color: #58a6ff; font-family: ui-monospace, Consolas, monospace;
+  height: var(--kg-pagebar-height);
+  display: flex;
+  align-items: center;
+  gap: var(--kg-space-3);
+  padding: 0 var(--kg-space-4);
+  border-bottom: 1px solid var(--kg-border-subtle);
+}
+
+.brand-mark {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-bg-surface-1);
+  color: var(--kg-accent);
+  box-shadow: inset 0 1px rgb(255 255 255 / 3%);
+}
+
+.brand-copy {
+  min-width: 0;
+  display: grid;
+  line-height: 1.15;
+}
+
+.brand-copy strong {
+  color: var(--kg-text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.brand-copy span {
+  margin-top: 3px;
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+  letter-spacing: .04em;
 }
 
 .new-btn {
-  margin: 4px 10px 8px; padding: 7px 12px;
-  background: #161b22; border: 1px solid #30363d; border-radius: 6px;
-  color: #c9d1d9; font-size: 12px; cursor: pointer; text-align: left;
-  display: flex; align-items: center; gap: 6px; transition: background 0.15s;
+  height: 34px;
+  margin: var(--kg-space-3) var(--kg-space-3) var(--kg-space-2);
+  padding: 0 var(--kg-space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--kg-space-2);
+  flex: none;
+  border: 1px solid var(--kg-border-default);
+  border-radius: var(--kg-radius-sm);
+  background: var(--kg-bg-surface-1);
+  color: var(--kg-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: inset 0 1px rgb(255 255 255 / 2.5%);
+  transition: color var(--kg-motion-fast), background var(--kg-motion-fast),
+    border-color var(--kg-motion-fast);
 }
-.new-btn:hover:not(:disabled) { background: #1c2733; border-color: #58a6ff; color: #e6edf3; }
-.new-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.new-icon { font-size: 15px; line-height: 1; color: #8b949e; }
 
-.nav-section { padding: 0 8px; display: flex; flex-direction: column; gap: 1px; }
+.new-btn:hover:not(:disabled) {
+  border-color: var(--kg-border-strong);
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-primary);
+}
+
+.new-btn:active:not(:disabled) { background: var(--kg-bg-surface-3); }
+.new-btn:disabled {
+  border-color: var(--kg-border-subtle);
+  background: var(--kg-bg-surface-1);
+  color: var(--kg-text-disabled);
+  cursor: not-allowed;
+}
+
+.nav-section {
+  display: grid;
+  gap: 2px;
+  padding: 0 var(--kg-space-2);
+}
+
 .nav-item {
-  display: flex; align-items: center; gap: 9px;
-  padding: 6px 10px; border-radius: 6px; border: none; background: transparent;
-  color: #8b949e; font-size: 13px; cursor: pointer; width: 100%; text-align: left;
-  transition: background 0.12s, color 0.12s;
+  position: relative;
+  width: 100%;
+  height: 34px;
+  padding: 0 var(--kg-space-3);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: var(--kg-radius-sm);
+  background: transparent;
+  color: var(--kg-text-tertiary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--kg-motion-fast), background var(--kg-motion-fast);
 }
-.nav-item:hover { background: #161b22; color: #c9d1d9; }
-.nav-item.active { background: #1c2733; color: #e6edf3; }
-.nav-icon { font-size: 12px; width: 16px; text-align: center; flex-shrink: 0; }
 
-.divider { height: 1px; background: #1e2430; margin: 10px 0; }
+.nav-item:hover {
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-secondary);
+}
+
+.nav-item.active {
+  background: var(--kg-selection);
+  color: var(--kg-text-primary);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  width: 2px;
+  border-radius: var(--kg-radius-pill);
+  background: var(--kg-accent);
+}
+
+.nav-item.active :deep(.kg-icon) { color: var(--kg-accent); }
+
+.rail-history { display: none; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.divider {
+  height: 1px;
+  flex: none;
+  margin: var(--kg-space-3) var(--kg-space-4);
+  background: var(--kg-border-subtle);
+}
+
+.session-section {
+  min-height: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+}
 
 .section-label {
-  padding: 0 16px 6px; font-size: 11px; color: #484f58;
-  font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 0 var(--kg-space-4) var(--kg-space-2);
+  color: var(--kg-text-tertiary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
 }
 
-.session-list { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
-.session-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 10px; border-radius: 6px; width: 100%;
-  border: none; background: transparent; cursor: pointer;
-  color: #8b949e; font-size: 12px; text-align: left; transition: background 0.12s;
+.session-list {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 var(--kg-space-2) var(--kg-space-3);
 }
-.session-item:hover { background: #161b22; color: #c9d1d9; }
-.session-item.active { background: #1c2733; color: #e6edf3; }
-.session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-time { flex-shrink: 0; color: #484f58; font-size: 11px; }
-.empty { color: #484f58; font-size: 12px; padding: 12px 10px; }
+
+.session-item {
+  position: relative;
+  width: 100%;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: var(--kg-space-2);
+  padding: 0 var(--kg-space-3);
+  border: 0;
+  border-radius: var(--kg-radius-sm);
+  background: transparent;
+  color: var(--kg-text-secondary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--kg-motion-fast), background var(--kg-motion-fast);
+}
+
+.session-item:hover {
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-primary);
+}
+
+.session-item.active {
+  background: var(--kg-selection);
+  color: var(--kg-text-primary);
+}
+
+.session-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-time {
+  flex: none;
+  color: var(--kg-text-tertiary);
+  font-family: var(--kg-font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-empty {
+  padding: var(--kg-space-4) var(--kg-space-3);
+  color: var(--kg-text-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
 
 .user-bar {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 14px; border-top: 1px solid #1e2430;
+  min-height: 52px;
+  padding: var(--kg-space-2) var(--kg-space-3);
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--kg-space-2);
+  border-top: 1px solid var(--kg-border-subtle);
+}
+
+.user-avatar {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-sm);
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-secondary);
   font-size: 12px;
+  font-weight: 600;
 }
-.username { color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.username {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--kg-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .logout-btn {
-  background: none; border: none; color: #484f58; font-size: 12px;
-  cursor: pointer; padding: 2px 6px; border-radius: 4px; flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: var(--kg-radius-sm);
+  background: transparent;
+  color: var(--kg-text-tertiary);
+  cursor: pointer;
+  transition: color var(--kg-motion-fast), background var(--kg-motion-fast);
 }
-.logout-btn:hover { color: #c9d1d9; background: #161b22; }
+
+.logout-btn:hover {
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-primary);
+}
+
+@media (max-width: 720px) {
+  .sidebar {
+    position: relative;
+    z-index: 10;
+    width: 68px;
+    min-width: 68px;
+    overflow: visible;
+  }
+
+  .brand {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .brand-copy,
+  .new-label,
+  .nav-label,
+  .username {
+    display: none;
+  }
+
+  .new-btn {
+    width: 36px;
+    justify-content: center;
+    margin: var(--kg-space-3) auto var(--kg-space-2);
+    padding: 0;
+  }
+
+  .nav-section { padding: 0 var(--kg-space-2); }
+  .nav-item { justify-content: center; padding: 0; }
+
+  .rail-history {
+    width: 52px;
+    height: 34px;
+    margin: var(--kg-space-2) auto 0;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: var(--kg-radius-sm);
+    background: transparent;
+    color: var(--kg-text-tertiary);
+    cursor: pointer;
+  }
+
+  .rail-history:hover,
+  .rail-history.active { background: var(--kg-bg-surface-2); color: var(--kg-text-primary); }
+
+  .divider { margin: var(--kg-space-3) var(--kg-space-2); }
+
+  .session-section {
+    position: absolute;
+    top: calc(var(--kg-pagebar-height) + var(--kg-space-3));
+    bottom: var(--kg-space-3);
+    left: calc(100% + var(--kg-space-2));
+    width: 240px;
+    display: none;
+    padding-top: var(--kg-space-3);
+    overflow: hidden;
+    border: 1px solid var(--kg-border-default);
+    border-radius: var(--kg-radius-lg);
+    background: var(--kg-bg-elevated);
+    box-shadow: 0 18px 42px rgb(0 0 0 / 42%);
+  }
+
+  .session-section.open { display: flex; }
+  .user-bar { margin-top: auto; flex-direction: column; padding: var(--kg-space-2) 0; }
+}
 </style>

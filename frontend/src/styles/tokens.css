@@ -1,0 +1,90 @@
+:root {
+  color-scheme: dark;
+
+  --kg-bg-canvas: #101314;
+  --kg-bg-sidebar: #0c0f10;
+  --kg-bg-surface-1: #171b1c;
+  --kg-bg-surface-2: #1d2223;
+  --kg-bg-surface-3: #252b2c;
+  --kg-bg-elevated: #252b2c;
+  --kg-bg-code: #0b0e0f;
+
+  --kg-border-subtle: #2b3132;
+  --kg-border-default: #46504f;
+  --kg-border-control: #5d6965;
+  --kg-border-strong: #66716e;
+  --kg-focus: #8ad7c8;
+
+  --kg-text-primary: #ecefed;
+  --kg-text-secondary: #b8bfbc;
+  --kg-text-tertiary: #8b9490;
+  --kg-text-disabled: #626a67;
+  --kg-text-on-accent: #07110e;
+
+  --kg-accent: #6bc2b1;
+  --kg-accent-hover: #82d0c1;
+  --kg-accent-active: #54a796;
+  --kg-accent-soft: #162522;
+  --kg-selection: #1a2926;
+
+  --kg-info: #7fa9e8;
+  --kg-info-soft: #182332;
+  --kg-info-border: #3b5378;
+  --kg-success: #6fcf83;
+  --kg-success-soft: #17291b;
+  --kg-success-border: #315e3a;
+  --kg-warning: #d7ae62;
+  --kg-warning-soft: #2a2317;
+  --kg-warning-border: #6a532b;
+  --kg-danger: #ec7672;
+  --kg-danger-solid: #b94e4b;
+  --kg-danger-soft: #2d1919;
+  --kg-danger-border: #773735;
+  --kg-overlay: rgb(0 0 0 / 58%);
+
+  --kg-font-ui: Inter, "Noto Sans SC", "Microsoft YaHei UI", -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --kg-font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular",
+    Consolas, monospace;
+
+  --kg-space-1: 4px;
+  --kg-space-2: 8px;
+  --kg-space-3: 12px;
+  --kg-space-4: 16px;
+  --kg-space-5: 20px;
+  --kg-space-6: 24px;
+  --kg-space-8: 32px;
+  --kg-space-10: 40px;
+
+  --kg-radius-xs: 4px;
+  --kg-radius-sm: 6px;
+  --kg-radius-md: 8px;
+  --kg-radius-lg: 12px;
+  --kg-radius-pill: 999px;
+
+  --kg-motion-instant: 80ms;
+  --kg-motion-fast: 120ms;
+  --kg-motion-base: 180ms;
+  --kg-motion-slow: 240ms;
+  --kg-ease-standard: cubic-bezier(.2, 0, 0, 1);
+  --kg-ease-exit: cubic-bezier(.4, 0, 1, 1);
+
+  --kg-sidebar-width: 240px;
+  --kg-pagebar-height: 52px;
+  --kg-content-max: 1120px;
+  --kg-thread-max: 820px;
+}
+
+@media (max-width: 1320px) {
+  :root {
+    --kg-sidebar-width: 224px;
+    --kg-thread-max: 800px;
+  }
+}
+
+@media (max-width: 1080px) {
+  :root {
+    --kg-sidebar-width: 196px;
+    --kg-pagebar-height: 48px;
+  }
+}

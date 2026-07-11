@@ -4,7 +4,6 @@
 
 <script setup>
 import hljs from 'highlight.js/lib/common'
-import 'highlight.js/styles/github-dark.css'
 import MarkdownIt from 'markdown-it'
 import { computed } from 'vue'
 
@@ -22,57 +21,67 @@ const md = new MarkdownIt({
   },
 })
 
-const SECTION_RULES = [
-  { keywords: ['问题', '现象', '状态', '概况'], cls: 'sec-blue'   },
-  { keywords: ['根因', '原因', '分析', '定位'], cls: 'sec-red'    },
-  { keywords: ['处置', '操作', '执行', '步骤'], cls: 'sec-green'  },
-  { keywords: ['建议', '后续', '预防', '监控'], cls: 'sec-yellow' },
-]
-
-function sectionClass(title) {
-  const t = title.trim()
-  for (const { keywords, cls } of SECTION_RULES) {
-    if (keywords.some(k => t.includes(k))) return cls
-  }
-  return ''
-}
-
-const html = computed(() => {
-  const rendered = md.render(props.text || '')
-  return rendered.replace(/<h2>(.*?)<\/h2>/g, (_, title) => {
-    const cls = sectionClass(title)
-    return `<h2 class="${cls}">${title}</h2>`
-  })
-})
+const html = computed(() => md.render(props.text || ''))
 </script>
 
 <style>
-.md { line-height: 1.7; word-break: break-word; }
+.md { color: var(--kg-text-secondary); font-size: 14px; line-height: 1.78; word-break: break-word; }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
-.md p { margin: 6px 0; }
-.md h1, .md h3 { margin: 12px 0 6px; font-size: 1.05em; }
-.md h2 {
-  margin: 14px 0 6px; font-size: 0.9em; font-weight: 600;
-  padding: 5px 10px; border-radius: 5px;
-  border-left: 3px solid #30363d; background: #0d1117;
-  color: #c9d1d9; letter-spacing: 0.02em;
-}
-.md h2.sec-blue   { border-left-color: #58a6ff; color: #79c0ff; }
-.md h2.sec-red    { border-left-color: #f78166; color: #ffa198; }
-.md h2.sec-green  { border-left-color: #3fb950; color: #56d364; }
-.md h2.sec-yellow { border-left-color: #d29922; color: #e3b341; }
-.md ul, .md ol { padding-left: 22px; margin: 6px 0; }
-.md li { margin: 2px 0; }
-.md code { background: #1c2128; border-radius: 4px; padding: 1px 5px;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.9em; }
-.md pre { background: #161b22; border: 1px solid #21262d; border-radius: 8px;
-  padding: 10px 12px; overflow-x: auto; margin: 8px 0; }
-.md pre code { background: none; padding: 0; font-size: 12px; }
-.md table { border-collapse: collapse; margin: 8px 0; }
-.md th, .md td { border: 1px solid #30363d; padding: 4px 10px; font-size: 13px; }
-.md blockquote { border-left: 3px solid #30363d; margin: 8px 0;
-  padding: 0 12px; color: #8b949e; }
-.md a { color: #58a6ff; }
+.md p { margin: 8px 0; }
+.md strong { color: var(--kg-text-primary); font-weight: 600; }
+.md h1 { margin: 22px 0 10px; color: var(--kg-text-primary); font-size: 22px;
+  font-weight: 600; line-height: 1.35; letter-spacing: -.02em; }
+.md h3 { margin: 18px 0 7px; color: var(--kg-text-primary); font-size: 15px;
+  font-weight: 600; line-height: 1.45; }
+.md h2 { margin: 20px 0 8px; padding-top: 14px;
+  border-top: 1px solid var(--kg-border-subtle); color: var(--kg-text-primary);
+  font-size: 15px; font-weight: 600; line-height: 1.45; }
+.md ul, .md ol { margin: 8px 0; padding-left: 23px; }
+.md li { margin: 4px 0; padding-left: 2px; }
+.md li::marker { color: var(--kg-accent); font-family: var(--kg-font-mono); font-size: .85em; }
+.md code { padding: 2px 5px; border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-xs); background: var(--kg-bg-surface-2); color: var(--kg-accent);
+  font-family: var(--kg-font-mono); font-size: .88em; }
+.md pre { position: relative; margin: 11px 0; padding: 13px 14px; overflow-x: auto;
+  border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md);
+  background: var(--kg-bg-code); box-shadow: inset 3px 0 0 var(--kg-border-default); }
+.md pre code { padding: 0; border: none; background: none; color: var(--kg-text-secondary);
+  font-size: 12px; line-height: 1.65; }
+.md table { display: block; width: 100%; margin: 11px 0; overflow-x: auto;
+  border-collapse: collapse; border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-md); }
+.md thead { background: var(--kg-bg-surface-2); }
+.md th, .md td { min-width: 96px; padding: 7px 10px; border-right: 1px solid var(--kg-border-subtle);
+  border-bottom: 1px solid var(--kg-border-subtle); font-size: 12px; text-align: left; }
+.md th { color: var(--kg-text-primary); font-size: 12px; font-weight: 600; }
+.md tr:last-child td { border-bottom: none; }
+.md th:last-child, .md td:last-child { border-right: none; }
+.md blockquote { position: relative; margin: 11px 0; padding: 10px 12px 10px 38px;
+  border: 1px solid var(--kg-info-border); border-radius: var(--kg-radius-md);
+  background: var(--kg-info-soft); color: var(--kg-text-secondary); }
+.md blockquote::before { content: 'i'; position: absolute; top: 11px; left: 13px;
+  display: grid; place-items: center; width: 16px; height: 16px; border: 1px solid var(--kg-info);
+  border-radius: 50%; color: var(--kg-info); font: 600 10px/1 var(--kg-font-mono); }
+.md blockquote p { margin: 0; }
+.md a { color: var(--kg-accent); text-decoration-color: var(--kg-border-strong);
+  text-underline-offset: 3px; transition: color var(--kg-motion-fast); }
+.md a:hover { color: var(--kg-accent-hover); }
+.md hr { height: 1px; margin: 20px 0; border: none; background: var(--kg-border-subtle); }
+.md img { max-width: 100%; border-radius: var(--kg-radius-md); }
+
+/* KylinGuard syntax palette: restrained semantic accents instead of a vendor theme. */
+.md .hljs-comment, .md .hljs-quote { color: var(--kg-text-tertiary); font-style: italic; }
+.md .hljs-keyword, .md .hljs-selector-tag, .md .hljs-literal,
+.md .hljs-section, .md .hljs-link { color: var(--kg-info); }
+.md .hljs-string, .md .hljs-title, .md .hljs-name, .md .hljs-type,
+.md .hljs-attribute, .md .hljs-symbol, .md .hljs-bullet,
+.md .hljs-addition, .md .hljs-variable, .md .hljs-template-tag,
+.md .hljs-template-variable { color: var(--kg-success); }
+.md .hljs-number, .md .hljs-meta, .md .hljs-built_in,
+.md .hljs-builtin-name, .md .hljs-params { color: var(--kg-warning); }
+.md .hljs-deletion, .md .hljs-selector-id, .md .hljs-selector-class,
+.md .hljs-regexp { color: var(--kg-danger); }
+.md .hljs-emphasis { font-style: italic; }
+.md .hljs-strong { font-weight: 700; }
 </style>

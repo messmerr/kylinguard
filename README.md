@@ -7,25 +7,34 @@
 风险分级门控）校验，低危自动放行、中危一键确认、高危二次确认，
 全程写入哈希链审计日志，防篡改、可回放。
 
-## 快速开始（开发环境）
+## 快速开始（WSL 后端 + Windows 前端）
 
-要求：Python ≥ 3.10、Node ≥ 18、可访问的 OpenAI 兼容 LLM API（DeepSeek/Qwen）。
+要求：WSL2 中安装 Python ≥ 3.10，Windows 中安装 Node ≥ 18，并可访问 OpenAI 兼容 LLM API（DeepSeek/Qwen）。
+后端虚拟环境放在 WSL 的 ext4 主目录，避免在 `/mnt/*` 下安装大量 Python 小文件导致性能显著下降。
 
-    # 1. 配置：复制模板并填入 LLM 密钥与管理员密码
+    # 1. 在 WSL 中进入仓库并配置项目
+    cd /mnt/d/Documents/Study/3.3/cnsoft-projects
     cp .env.example .env
-    #   必填：KG_LLM_API_KEY（LLM 密钥）、KG_ADMIN_PASSWORD（登录密码，留空则无法登录）
+    # 必填：KG_LLM_API_KEY、KG_ADMIN_PASSWORD
 
-    # 2. 后端
+    # 2. 首次创建后端环境（只需执行一次）
+    mkdir -p ~/.venvs
+    python3 -m venv ~/.venvs/kylinguard
+    source ~/.venvs/kylinguard/bin/activate
+    python -m pip install -e "./backend[dev]"
+
+    # 3. 运行后端
     cd backend
-    pip install -e ".[dev]"
-    pytest                  # 全量测试（约 180 个用例）
-    uvicorn --factory kylinguard.api:create_app --port 8000
+    python -m pytest        # 全量测试（当前 203 个用例）
+    python -m uvicorn --factory kylinguard.api:create_app --host 0.0.0.0 --port 8000 --reload
 
-    # 3. 前端（先构建，之后由后端直接托管在 8000 端口）
-    cd frontend
-    npm install
-    npm run build           # 产物 dist/ 由后端静态托管
-    #   开发热更新可改用 npm run dev（http://127.0.0.1:5173，自动代理 /api 到 8000）
+    # 4. 另开一个 Windows PowerShell 运行前端
+    cd D:\Documents\Study\3.3\cnsoft-projects\frontend
+    npm ci                  # 首次运行或 package-lock.json 变化后执行
+    npm run dev
+    # 浏览器访问 http://127.0.0.1:5173，/api 自动代理到 8000
+
+若不需要热更新，也可以在 Windows 的 `frontend` 目录执行 `npm run build`，再只启动 WSL 后端；构建产物会由 8000 端口直接托管。
 
 浏览器打开后端端口 → 登录（用户名 `admin` + 你设置的密码）→ 顶栏切换四个视图：
 **对话运维 / 审计回放 / 策略管理 / 仪表盘**。
