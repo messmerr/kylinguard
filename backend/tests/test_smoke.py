@@ -14,10 +14,10 @@ class ScriptedLLM:
     def __init__(self, replies):
         self.replies = list(replies)
 
-    async def chat(self, messages, temperature=0.2):
+    async def chat(self, messages, temperature=0.2, on_progress=None):
         return self.replies.pop(0)
 
-    async def chat_stream(self, messages, temperature=0.2):
+    async def chat_stream(self, messages, temperature=0.2, on_progress=None):
         text = self.replies.pop(0)
         for i in range(0, len(text), 5):
             yield text[i:i + 5]

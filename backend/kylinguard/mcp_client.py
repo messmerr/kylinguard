@@ -21,6 +21,10 @@ SERVERS: dict[str, str] = {
 }
 
 
+class ToolCallError(RuntimeError):
+    """MCP 工具明确返回失败，供流水线区分成功结果与错误结果。"""
+
+
 def split_qualified(qualified: str) -> tuple[str, str]:
     server, sep, tool = qualified.partition(".")
     if not sep or not server or not tool:
@@ -69,8 +73,11 @@ class ToolManager:
 
     async def call(self, server: str, tool: str, arguments: dict) -> str:
         if server not in self._sessions:
-            return f"[工具调用失败] 未知服务器：{server}"
+            raise ToolCallError(f"未知工具服务器：{server}")
         result = await self._sessions[server].call_tool(tool, arguments)
         texts = [c.text for c in result.content
                  if getattr(c, "text", None) is not None]
-        return "\n".join(texts) if texts else "(无文本输出)"
+        output = "\n".join(texts) if texts else "(无文本输出)"
+        if getattr(result, "isError", False):
+            raise ToolCallError(output)
+        return output

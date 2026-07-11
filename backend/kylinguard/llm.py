@@ -1,79 +1,359 @@
-"""LLM 网关：OpenAI 兼容客户端封装，指数退避重试。
+"""LLM 网关：OpenAI 兼容客户端、可观测重试与安全错误映射。
 
-DeepSeek / Qwen 等任意 OpenAI 兼容端点均可经配置切换（应对实机演示网络风险）。
+SDK 内置重试被关闭，所有重试均由本模块统一控制。这样调用方可以准确
+获知每次连接、退避和失败，同时避免 SDK 重试与业务重试叠加。
 """
-import asyncio
+from __future__ import annotations
 
-from openai import AsyncOpenAI
+import asyncio
+import inspect
+import re
+import time
+import uuid
+from dataclasses import dataclass
+from typing import Awaitable, Callable
+
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 
 from kylinguard.config import Settings
 
+ProgressCallback = Callable[[dict], Awaitable[None]]
+
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
+_NON_RETRYABLE_STATUS = {400, 401, 403, 404, 422}
+
+
+@dataclass(frozen=True)
+class PublicError:
+    """允许进入 SSE、审计与普通日志的错误字段白名单。"""
+
+    code: str
+    message: str
+    retryable: bool
+    http_status: int | None = None
+    request_id: str | None = None
+    incident_id: str = ""
+
+    def to_dict(self) -> dict:
+        payload = {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+            "incident_id": self.incident_id or _incident_id(),
+        }
+        if self.http_status is not None:
+            payload["http_status"] = self.http_status
+        if self.request_id is not None:
+            payload["request_id"] = self.request_id
+        return payload
+
 
 class LLMError(RuntimeError):
-    """LLM 调用最终失败（重试耗尽）。"""
+    """带安全公开信息的 LLM 终态错误。"""
+
+    def __init__(self, error: PublicError, *, attempts: int,
+                 partial: bool = False):
+        super().__init__(error.message)
+        self.error = error
+        self.attempts = attempts
+        self.partial = partial
+
+
+class _ProgressCallbackError(RuntimeError):
+    """防止进度消费者异常被误判为模型服务异常并触发重试。"""
+
+
+def _incident_id() -> str:
+    return f"err-{uuid.uuid4().hex[:12]}"
+
+
+def public_error(code: str, message: str, *, retryable: bool,
+                 http_status: int | None = None,
+                 request_id: str | None = None,
+                 incident_id: str | None = None) -> PublicError:
+    """构造只含允许字段的公开错误。"""
+    return PublicError(
+        code=code,
+        message=message,
+        retryable=retryable,
+        http_status=http_status,
+        request_id=_sanitize_request_id(request_id),
+        incident_id=incident_id or _incident_id(),
+    )
+
+
+def public_error_from_exception(exc: BaseException) -> PublicError:
+    """将异常映射为稳定错误码；绝不复制原始异常文本或响应体。"""
+    if isinstance(exc, LLMError):
+        return exc.error
+
+    status = _status_code(exc)
+    request_id = _request_id(exc)
+    common = {"http_status": status, "request_id": request_id}
+
+    if isinstance(exc, APITimeoutError):
+        return public_error("llm_timeout", "模型服务响应超时。",
+                            retryable=True, **common)
+    if isinstance(exc, APIConnectionError):
+        return public_error("llm_unreachable", "无法连接模型服务。",
+                            retryable=True, **common)
+    if status == 400 or status == 422:
+        return public_error("llm_request_invalid", "模型服务拒绝了当前请求。",
+                            retryable=False, **common)
+    if status == 401:
+        return public_error("llm_auth_invalid",
+                            "模型服务未接受当前凭据，请检查 API Key。",
+                            retryable=False, **common)
+    if status == 403:
+        return public_error("llm_forbidden", "当前凭据无权调用模型服务。",
+                            retryable=False, **common)
+    if status == 404:
+        return public_error("llm_model_not_found",
+                            "模型或模型服务地址不存在，请检查配置。",
+                            retryable=False, **common)
+    if status == 408:
+        return public_error("llm_timeout", "模型服务响应超时。",
+                            retryable=True, **common)
+    if status == 409:
+        return public_error("llm_conflict", "模型服务暂时无法处理当前请求。",
+                            retryable=True, **common)
+    if status == 429:
+        return public_error("llm_rate_limited", "模型服务繁忙，请稍后重试。",
+                            retryable=True, **common)
+    if status is not None and status >= 500:
+        return public_error("llm_provider_unavailable", "模型服务暂时不可用。",
+                            retryable=True, **common)
+    if status in _NON_RETRYABLE_STATUS:
+        return public_error("llm_request_failed", "模型服务拒绝了当前请求。",
+                            retryable=False, **common)
+    return public_error("llm_request_failed", "模型服务调用失败。",
+                        retryable=False, **common)
+
+
+def internal_error() -> PublicError:
+    """API 未知异常的固定公开表示。"""
+    return public_error("internal_error", "任务因内部错误中止。",
+                        retryable=False)
+
+
+def _status_code(exc: BaseException) -> int | None:
+    value = getattr(exc, "status_code", None)
+    if value is None:
+        response = getattr(exc, "response", None)
+        value = getattr(response, "status_code", None)
+    return value if isinstance(value, int) else None
+
+
+def _request_id(exc: BaseException) -> str | None:
+    value = getattr(exc, "request_id", None)
+    if value is None:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            value = headers.get("x-request-id") or headers.get("request-id")
+    return _sanitize_request_id(value)
+
+
+def _sanitize_request_id(value) -> str | None:
+    if not isinstance(value, str) or not _SAFE_REQUEST_ID.fullmatch(value):
+        return None
+    return value
+
+
+def _retry_delay(exc: BaseException, fallback: float) -> float:
+    """尊重有界 Retry-After；无有效值时使用指数退避。"""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    raw = headers.get("retry-after") if headers is not None else None
+    try:
+        return min(60.0, max(0.0, float(raw)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+async def _emit_progress(callback: ProgressCallback | None, state: str, *,
+                         attempt: int, max_attempts: int, started: float,
+                         retry_in_ms: int = 0,
+                         error: PublicError | None = None) -> None:
+    if callback is None:
+        return
+    payload = {
+        "state": state,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "retry_in_ms": retry_in_ms,
+    }
+    if error is not None:
+        payload["error"] = error.to_dict()
+    try:
+        await callback(payload)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise _ProgressCallbackError() from exc
+
+
+async def _close_stream(stream) -> None:
+    close = getattr(stream, "close", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
 
 
 class LLMClient:
     def __init__(self, base_url: str, api_key: str, model: str,
-                 max_retries: int = 3):
-        # 空密钥用占位符：允许服务无密钥启动（协议级验证），真实调用时才报错
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key or "unset")
+                 max_retries: int = 3, timeout: float = 60.0):
+        self._configured = bool(api_key.strip())
+        # 空密钥仍允许服务启动；第一次真实调用会返回结构化配置错误。
+        self._client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key or "unset",
+            max_retries=0,
+            timeout=timeout,
+        )
         self.model = model
-        self.max_retries = max_retries
+        # 为兼容现有配置名，max_retries 表示包含首次请求在内的最大尝试数。
+        self.max_attempts = max(1, max_retries)
+        self.max_retries = self.max_attempts
 
-    async def chat(self, messages: list[dict], temperature: float = 0.2) -> str:
+    def _missing_key_error(self) -> PublicError | None:
+        if self._configured:
+            return None
+        return public_error("llm_config_missing", "尚未配置模型服务 API Key。",
+                            retryable=False)
+
+    async def chat(self, messages: list[dict], temperature: float = 0.2,
+                   on_progress: ProgressCallback | None = None) -> str:
+        started = time.monotonic()
         delay = 1.0
-        last_err: Exception | None = None
-        for attempt in range(self.max_retries):
+        for attempt in range(1, self.max_attempts + 1):
+            await _emit_progress(on_progress, "connecting", attempt=attempt,
+                                 max_attempts=self.max_attempts,
+                                 started=started)
+            missing = self._missing_key_error()
+            if missing is not None:
+                await _emit_progress(on_progress, "failed", attempt=attempt,
+                                     max_attempts=self.max_attempts,
+                                     started=started, error=missing)
+                raise LLMError(missing, attempts=attempt)
             try:
                 resp = await self._client.chat.completions.create(
                     model=self.model, messages=messages, temperature=temperature
                 )
-                return resp.choices[0].message.content or ""
-            except Exception as e:  # openai 网络/限流/超时异常族
-                last_err = e
-                if attempt < self.max_retries - 1:
-                    await asyncio.sleep(delay)
+            except _ProgressCallbackError as exc:
+                raise exc.__cause__ from exc
+            except Exception as exc:
+                error = public_error_from_exception(exc)
+                if error.retryable and attempt < self.max_attempts:
+                    wait = _retry_delay(exc, delay)
+                    await _emit_progress(
+                        on_progress, "retry_wait", attempt=attempt,
+                        max_attempts=self.max_attempts, started=started,
+                        retry_in_ms=int(wait * 1000), error=error,
+                    )
+                    await asyncio.sleep(wait)
                     delay *= 2
-        raise LLMError(f"LLM 调用失败（已重试 {self.max_retries} 次）：{last_err}")
+                    continue
+                await _emit_progress(on_progress, "failed", attempt=attempt,
+                                     max_attempts=self.max_attempts,
+                                     started=started, error=error)
+                raise LLMError(error, attempts=attempt) from exc
+            await _emit_progress(on_progress, "completed", attempt=attempt,
+                                 max_attempts=self.max_attempts,
+                                 started=started)
+            return resp.choices[0].message.content or ""
+        raise AssertionError("unreachable")
 
-    async def chat_stream(self, messages: list[dict],
-                          temperature: float = 0.2):
-        """流式对话：逐个产出文本增量。
-
-        重试只覆盖建立连接阶段；流中途断开直接抛出（半截输出无法安全续接，
-        由调用方决定整轮重试）。
-        """
+    async def chat_stream(self, messages: list[dict], temperature: float = 0.2,
+                          on_progress: ProgressCallback | None = None):
+        """逐个产出文本增量；只有尚未产出 token 的失败可以重试。"""
+        started = time.monotonic()
         delay = 1.0
-        stream = None
-        last_err: Exception | None = None
-        for attempt in range(self.max_retries):
+        for attempt in range(1, self.max_attempts + 1):
+            await _emit_progress(on_progress, "connecting", attempt=attempt,
+                                 max_attempts=self.max_attempts,
+                                 started=started)
+            missing = self._missing_key_error()
+            if missing is not None:
+                await _emit_progress(on_progress, "failed", attempt=attempt,
+                                     max_attempts=self.max_attempts,
+                                     started=started, error=missing)
+                raise LLMError(missing, attempts=attempt)
+
+            stream = None
+            emitted_token = False
+            streaming_notified = False
             try:
                 stream = await self._client.chat.completions.create(
                     model=self.model, messages=messages,
                     temperature=temperature, stream=True,
                 )
-                break
-            except Exception as e:
-                last_err = e
-                if attempt < self.max_retries - 1:
-                    await asyncio.sleep(delay)
+                async for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta.content
+                    if not delta:
+                        continue
+                    if not streaming_notified:
+                        await _emit_progress(
+                            on_progress, "streaming", attempt=attempt,
+                            max_attempts=self.max_attempts, started=started,
+                        )
+                        streaming_notified = True
+                    emitted_token = True
+                    yield delta
+            except _ProgressCallbackError as exc:
+                raise exc.__cause__ from exc
+            except Exception as exc:
+                error = public_error_from_exception(exc)
+                if emitted_token:
+                    error = public_error(
+                        "llm_stream_interrupted",
+                        "模型响应在传输过程中中断。",
+                        retryable=False,
+                        http_status=error.http_status,
+                        request_id=error.request_id,
+                        incident_id=error.incident_id,
+                    )
+                if error.retryable and attempt < self.max_attempts:
+                    wait = _retry_delay(exc, delay)
+                    await _emit_progress(
+                        on_progress, "retry_wait", attempt=attempt,
+                        max_attempts=self.max_attempts, started=started,
+                        retry_in_ms=int(wait * 1000), error=error,
+                    )
+                    await asyncio.sleep(wait)
                     delay *= 2
-        if stream is None:
-            raise LLMError(
-                f"LLM 调用失败（已重试 {self.max_retries} 次）：{last_err}")
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta.content
-            if delta:
-                yield delta
+                    continue
+                await _emit_progress(on_progress, "failed", attempt=attempt,
+                                     max_attempts=self.max_attempts,
+                                     started=started, error=error)
+                raise LLMError(error, attempts=attempt,
+                               partial=emitted_token) from exc
+            finally:
+                if stream is not None:
+                    await _close_stream(stream)
+
+            await _emit_progress(on_progress, "completed", attempt=attempt,
+                                 max_attempts=self.max_attempts,
+                                 started=started)
+            return
+        raise AssertionError("unreachable")
 
 
 def build_clients(settings: Settings) -> tuple[LLMClient, LLMClient]:
     """规划与审查双实例：系统提示词彼此独立，模型可分别配置。"""
-    planner = LLMClient(settings.llm_base_url, settings.llm_api_key,
-                        settings.planner_model, settings.llm_max_retries)
-    reviewer = LLMClient(settings.llm_base_url, settings.llm_api_key,
-                         settings.reviewer_model, settings.llm_max_retries)
+    planner = LLMClient(
+        settings.llm_base_url, settings.llm_api_key,
+        settings.planner_model, settings.llm_max_retries,
+        settings.llm_timeout,
+    )
+    reviewer = LLMClient(
+        settings.llm_base_url, settings.llm_api_key,
+        settings.reviewer_model, settings.llm_max_retries,
+        settings.llm_timeout,
+    )
     return planner, reviewer

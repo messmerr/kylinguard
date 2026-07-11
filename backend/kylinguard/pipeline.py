@@ -17,10 +17,11 @@ from kylinguard.audit import AuditLog
 from kylinguard.config import Settings
 from kylinguard.gate import decide
 from kylinguard.intent import screen_user_intent
+from kylinguard.llm import LLMError, PublicError, public_error
 from kylinguard.models import (
     GateAction, PlanStep, RuleDecision, RuleVerdict,
 )
-from kylinguard.mcp_client import split_qualified
+from kylinguard.mcp_client import ToolCallError, split_qualified
 from kylinguard.planner import PlanningError, build_system_prompt
 from kylinguard.registry import get_meta
 from kylinguard.rules import check_command
@@ -81,13 +82,37 @@ class Pipeline:
                 if ev["event_type"] == "user_query":
                     conv.append({"role": "user",
                                  "content": f"管理员指令：{ev['payload']['query']}"})
-                elif ev["event_type"] == "final_answer":
+                elif (ev["event_type"] == "final_answer"
+                      and ev["payload"].get("outcome")
+                      not in {"failed", "cancelled"}):
                     conv.append({"role": "assistant",
                                  "content": ev["payload"]["answer"]})
             self._conversations[session_id] = conv
         return conv
 
     async def handle(self, session_id: str, user_query: str, emit) -> None:
+        """在工作副本中处理一轮，对取消实行会话上下文原子回滚。"""
+        conversation = self._get_conversation(session_id)
+        base_length = len(conversation)
+        working = list(conversation)
+
+        def commit() -> None:
+            conversation.extend(working[base_length:])
+
+        try:
+            await self._handle_turn(session_id, user_query, emit, working)
+        except asyncio.CancelledError:
+            # working 尚未提交，共享上下文天然保持本轮开始前的状态。
+            raise
+        except Exception:
+            # 非取消异常保持原有语义：此前已经追加的上下文仍然可见。
+            commit()
+            raise
+        else:
+            commit()
+
+    async def _handle_turn(self, session_id: str, user_query: str, emit,
+                           conversation: list[dict]) -> None:
         started = time.monotonic()
 
         async def record(event_type: str, payload: dict):
@@ -100,10 +125,47 @@ class Pipeline:
             await emit({"type": "phase", "session_id": session_id,
                         "phase": name, **extra})
 
+        async def progress(stage: str, operation_id: str, update: dict,
+                           **extra):
+            """统一补全瞬时进度事件；progress 不进入审计链。"""
+            payload = {
+                "type": "progress",
+                "session_id": session_id,
+                "stage": stage,
+                "operation_id": operation_id,
+                "state": update["state"],
+                "attempt": update.get("attempt", 1),
+                "max_attempts": update.get("max_attempts", 1),
+                "elapsed_ms": update.get("elapsed_ms", 0),
+                "retry_in_ms": update.get("retry_in_ms", 0),
+                **extra,
+            }
+            if update.get("error") is not None:
+                payload["error"] = update["error"]
+            await emit(payload)
+
         def elapsed_ms() -> int:
             return int((time.monotonic() - started) * 1000)
 
-        conversation = self._get_conversation(session_id)
+        async def fail_task(stage: str, operation_id: str,
+                            error: PublicError, answer: str | None = None):
+            error_payload = error.to_dict()
+            await record("task_error", {
+                "stage": stage,
+                "operation_id": operation_id,
+                "elapsed_ms": elapsed_ms(),
+                "error": error_payload,
+            })
+            final_text = answer or (
+                f"{error.message} 任务已中止。错误编号：{error.incident_id}"
+            )
+            await record("final_answer", {
+                "answer": final_text,
+                "aborted": True,
+                "outcome": "failed",
+                "elapsed_ms": elapsed_ms(),
+            })
+
         await record("user_query", {"query": user_query})
 
         intent = screen_user_intent(user_query)
@@ -112,6 +174,7 @@ class Pipeline:
             await record("final_answer", {
                 "answer": f"请求已被安全意图校验器拒绝：{intent.reason}",
                 "aborted": True,
+                "outcome": "blocked",
                 "elapsed_ms": elapsed_ms(),
             })
             return
@@ -129,18 +192,32 @@ class Pipeline:
         for round_no in range(self._settings.max_iterations):
             # ② 规划（分析文本经 assistant_delta 流式外发，不逐条入审计）
             await phase("planning", round=round_no)
+            planning_operation = f"planning:{round_no}"
 
             async def on_delta(text: str, _round=round_no):
                 await emit({"type": "assistant_delta",
                             "session_id": session_id,
                             "round": _round, "text": text})
 
+            async def on_planning_progress(update: dict, _round=round_no,
+                                           _op=planning_operation):
+                await progress("planning", _op, update, round=_round)
+
             try:
-                plan = await self._planner.next_actions(conversation,
-                                                        on_delta=on_delta)
-            except PlanningError as e:
-                await record("final_answer", {"answer": str(e), "aborted": True,
-                                              "elapsed_ms": elapsed_ms()})
+                plan = await self._planner.next_actions(
+                    conversation, on_delta=on_delta,
+                    on_progress=on_planning_progress,
+                )
+            except LLMError as exc:
+                await fail_task("planning", planning_operation, exc.error)
+                return
+            except PlanningError:
+                error = public_error(
+                    "planner_output_invalid",
+                    "模型连续返回了无法处理的规划格式。",
+                    retryable=False,
+                )
+                await fail_task("planning", planning_operation, error)
                 return
             # step_id 在规划落审计前生成：前端按它把校验/确认/执行聚合到
             # 同一步骤行，审计回放（M2）按它分组
@@ -157,13 +234,15 @@ class Pipeline:
                 conversation.append({"role": "assistant", "content": answer})
                 await record("final_answer", {"answer": answer,
                                               "aborted": False,
+                                              "outcome": "completed",
                                               "elapsed_ms": elapsed_ms()})
                 return
 
             observations = []
             for step, step_id in zip(plan.steps, step_ids):
                 observations.append(await self._run_step(
-                    user_query, env_summary, step, step_id, record, phase))
+                    user_query, env_summary, step, step_id,
+                    record, phase, progress))
 
             conversation.append({"role": "assistant",
                                  "content": plan.model_dump_json()})
@@ -173,15 +252,20 @@ class Pipeline:
                            + "\n\n请基于以上结果继续规划，或给出最终结论。",
             })
 
-        await record("final_answer", {
-            "answer": f"迭代轮数达到上限（{self._settings.max_iterations}），"
-                      "任务中止。请缩小问题范围后重试。",
-            "aborted": True,
-            "elapsed_ms": elapsed_ms(),
-        })
+        error = public_error(
+            "iteration_limit_reached",
+            f"迭代轮数达到上限（{self._settings.max_iterations}）。",
+            retryable=False,
+        )
+        await fail_task(
+            "planning", f"planning:{self._settings.max_iterations}", error,
+            answer=(f"迭代轮数达到上限（{self._settings.max_iterations}），"
+                    "任务中止。请缩小问题范围后重试。"),
+        )
 
     async def _run_step(self, user_query: str, env_summary: str,
-                        step: PlanStep, step_id: str, record, phase) -> str:
+                        step: PlanStep, step_id: str, record, phase,
+                        progress) -> str:
         # ③ 校验：三道闸
         try:
             server, tool = split_qualified(step.tool)
@@ -202,7 +286,18 @@ class Pipeline:
                            f"（声称目的：{step.purpose}）")
 
         await phase("reviewing", step_id=step_id, tool=step.tool)
-        review = await self._reviewer.review(user_query, env_summary, action_desc)
+        review_operation = f"reviewing:{step_id}"
+
+        async def on_review_progress(update: dict):
+            await progress(
+                "reviewing", review_operation, update,
+                step_id=step_id, tool=step.tool,
+            )
+
+        review = await self._reviewer.review(
+            user_query, env_summary, action_desc,
+            on_progress=on_review_progress,
+        )
         decision = decide(meta, rule, review, step.risk)
         await record("verification", {
             "step_id": step_id,
@@ -219,6 +314,7 @@ class Pipeline:
                 "confirm_id": confirm_id, "step_id": step_id,
                 "step": step.model_dump(),
                 "decision": decision.model_dump(),
+                "timeout_seconds": self._settings.confirm_timeout,
             })
             try:
                 approved, operator = await asyncio.wait_for(
@@ -226,21 +322,77 @@ class Pipeline:
             except asyncio.TimeoutError:
                 self.confirmations.resolve(confirm_id, False)  # 清理挂起项
                 approved, operator = False, "(超时)"
+            except asyncio.CancelledError:
+                # wait_for 会一并取消 Future；仍需从 pending 映射中移除。
+                self.confirmations.resolve(confirm_id, False)
+                raise
             await record("confirm_result",
                          {"confirm_id": confirm_id, "step_id": step_id,
-                          "approved": approved, "operator": operator})
+                          "approved": approved, "operator": operator,
+                          "timed_out": operator == "(超时)"})
             if not approved:
                 return f"步骤 {step.tool} 未获管理员批准（拒绝或超时），已跳过"
 
         # ④ 受限执行（经 MCP 插件进程）
         started = time.monotonic()
+        execution_operation = f"executing:{step_id}"
+        base_progress = {
+            "attempt": 1,
+            "max_attempts": 1,
+            "elapsed_ms": 0,
+            "retry_in_ms": 0,
+        }
+        await progress(
+            "executing", execution_operation,
+            {"state": "connecting", **base_progress},
+            step_id=step_id, tool=step.tool,
+        )
+        ok = True
+        error_payload = None
         try:
             output = await self._tools.call(server, tool, step.arguments)
-        except Exception as e:
-            output = f"[工具调用失败] {e}"
+        except ToolCallError as exc:
+            ok = False
+            output = str(exc)[:8000] or "工具未返回错误详情。"
+            error = public_error(
+                "tool_call_failed",
+                "工具返回失败，未完成该步骤。",
+                retryable=False,
+            )
+            error_payload = error.to_dict()
+        except Exception:
+            ok = False
+            error = public_error(
+                "tool_call_failed",
+                "工具调用失败，未完成该步骤。",
+                retryable=False,
+            )
+            error_payload = error.to_dict()
+            output = error.message
         duration_ms = int((time.monotonic() - started) * 1000)
         # ⑤ 溯源
-        await record("execution",
-                     {"step_id": step_id, "step": step.model_dump(),
-                      "duration_ms": duration_ms, "output": output[:8000]})
+        await record("execution", {
+            "step_id": step_id,
+            "operation_id": execution_operation,
+            "step": step.model_dump(),
+            "duration_ms": duration_ms,
+            "output": output[:8000],
+            "ok": ok,
+            "error": error_payload,
+        })
+        await progress(
+            "executing", execution_operation,
+            {
+                "state": "completed" if ok else "failed",
+                "attempt": 1,
+                "max_attempts": 1,
+                "elapsed_ms": duration_ms,
+                "retry_in_ms": 0,
+                **({"error": error_payload} if error_payload else {}),
+            },
+            step_id=step_id, tool=step.tool,
+        )
+        if not ok:
+            return (f"步骤 {step.tool} 调用失败：{output}"
+                    f"（错误编号：{error_payload['incident_id']}）")
         return f"步骤 {step.tool} 输出：\n{output[:4000]}"

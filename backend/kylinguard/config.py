@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     planner_model: str = "deepseek-v4-pro"
     reviewer_model: str = "deepseek-v4-pro"
     llm_max_retries: int = 3
+    llm_timeout: float = 60.0
 
     # 存储
     db_path: str = "data/kylinguard.db"

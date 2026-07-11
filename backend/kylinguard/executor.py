@@ -56,6 +56,13 @@ async def run_command(command: str | list[str], *, timeout: int = 30,
 
     try:
         out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.CancelledError:
+        # 取消上层流水线时不能只停止等待：否则系统命令会在后台继续运行，
+        # 同时再也没有机会写入 execution 审计事件。
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+        raise
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()

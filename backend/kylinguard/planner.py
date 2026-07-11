@@ -14,6 +14,7 @@ import json
 
 from pydantic import ValidationError
 
+from kylinguard.llm import public_error
 from kylinguard.models import PlannerOutput
 
 PLANNER_SYSTEM_TEMPLATE = """你是「麒盾 KylinGuard」的规划模块——部署在麒麟服务器上的安全运维 Agent。
@@ -94,13 +95,14 @@ class Planner:
         self._max_json_retries = max_json_retries
 
     async def next_actions(self, conversation: list[dict],
-                           on_delta=None) -> PlannerOutput:
+                           on_delta=None, on_progress=None) -> PlannerOutput:
         messages = list(conversation)
         last_error = ""
         for attempt in range(self._max_json_retries):
             full = ""
             sent = 0
-            async for delta in self._llm.chat_stream(messages):
+            async for delta in self._llm.chat_stream(
+                    messages, on_progress=on_progress):
                 full += delta
                 if on_delta is None:
                     continue
@@ -124,6 +126,20 @@ class Planner:
                 })
                 if on_delta and attempt < self._max_json_retries - 1:
                     await on_delta("\n\n")  # 重试轮分隔
+                if on_progress and attempt < self._max_json_retries - 1:
+                    error = public_error(
+                        "llm_protocol_invalid",
+                        "模型返回格式不完整，正在重新整理。",
+                        retryable=True,
+                    )
+                    await on_progress({
+                        "state": "retry_wait",
+                        "attempt": attempt + 1,
+                        "max_attempts": self._max_json_retries,
+                        "elapsed_ms": 0,
+                        "retry_in_ms": 0,
+                        "error": error.to_dict(),
+                    })
                 continue
             if on_delta:  # 补发围栏前尚未外发的尾巴
                 fence = full.find(_FENCE)
@@ -131,6 +147,20 @@ class Planner:
                 if end > sent:
                     await on_delta(full[sent:end])
             return out
+        if on_progress:
+            error = public_error(
+                "llm_protocol_invalid",
+                "模型连续返回了无法处理的格式。",
+                retryable=False,
+            )
+            await on_progress({
+                "state": "failed",
+                "attempt": self._max_json_retries,
+                "max_attempts": self._max_json_retries,
+                "elapsed_ms": 0,
+                "retry_in_ms": 0,
+                "error": error.to_dict(),
+            })
         raise PlanningError(
             f"规划输出连续 {self._max_json_retries} 次无法解析，"
             f"按安全原则拒绝执行。最后错误：{last_error}"

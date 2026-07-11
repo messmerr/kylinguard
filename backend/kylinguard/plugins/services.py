@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from kylinguard.config import get_settings
 from kylinguard.executor import run_command
+from kylinguard.plugins._result import reject, require_success
 
 mcp = FastMCP("services")
 
@@ -21,7 +22,7 @@ def _bad_name(name: str) -> bool:
 
 async def _systemctl(action: str, name: str, *, sudo: bool) -> str:
     if _bad_name(name):
-        return f"服务名不合法：{name!r}（只允许字母数字及 .@:-_）"
+        reject(f"服务名不合法：{name!r}（只允许字母数字及 .@:-_）")
     settings = get_settings()
     if sudo and settings.privileged_helper:
         # 生产部署中，真正需要 root 的动作只允许通过 root-owned helper。
@@ -36,25 +37,26 @@ async def _systemctl(action: str, name: str, *, sudo: bool) -> str:
             timeout=settings.command_timeout,
             run_as=settings.exec_user if sudo else "",
         )
-    body = r.stdout or r.stderr
-    return f"exit_code={r.exit_code}\n{body}"
+    return require_success(r, f"systemctl {action} {name}")
 
 
 @mcp.tool()
 async def service_status(name: str) -> str:
     """查询指定服务的运行状态（只读）。"""
     if _bad_name(name):
-        return f"服务名不合法：{name!r}（只允许字母数字及 .@:-_）"
+        reject(f"服务名不合法：{name!r}（只允许字母数字及 .@:-_）")
     r = await run_command(f"systemctl status {name} --no-pager -l",
                           timeout=15, max_output=8192)
-    return r.stdout or r.stderr
+    # systemctl status 对“已加载但未运行”的服务返回 3；这是有效状态，
+    # 不应与不存在的服务（通常返回 4）混为工具执行失败。
+    return require_success(r, f"服务 {name} 状态查询", ok_codes=(0, 3))
 
 
 @mcp.tool()
 async def list_failed_services() -> str:
     """列出所有失败状态的服务（只读）。"""
     r = await run_command("systemctl --failed --no-pager --plain", timeout=15)
-    return r.stdout or r.stderr
+    return require_success(r, "失败服务列表采集")
 
 
 @mcp.tool()

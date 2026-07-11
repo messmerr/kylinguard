@@ -14,13 +14,13 @@ class FakeLLM:
         self.replies = list(replies)
         self.received = []
 
-    async def chat(self, messages, temperature=0.2):
+    async def chat(self, messages, temperature=0.2, on_progress=None):
         self.received.append(messages)
         return self.replies.pop(0)
 
 
 class BrokenLLM:
-    async def chat(self, messages, temperature=0.2):
+    async def chat(self, messages, temperature=0.2, on_progress=None):
         raise RuntimeError("网络断了")
 
 

@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 
 from kylinguard.config import get_settings
 from kylinguard.executor import run_command as run_command_exec
+from kylinguard.plugins._result import format_exec_result, require_success
 
 mcp = FastMCP("run_command")
 
@@ -21,14 +22,8 @@ async def run_command(command: str) -> str:
         max_output=settings.output_max_bytes,
         run_as=settings.exec_user,
     )
-    parts = [f"exit_code={r.exit_code}"]
-    if r.timed_out:
-        parts.append("[已超时强制终止]")
-    if r.stdout:
-        parts.append(f"stdout:\n{r.stdout}")
-    if r.stderr:
-        parts.append(f"stderr:\n{r.stderr}")
-    return "\n".join(parts)
+    require_success(r, "自由命令执行")
+    return format_exec_result(r)
 
 
 if __name__ == "__main__":

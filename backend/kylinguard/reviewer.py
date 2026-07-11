@@ -8,6 +8,7 @@
 """
 from pydantic import ValidationError
 
+from kylinguard.llm import LLMError, public_error, public_error_from_exception
 from kylinguard.models import ReviewVerdict, RiskLevel
 from kylinguard.planner import extract_json
 
@@ -27,7 +28,7 @@ REVIEWER_SYSTEM = """你是麒麟服务器运维系统的独立安全审查员�
 只输出一个 JSON 对象，不要输出任何其他文字：
 {"safe": true|false, "matches_intent": true|false, "risk": "low|medium|high", "reason": "一句话中文依据"}"""
 
-_FALLBACK_REASON = "审查员输出无法解析或调用失败，按最不安全处理：{err}"
+_FALLBACK_REASON = "{message} 按最不安全处理，操作不会执行。"
 
 
 class Reviewer:
@@ -36,7 +37,7 @@ class Reviewer:
         self._max_json_retries = max_json_retries
 
     async def review(self, user_query: str, env_summary: str,
-                     action_desc: str) -> ReviewVerdict:
+                     action_desc: str, on_progress=None) -> ReviewVerdict:
         messages = [
             {"role": "system", "content": REVIEWER_SYSTEM},
             {"role": "user", "content":
@@ -44,21 +45,52 @@ class Reviewer:
                 f"系统环境摘要：\n{env_summary}\n\n"
                 f"待执行操作：{action_desc}"},
         ]
-        last_err = ""
-        for _ in range(self._max_json_retries):
+        last_message = "安全复核未完成。"
+        last_error = None
+        for attempt in range(self._max_json_retries):
             try:
-                text = await self._llm.chat(messages)
-            except Exception as e:
-                last_err = str(e)
+                text = await self._llm.chat(messages,
+                                            on_progress=on_progress)
+            except LLMError as exc:
+                last_error = exc.error
+                last_message = exc.error.message
+                break
+            except Exception as exc:
+                last_error = public_error_from_exception(exc)
+                last_message = last_error.message
+                if on_progress:
+                    await on_progress({
+                        "state": "failed",
+                        "attempt": 1,
+                        "max_attempts": 1,
+                        "elapsed_ms": 0,
+                        "retry_in_ms": 0,
+                        "error": last_error.to_dict(),
+                    })
                 break
             try:
                 return ReviewVerdict.model_validate(extract_json(text))
-            except (ValueError, ValidationError) as e:
-                last_err = str(e)
+            except (ValueError, ValidationError):
+                last_message = "安全复核返回格式无法解析。"
+                last_error = public_error(
+                    "llm_protocol_invalid", last_message,
+                    retryable=attempt < self._max_json_retries - 1,
+                )
                 messages.append({"role": "assistant", "content": text})
                 messages.append({"role": "user",
                                  "content": "输出不合法，请只输出规定格式的 JSON。"})
+                if on_progress:
+                    await on_progress({
+                        "state": ("retry_wait"
+                                  if attempt < self._max_json_retries - 1
+                                  else "failed"),
+                        "attempt": attempt + 1,
+                        "max_attempts": self._max_json_retries,
+                        "elapsed_ms": 0,
+                        "retry_in_ms": 0,
+                        "error": last_error.to_dict(),
+                    })
         return ReviewVerdict(
             safe=False, matches_intent=False, risk=RiskLevel.HIGH,
-            reason=_FALLBACK_REASON.format(err=last_err),
+            reason=_FALLBACK_REASON.format(message=last_message),
         )

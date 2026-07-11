@@ -5,7 +5,7 @@
 管理员用自然语言下达运维指令，Agent 经**感知 → 规划 → 校验 → 受限执行 → 溯源**
 五阶段安全流水线完成任务：每个步骤经三道闸（规则引擎、独立 LLM 审查员、
 风险分级门控）校验，低危自动放行、中危一键确认、高危二次确认，
-全程写入哈希链审计日志，防篡改、可回放。
+全程写入哈希链审计日志，篡改可检测、可回放。
 
 ## 快速开始（WSL 后端 + Windows 前端）
 
@@ -25,8 +25,8 @@
 
     # 3. 运行后端
     cd backend
-    python -m pytest        # 全量测试（当前 203 个用例）
-    python -m uvicorn --factory kylinguard.api:create_app --host 0.0.0.0 --port 8000 --reload
+    python -m pytest        # 全量测试
+    python -m uvicorn --factory kylinguard.api:create_app --host 127.0.0.1 --port 8000 --reload
 
     # 4. 另开一个 Windows PowerShell 运行前端
     cd D:\Documents\Study\3.3\cnsoft-projects\frontend
@@ -36,8 +36,8 @@
 
 若不需要热更新，也可以在 Windows 的 `frontend` 目录执行 `npm run build`，再只启动 WSL 后端；构建产物会由 8000 端口直接托管。
 
-浏览器打开后端端口 → 登录（用户名 `admin` + 你设置的密码）→ 顶栏切换四个视图：
-**对话运维 / 审计回放 / 策略管理 / 仪表盘**。
+浏览器打开前端地址 → 登录（用户名 `admin` + 你设置的密码）→ 顶栏切换五个视图：
+**任务 / 审计 / 策略 / 总览 / 告警**。模型连接、重试、风险复核和工具执行状态会在任务中实时显示。
 
 ## Docker 启动（推荐快速体验）
 
@@ -81,7 +81,7 @@
     backend/kylinguard/          Agent 核心（五阶段流水线、三道闸、审计链、鉴权、会话、策略）
     backend/kylinguard/plugins/  6 个 MCP 插件 + run_command（stdio 服务器）
     backend/tests/               pytest 测试
-    frontend/src/views/          四个视图页（对话/审计/策略/仪表盘）
+    frontend/src/views/          五个视图页（任务/审计/策略/总览/告警）
     frontend/src/components/      可复用组件（步骤行/确认卡/markdown/侧栏/状态面板）
     frontend/src/composables/    前端状态层（useChat 事件聚合 / useAuth 鉴权）
     HANDOFF.md                   项目交接文档（当前状态、进度、未完成清单）
@@ -97,7 +97,9 @@
 - **最小权限**：命令不经 shell 执行（元字符无从生效）；生产环境经
   `sudo -n -u kylinguard-exec` 降权 + sudoers 精确白名单；审计库与
   策略文件对执行账户只读（Agent 不能篡改自己的审计链）。
-- **防篡改审计**：每条事件携带前序事件哈希；审计写入失败立即中止任务。
+- **可验证审计**：每条事件携带前序事件哈希；审计写入失败立即中止任务。
+- **过程可见**：模型认证、限流重试、超时、风险复核和工具执行均以结构化
+  事件实时反馈；错误只暴露清洗后的状态码与诊断编号，不传输密钥或原始请求。
 - **正交分层**（参照 Codex CLI 安全模型）：门控决定"何时问人"（审批
   时机），受限执行器决定"技术上能做什么"（能力边界），互为纵深防御。
 

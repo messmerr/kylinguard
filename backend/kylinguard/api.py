@@ -1,13 +1,12 @@
-"""FastAPI 入口：SSE 对话、人工确认、健康检查、前端静态托管。
+"""FastAPI 入口：鉴权、SSE 任务流、人工确认、审计查询与前端托管。
 
-启动：uvicorn --factory kylinguard.api:create_app --host 0.0.0.0 --port 8000
-
-M2 待办（设计文档已规划，上线前必须完成）：所有 /api/* 路由加登录鉴权；
-confirm 与发起会话绑定同一管理员身份并在审计链中归因。M1 开发阶段仅限
-本机/内网联调使用。
+除健康检查和登录外，业务端点统一验证 Bearer token；人工确认会把当前
+管理员身份写入审计链。SSE 断开时任务安全取消并补写可回放终态。
 """
 import asyncio
 import json
+import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,7 +19,7 @@ from pydantic import BaseModel, Field, model_validator
 from kylinguard.audit import AuditError, AuditLog
 from kylinguard.auth import AuthStore, TokenManager
 from kylinguard.config import Settings, get_settings
-from kylinguard.llm import build_clients
+from kylinguard.llm import LLMError, build_clients, internal_error
 from kylinguard.mcp_client import ToolManager
 from kylinguard.pipeline import Confirmations, Pipeline
 from kylinguard.planner import Planner
@@ -33,11 +32,16 @@ from kylinguard.sessions import SessionStore
 from kylinguard.snapshot import SnapshotCache
 
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
     message: str
     session_id: str = ""  # 空 = 新建会话（SSE 首事件返回 session_created）
+    request_id: str = Field(
+        default="", max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]*$",
+    )
 
 
 class ConfirmRequest(BaseModel):
@@ -168,26 +172,122 @@ def create_app(settings: Settings | None = None,
                 raise HTTPException(404, "会话不存在")
             app.state.sessions.touch(session_id)
         queue: asyncio.Queue = asyncio.Queue()
+        last_progress: dict = {}
+        pending_confirm: dict | None = None
 
         async def emit(event: dict):
+            nonlocal last_progress, pending_confirm
+            if event.get("type") == "progress":
+                last_progress = {
+                    key: event[key]
+                    for key in ("stage", "operation_id", "step_id", "tool")
+                    if event.get(key) is not None
+                }
+            elif event.get("type") == "confirm_request":
+                pending_confirm = {
+                    "confirm_id": event.get("confirm_id"),
+                    "step_id": event.get("step_id"),
+                }
+            elif (event.get("type") == "confirm_result"
+                  and pending_confirm
+                  and event.get("confirm_id") == pending_confirm["confirm_id"]):
+                pending_confirm = None
             await queue.put(event)
 
         async def run():
+            started = time.monotonic()
             try:
                 await app.state.pipeline.handle(session_id, req.message, emit)
-            except AuditError as e:
+            except asyncio.CancelledError:
+                # SSE 断开会停止本轮流水线；即使客户端已收不到事件，
+                # 也必须在审计中留下明确终态，避免历史会话看似悬空。
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                try:
+                    if pending_confirm:
+                        app.state.audit.append(session_id, "confirm_result", {
+                            **pending_confirm,
+                            "approved": False,
+                            "operator": "(任务取消)",
+                            "cancelled": True,
+                            "timed_out": False,
+                        })
+                    cancelled_payload = {
+                        "reason": "client_disconnected",
+                        "elapsed_ms": elapsed_ms,
+                        **last_progress,
+                    }
+                    if req.request_id:
+                        cancelled_payload["request_id"] = req.request_id
+                    app.state.audit.append(
+                        session_id, "task_cancelled", cancelled_payload)
+                    app.state.audit.append(session_id, "final_answer", {
+                        "answer": ("客户端连接已中断，本轮任务已停止。"
+                                   "已经开始的系统操作不会自动回滚。"),
+                        "aborted": True,
+                        "outcome": "cancelled",
+                        "elapsed_ms": elapsed_ms,
+                    })
+                except AuditError:
+                    pass
+                raise
+            except AuditError:
                 await queue.put({"type": "fatal",
-                                 "error": f"审计写入失败，任务已中止：{e}"})
-            except Exception as e:  # 不确定收敛到"不执行"，同时不悬挂前端
-                await queue.put({"type": "fatal",
-                                 "error": f"内部错误，任务已中止：{e}"})
+                                 "error": "审计写入失败，任务已中止。",
+                                 "request_id": req.request_id})
+            except Exception as exc:  # 未知错误也必须形成可回放的安全终态
+                error = (exc.error if isinstance(exc, LLMError)
+                         else internal_error())
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                logger.error(
+                    "chat task failed incident_id=%s exception_type=%s",
+                    error.incident_id, type(exc).__name__,
+                )
+                try:
+                    task_payload = {
+                        "stage": "internal",
+                        "operation_id": "task",
+                        "elapsed_ms": elapsed_ms,
+                        "error": error.to_dict(),
+                    }
+                    if req.request_id:
+                        task_payload["request_id"] = req.request_id
+                    h = app.state.audit.append(
+                        session_id, "task_error", task_payload)
+                    await queue.put({
+                        "type": "task_error",
+                        "session_id": session_id,
+                        "hash": h,
+                        **task_payload,
+                    })
+                    final_payload = {
+                        "answer": (f"{error.message} 错误编号："
+                                   f"{error.incident_id}"),
+                        "aborted": True,
+                        "outcome": "failed",
+                        "elapsed_ms": elapsed_ms,
+                    }
+                    h = app.state.audit.append(
+                        session_id, "final_answer", final_payload)
+                    await queue.put({
+                        "type": "final_answer",
+                        "session_id": session_id,
+                        "hash": h,
+                        **final_payload,
+                    })
+                except AuditError:
+                    await queue.put({
+                        "type": "fatal",
+                        "error": "审计写入失败，任务已中止。",
+                        "request_id": req.request_id,
+                    })
             finally:
                 await queue.put(None)
 
         async def stream():
             if created:
                 yield ("data: " + json.dumps(
-                    {"type": "session_created", "session_id": session_id},
+                    {"type": "session_created", "session_id": session_id,
+                     "request_id": req.request_id},
                     ensure_ascii=False) + "\n\n")
             task = asyncio.create_task(run())
             try:
@@ -195,10 +295,17 @@ def create_app(settings: Settings | None = None,
                     event = await queue.get()
                     if event is None:
                         break
+                    if (req.request_id
+                            and event.get("type") in {"task_error", "fatal"}):
+                        event = {**event, "request_id": req.request_id}
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 yield 'data: {"type": "done"}\n\n'
             finally:
                 task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 

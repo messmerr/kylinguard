@@ -20,7 +20,7 @@ class FakeStreamLLM:
         self.replies = list(replies)
         self.received: list[list[dict]] = []
 
-    async def chat_stream(self, messages, temperature=0.2):
+    async def chat_stream(self, messages, temperature=0.2, on_progress=None):
         self.received.append([dict(m) for m in messages])
         text = self.replies.pop(0)
         for i in range(0, len(text), 3):

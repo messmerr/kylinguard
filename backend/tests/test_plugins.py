@@ -1,5 +1,8 @@
 from types import SimpleNamespace
 
+import pytest
+from mcp.server.fastmcp.exceptions import ToolError
+
 from kylinguard.models import ExecResult, RiskLevel
 from kylinguard.registry import get_meta
 
@@ -35,18 +38,70 @@ async def test_sysinfo_top_processes(monkeypatch):
     assert "PID" in out
 
 
+async def test_system_snapshot_全部采集失败显式失败(monkeypatch):
+    import kylinguard.plugins.sysinfo as sysinfo
+
+    async def fake_collect():
+        return {
+            "memory": "[采集失败] free 不可用",
+            "disk": "[采集失败] df 不可用",
+        }
+
+    monkeypatch.setattr(sysinfo, "collect_snapshot", fake_collect)
+    with pytest.raises(ToolError, match="所有采集项均不可用"):
+        await sysinfo.system_snapshot()
+
+
+async def test_system_snapshot_部分降级仍返回可用数据(monkeypatch):
+    import kylinguard.plugins.sysinfo as sysinfo
+
+    async def fake_collect():
+        return {
+            "memory": "Mem: 100 50",
+            "disk": "[采集失败] df 不可用",
+        }
+
+    monkeypatch.setattr(sysinfo, "collect_snapshot", fake_collect)
+    out = await sysinfo.system_snapshot()
+    assert "Mem: 100 50" in out and "df 不可用" in out
+
+
 async def test_sysinfo_参数越界收敛(monkeypatch):
     import kylinguard.plugins.sysinfo as sysinfo
 
-    out = await sysinfo.top_processes(sort_by="非法字段", limit=99999)
-    assert "参数不合法" in out
+    with pytest.raises(ToolError, match="参数不合法"):
+        await sysinfo.top_processes(sort_by="非法字段", limit=99999)
 
 
 async def test_service_status_服务名校验():
     import kylinguard.plugins.services as services
 
-    out = await services.service_status(name="nginx; rm -rf /")
-    assert "服务名不合法" in out
+    with pytest.raises(ToolError, match="服务名不合法"):
+        await services.service_status(name="nginx; rm -rf /")
+
+
+async def test_service_status_不存在显式失败(monkeypatch):
+    import kylinguard.plugins.services as services
+
+    async def fake_run(cmd, **kwargs):
+        return ExecResult(exit_code=4, stdout="",
+                          stderr="Unit missing.service could not be found.",
+                          duration_ms=1)
+
+    monkeypatch.setattr(services, "run_command", fake_run)
+    with pytest.raises(ToolError, match="could not be found"):
+        await services.service_status(name="missing.service")
+
+
+async def test_service_status_已停止仍是有效状态(monkeypatch):
+    import kylinguard.plugins.services as services
+
+    async def fake_run(cmd, **kwargs):
+        return ExecResult(exit_code=3, stdout="inactive (dead)", stderr="",
+                          duration_ms=1)
+
+    monkeypatch.setattr(services, "run_command", fake_run)
+    assert "inactive" in await services.service_status(name="demo.service")
 
 
 async def test_restart_service_构造sudo命令(monkeypatch):
@@ -89,22 +144,22 @@ async def test_restart_service_uses_privileged_helper(monkeypatch):
 async def test_tail_file_限制在var_log():
     import kylinguard.plugins.logs as logs
 
-    out = await logs.tail_file(path="/etc/shadow", lines=10)
-    assert "仅允许" in out
+    with pytest.raises(ToolError, match="仅允许"):
+        await logs.tail_file(path="/etc/shadow", lines=10)
 
 
 async def test_tail_file_拒绝路径穿越():
     import kylinguard.plugins.logs as logs
 
-    out = await logs.tail_file(path="/var/log/../../etc/shadow", lines=10)
-    assert "仅允许" in out
+    with pytest.raises(ToolError, match="仅允许"):
+        await logs.tail_file(path="/var/log/../../etc/shadow", lines=10)
 
 
 async def test_journal_search_priority枚举():
     import kylinguard.plugins.logs as logs
 
-    out = await logs.journal_search(unit="", priority="verbose", lines=10)
-    assert "参数不合法" in out
+    with pytest.raises(ToolError, match="参数不合法"):
+        await logs.journal_search(unit="", priority="verbose", lines=10)
 
 
 async def test_run_command_透传执行(monkeypatch):
@@ -120,13 +175,25 @@ async def test_run_command_透传执行(monkeypatch):
     assert "exit_code=0" in out
 
 
+async def test_run_command_非零退出显式失败(monkeypatch):
+    import kylinguard.plugins.run_command as rc
+
+    async def fake_run(cmd, **kwargs):
+        return ExecResult(exit_code=127, stdout="", stderr="not found",
+                          duration_ms=1)
+
+    monkeypatch.setattr(rc, "run_command_exec", fake_run)
+    with pytest.raises(ToolError, match="exit_code=127"):
+        await rc.run_command(command="missing-command")
+
+
 async def test_ping_host_主机名校验():
     import kylinguard.plugins.network as network
 
-    out = await network.ping_host(host="evil.com; rm -rf /", count=4)
-    assert "参数不合法" in out
-    out2 = await network.ping_host(host="127.0.0.1", count=99)
-    assert "参数不合法" in out2
+    with pytest.raises(ToolError, match="参数不合法"):
+        await network.ping_host(host="evil.com; rm -rf /", count=4)
+    with pytest.raises(ToolError, match="参数不合法"):
+        await network.ping_host(host="127.0.0.1", count=99)
 
 
 async def test_ping_host_正常构造命令(monkeypatch):
@@ -159,15 +226,17 @@ async def test_disk_hotspots_解析排序(monkeypatch):
 async def test_disk_hotspots_拒绝伪文件系统():
     import kylinguard.plugins.disk as disk
 
-    out = await disk.disk_hotspots(path="/proc", depth=1)
-    assert "参数不合法" in out
+    with pytest.raises(ToolError, match="参数不合法"):
+        await disk.disk_hotspots(path="/proc", depth=1)
 
 
 async def test_clean_file_白名单外拒绝():
     import kylinguard.plugins.disk as disk
 
-    assert "拒绝" in await disk.clean_file(path="/etc/passwd")
-    assert "拒绝" in await disk.clean_file(path="/var/log/../../etc/shadow")
+    with pytest.raises(ToolError, match="拒绝"):
+        await disk.clean_file(path="/etc/passwd")
+    with pytest.raises(ToolError, match="拒绝"):
+        await disk.clean_file(path="/var/log/../../etc/shadow")
 
 
 async def test_clean_file_白名单内执行(monkeypatch):
@@ -180,6 +249,18 @@ async def test_clean_file_白名单内执行(monkeypatch):
     monkeypatch.setattr(disk, "run_command", fake_run)
     out = await disk.clean_file(path="/tmp/big.log")
     assert "已删除" in out
+
+
+async def test_clean_file_命令失败显式失败(monkeypatch):
+    import kylinguard.plugins.disk as disk
+
+    async def fake_run(cmd, **kwargs):
+        return ExecResult(exit_code=1, stdout="", stderr="permission denied",
+                          duration_ms=1)
+
+    monkeypatch.setattr(disk, "run_command", fake_run)
+    with pytest.raises(ToolError, match="permission denied"):
+        await disk.clean_file(path="/tmp/big.log")
 
 
 async def test_critical_file_perms_基线对比(monkeypatch):

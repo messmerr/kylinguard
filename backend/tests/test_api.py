@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -45,6 +46,35 @@ class FatalPipeline:
         raise AuditError("磁盘满了")
 
 
+class UnexpectedPipeline:
+    async def handle(self, session_id, user_query, emit):
+        raise RuntimeError("secret-provider-body")
+
+
+class BlockingPipeline:
+    def __init__(self):
+        self.started = asyncio.Event()
+
+    async def handle(self, session_id, user_query, emit):
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+class BlockingConfirmPipeline(BlockingPipeline):
+    async def handle(self, session_id, user_query, emit):
+        await emit({
+            "type": "progress", "stage": "reviewing",
+            "operation_id": "reviewing:step-1", "step_id": "step-1",
+            "tool": "services.restart_service", "state": "completed",
+        })
+        await emit({
+            "type": "confirm_request", "confirm_id": "confirm-1",
+            "step_id": "step-1", "step": {}, "decision": {},
+        })
+        self.started.set()
+        await asyncio.Event().wait()
+
+
 async def test_health无需鉴权(app):
     async with _client(app) as c:
         r = await c.get("/api/health")
@@ -83,7 +113,9 @@ async def test_chat_SSE流式事件(app):
     app.state.pipeline = FakePipeline()
     async with _client(app) as c:
         h = await _login(c)
-        r = await c.post("/api/chat", json={"message": "系统怎么样"},
+        r = await c.post("/api/chat", json={
+            "message": "系统怎么样", "request_id": "turn.test-1",
+        },
                          headers=h)
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
@@ -91,6 +123,17 @@ async def test_chat_SSE流式事件(app):
     assert [e["type"] for e in events] == ["session_created", "user_query",
                                            "final_answer", "done"]
     assert events[1]["query"] == "系统怎么样"
+    assert events[0]["request_id"] == "turn.test-1"
+
+
+@pytest.mark.parametrize("request_id", ["包含 空格", "x" * 129])
+async def test_chat拒绝不安全request_id(app, request_id):
+    async with _client(app) as c:
+        h = await _login(c)
+        r = await c.post("/api/chat", headers=h, json={
+            "message": "x", "request_id": request_id,
+        })
+    assert r.status_code == 422
 
 
 async def test_审计失败发fatal事件后收流(app):
@@ -101,6 +144,75 @@ async def test_审计失败发fatal事件后收流(app):
     events = [e for e in _parse_sse(r.text) if e["type"] != "session_created"]
     assert events[0]["type"] == "fatal" and "审计" in events[0]["error"]
     assert events[-1]["type"] == "done"
+
+
+async def test_未知异常清洗并持久化task_error终态(app):
+    app.state.pipeline = UnexpectedPipeline()
+    async with _client(app) as c:
+        h = await _login(c)
+        r = await c.post("/api/chat", json={
+            "message": "x", "request_id": "turn.error-1",
+        }, headers=h)
+    events = _parse_sse(r.text)
+    session_id = events[0]["session_id"]
+    stream_events = events[1:]
+    assert [e["type"] for e in stream_events] == [
+        "task_error", "final_answer", "done",
+    ]
+    assert stream_events[0]["error"]["code"] == "internal_error"
+    assert stream_events[0]["request_id"] == "turn.error-1"
+    assert stream_events[1]["aborted"] is True
+    assert stream_events[1]["outcome"] == "failed"
+    assert "secret-provider-body" not in r.text
+    audited = app.state.audit.events(session_id)
+    assert [e["event_type"] for e in audited] == [
+        "task_error", "final_answer",
+    ]
+
+
+async def test_客户端断流会留下取消终态(app):
+    pipeline = BlockingPipeline()
+    app.state.pipeline = pipeline
+    async with _client(app) as c:
+        headers = await _login(c)
+        request = asyncio.create_task(
+            c.post("/api/chat", json={"message": "等待中"}, headers=headers))
+        await asyncio.wait_for(pipeline.started.wait(), timeout=1)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+    session_id = app.state.sessions.list()[0]["id"]
+    audited = app.state.audit.events(session_id)
+    assert [event["event_type"] for event in audited] == [
+        "task_cancelled", "final_answer",
+    ]
+    assert audited[-1]["payload"]["outcome"] == "cancelled"
+
+
+async def test_确认等待中断流会收口确认并记录阶段(app):
+    pipeline = BlockingConfirmPipeline()
+    app.state.pipeline = pipeline
+    async with _client(app) as c:
+        headers = await _login(c)
+        request = asyncio.create_task(c.post(
+            "/api/chat",
+            json={"message": "等待确认", "request_id": "turn-cancel-1"},
+            headers=headers,
+        ))
+        await asyncio.wait_for(pipeline.started.wait(), timeout=1)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+    session_id = app.state.sessions.list()[0]["id"]
+    audited = app.state.audit.events(session_id)
+    assert [event["event_type"] for event in audited] == [
+        "confirm_result", "task_cancelled", "final_answer",
+    ]
+    assert audited[0]["payload"]["cancelled"] is True
+    cancelled = audited[1]["payload"]
+    assert cancelled["stage"] == "reviewing"
+    assert cancelled["step_id"] == "step-1"
+    assert cancelled["request_id"] == "turn-cancel-1"
 
 
 async def test_confirm归因到登录账号(app):

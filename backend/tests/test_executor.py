@@ -1,5 +1,9 @@
+import asyncio
 import sys
 
+import pytest
+
+import kylinguard.executor as executor
 from kylinguard.executor import run_command
 
 PY = sys.executable
@@ -36,3 +40,27 @@ async def test_输出截断():
 async def test_命令不存在():
     r = await run_command("kylinguard-no-such-cmd-xyz")
     assert r.exit_code == 127
+
+
+async def test_取消会终止并回收子进程(monkeypatch):
+    created = []
+    original = executor.asyncio.create_subprocess_exec
+
+    async def capture(*args, **kwargs):
+        proc = await original(*args, **kwargs)
+        created.append(proc)
+        return proc
+
+    monkeypatch.setattr(executor.asyncio, "create_subprocess_exec", capture)
+    task = asyncio.create_task(run_command(
+        [PY, "-c", "import time; time.sleep(30)"], timeout=60))
+    while not created:
+        await asyncio.sleep(0)
+    # 让 run_command 进入受 CancelledError 保护的 communicate 等待区间。
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert created[0].returncode is not None

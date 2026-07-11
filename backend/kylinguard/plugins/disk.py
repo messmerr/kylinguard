@@ -5,6 +5,11 @@ from mcp.server.fastmcp import FastMCP
 
 from kylinguard.config import get_settings
 from kylinguard.executor import run_command
+from kylinguard.plugins._result import (
+    format_exec_result,
+    reject,
+    require_success,
+)
 
 mcp = FastMCP("disk")
 
@@ -25,12 +30,11 @@ def _bad_scan_path(path: str) -> bool:
 async def disk_hotspots(path: str = "/", depth: int = 2) -> str:
     """按目录汇总磁盘占用，找出空间热点。path 为绝对路径，depth 取 1-4（只读）。"""
     if _bad_scan_path(path) or not (1 <= depth <= 4):
-        return "参数不合法：path 须为绝对路径（不含 /proc、/sys 等），depth 取 1-4"
+        reject("参数不合法：path 须为绝对路径（不含 /proc、/sys 等），depth 取 1-4")
     p = posixpath.normpath(path)
     r = await run_command(f"du -x -d {depth} {p}", timeout=60,
                           max_output=65536)
-    if r.exit_code != 0 and not r.stdout:
-        return f"[执行失败] {r.stderr}"
+    require_success(r, "磁盘热点扫描")
     lines = []
     for line in r.stdout.splitlines():
         parts = line.split("\t", 1)
@@ -52,20 +56,23 @@ async def io_stats() -> str:
     if fallback.exit_code == 0 and fallback.stdout.strip():
         lines = fallback.stdout.splitlines()[:40]
         return "[iostat 不可用，已降级为 /proc/diskstats 前 40 行]\n" + "\n".join(lines)
-    return f"[采集失败] iostat: {r.stderr or r.stdout}\n/proc/diskstats: {fallback.stderr or fallback.stdout}"
+    reject(
+        "磁盘 I/O 统计采集失败；主命令与降级命令均不可用。\n"
+        f"iostat:\n{format_exec_result(r)}\n"
+        f"/proc/diskstats:\n{format_exec_result(fallback)}"
+    )
 
 
 @mcp.tool()
 async def large_files(path: str = "/var", min_mb: int = 100) -> str:
     """列出指定目录下超过 min_mb 的大文件。min_mb 取 10-10240（只读）。"""
     if _bad_scan_path(path) or not (10 <= min_mb <= 10240):
-        return "参数不合法：path 须为绝对路径，min_mb 取 10-10240"
+        reject("参数不合法：path 须为绝对路径，min_mb 取 10-10240")
     p = posixpath.normpath(path)
     r = await run_command(f"find {p} -xdev -type f -size +{min_mb}M",
                           timeout=60, max_output=32768)
+    require_success(r, "大文件扫描")
     body = r.stdout.strip()
-    if r.exit_code != 0 and not body:
-        return f"[执行失败] {r.stderr}"
     return body or f"{p} 下没有超过 {min_mb}MB 的文件"
 
 
@@ -75,8 +82,8 @@ async def clean_file(path: str) -> str:
     仅允许清理 /tmp、/var/tmp、/var/cache、/var/log 下的文件。"""
     p = posixpath.normpath(path)
     if not p.startswith(_CLEAN_PREFIXES):
-        return ("拒绝：仅允许清理 /tmp、/var/tmp、/var/cache、/var/log "
-                f"下的文件，{p!r} 不在白名单内")
+        reject("拒绝：仅允许清理 /tmp、/var/tmp、/var/cache、/var/log "
+               f"下的文件，{p!r} 不在白名单内")
     settings = get_settings()
     if settings.privileged_helper:
         r = await run_command(
@@ -86,9 +93,8 @@ async def clean_file(path: str) -> str:
     else:
         r = await run_command(f"rm -f {p}", timeout=15,
                               run_as=settings.exec_user)
-    if r.exit_code == 0:
-        return f"已删除 {p}"
-    return f"[删除失败] exit_code={r.exit_code} {r.stderr or r.stdout}"
+    require_success(r, f"删除文件 {p}")
+    return f"已删除 {p}"
 
 
 if __name__ == "__main__":

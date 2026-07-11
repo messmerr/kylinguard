@@ -1,7 +1,10 @@
+import asyncio
+
 import pytest
 
 from kylinguard.audit import AuditError, AuditLog
 from kylinguard.config import Settings
+from kylinguard.llm import LLMError, public_error
 from kylinguard.models import PlannerOutput, ReviewVerdict, RiskLevel
 from kylinguard.pipeline import Confirmations, Pipeline
 
@@ -22,7 +25,8 @@ class FakePlanner:
         self.deltas = deltas or []  # 每轮要流出的文本增量
         self.received: list[list[dict]] = []
 
-    async def next_actions(self, conversation, on_delta=None):
+    async def next_actions(self, conversation, on_delta=None,
+                           on_progress=None):
         self.received.append([dict(m) for m in conversation])
         if on_delta:
             for d in self.deltas:
@@ -35,7 +39,8 @@ class FakeReviewer:
         self.verdict = ReviewVerdict(safe=safe, matches_intent=intent,
                                      risk=risk, reason="测试判定")
 
-    async def review(self, user_query, env_summary, action_desc):
+    async def review(self, user_query, env_summary, action_desc,
+                     on_progress=None):
         return self.verdict
 
 
@@ -51,19 +56,53 @@ class FakeTools:
         return "工具输出OK"
 
 
+class BrokenTools(FakeTools):
+    async def call(self, server, tool, arguments):
+        self.calls.append((server, tool, arguments))
+        raise RuntimeError("不应进入事件的工具原始错误")
+
+
+class FailingPlanner:
+    async def next_actions(self, conversation, on_delta=None,
+                           on_progress=None):
+        error = public_error(
+            "llm_auth_invalid",
+            "模型服务未接受当前凭据，请检查 API Key。",
+            retryable=False,
+            http_status=401,
+        )
+        raise LLMError(error, attempts=1)
+
+
+class BlockOnSecondPlanner:
+    def __init__(self):
+        self.calls = 0
+        self.blocked = asyncio.Event()
+        self.received = []
+
+    async def next_actions(self, conversation, on_delta=None,
+                           on_progress=None):
+        self.calls += 1
+        self.received.append([dict(message) for message in conversation])
+        if self.calls == 1:
+            return _plan("sysinfo.disk_usage", {}, "low")
+        self.blocked.set()
+        await asyncio.Future()
+
+
 async def _fake_snapshot():
     return {"memory": "充足", "disk": "50%"}, 12.3
 
 
 def _pipeline(tmp_path, planner_outputs, reviewer=None, tools=None,
-              settings=None):
+              settings=None, planner=None):
     audit = AuditLog(str(tmp_path / "a.db"))
     tools = tools or FakeTools()
     p = Pipeline(
         settings=settings or Settings(_env_file=None, confirm_timeout=2),
         audit=audit,
         tools=tools,
-        planner=FakePlanner(planner_outputs),
+        planner=planner or FakePlanner(planner_outputs),
         reviewer=reviewer or FakeReviewer(),
         confirmations=Confirmations(),
         snapshot_fn=_fake_snapshot,
@@ -102,7 +141,7 @@ async def test_只读步骤全自动端到端(tmp_path):
     p, audit, tools = _pipeline(
         tmp_path, [_plan("sysinfo.disk_usage", {}, "low"), FINAL])
     events = await _collect(p)
-    audited = [t for t in _types(events) if t != "phase"]
+    audited = [t for t in _types(events) if t not in {"phase", "progress"}]
     assert audited == ["user_query", "snapshot", "plan", "verification",
                        "execution", "plan", "final_answer"]
     assert tools.calls == [("sysinfo", "disk_usage", {})]
@@ -178,6 +217,23 @@ async def test_确认超时按拒绝处理(tmp_path):
     assert tools.calls == []
 
 
+async def test_confirm_request带超时时间(tmp_path):
+    settings = Settings(_env_file=None, confirm_timeout=7)
+    p, audit, tools = _pipeline(
+        tmp_path,
+        [_plan("services.stop_service", {"name": "nginx"}, "high"), FINAL],
+        settings=settings,
+    )
+
+    async def reject(event):
+        if event["type"] == "confirm_request":
+            p.confirmations.resolve(event["confirm_id"], False)
+
+    events = await _collect(p, "停掉 nginx", on_event=reject)
+    request = next(e for e in events if e["type"] == "confirm_request")
+    assert request["timeout_seconds"] == 7
+
+
 async def test_黑名单命令被规则拒绝(tmp_path):
     p, audit, tools = _pipeline(
         tmp_path,
@@ -211,6 +267,39 @@ async def test_迭代轮数上限中止(tmp_path):
     assert len(tools.calls) == 2
 
 
+async def test_LLM失败持久化task_error并写失败终态(tmp_path):
+    p, audit, tools = _pipeline(
+        tmp_path, [], planner=FailingPlanner())
+    events = await _collect(p)
+    assert _types(events)[-2:] == ["task_error", "final_answer"]
+    task_error = events[-2]
+    assert task_error["error"]["code"] == "llm_auth_invalid"
+    assert task_error["error"]["http_status"] == 401
+    assert events[-1]["aborted"] is True
+    assert events[-1]["outcome"] == "failed"
+    audit_types = [e["event_type"] for e in audit.events("s1")]
+    assert audit_types[-2:] == ["task_error", "final_answer"]
+
+
+async def test_execution失败有结构化结果和progress(tmp_path):
+    tools = BrokenTools()
+    p, audit, _ = _pipeline(
+        tmp_path, [_plan("sysinfo.disk_usage", {}, "low"), FINAL],
+        tools=tools,
+    )
+    events = await _collect(p)
+    execution = next(e for e in events if e["type"] == "execution")
+    assert execution["ok"] is False
+    assert execution["error"]["code"] == "tool_call_failed"
+    assert "原始错误" not in str(execution)
+    progress = [
+        e for e in events
+        if e["type"] == "progress" and e["stage"] == "executing"
+    ]
+    assert [e["state"] for e in progress] == ["connecting", "failed"]
+    assert progress[-1]["error"]["code"] == "tool_call_failed"
+
+
 async def test_审计写入失败任务中止(tmp_path):
     p, audit, tools = _pipeline(
         tmp_path, [_plan("sysinfo.disk_usage", {}, "low"), FINAL])
@@ -239,6 +328,39 @@ async def test_同一会话第二条消息带历史上下文(tmp_path):
     assert "第一个问题" in joined       # 历史用户消息在上下文里
     assert "磁盘使用正常。" in joined    # 历史答复也在
     assert "第二个问题" in joined
+
+
+async def test_取消时回滚本轮全部会话追加(tmp_path):
+    planner = BlockOnSecondPlanner()
+    p, audit, tools = _pipeline(tmp_path, [], planner=planner)
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    task = asyncio.create_task(
+        p.handle("s1", "这一轮随后会被取消", emit))
+    await planner.blocked.wait()
+    # 工作副本已经包含用户指令、第一轮计划与工具观察，但尚未提交。
+    assert "这一轮随后会被取消" in str(planner.received[-1])
+    assert len(p._conversations["s1"]) == 1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    shared = p._conversations["s1"]
+    assert len(shared) == 1
+    assert "这一轮随后会被取消" not in str(shared)
+    assert "工具输出OK" not in str(shared)
+
+    next_planner = FakePlanner([FINAL])
+    p._planner = next_planner
+    await p.handle("s1", "新的有效问题", emit)
+    next_context = str(next_planner.received[0])
+    assert "新的有效问题" in next_context
+    assert "这一轮随后会被取消" not in next_context
+    assert "工具输出OK" not in next_context
 
 
 async def test_服务重启后从审计链重建历史(tmp_path):
