@@ -180,11 +180,13 @@ class ToolManager:
     def __init__(self, *, exec_user: str | None = None):
         self._stack = AsyncExitStack()
         self._sessions: dict[str, ClientSession] = {}
+        self._tool_names: set[str] = set()
         self._catalog: str = ""
         self._exec_user = exec_user
 
     async def start(self):
         lines: list[str] = []
+        self._tool_names.clear()
         settings = get_settings()
         exec_user = settings.exec_user if self._exec_user is None else self._exec_user
         for name, module in SERVERS.items():
@@ -207,8 +209,10 @@ class ToolManager:
             tools = await session.list_tools()
             for t in tools.tools:
                 meta = get_meta(name, t.name)
+                qualified = f"{name}.{t.name}"
+                self._tool_names.add(qualified)
                 lines.append(
-                    f"- {name}.{t.name} [risk={meta.risk.value}"
+                    f"- {qualified} [risk={meta.risk.value}"
                     f"{', 需提权' if meta.needs_sudo else ''}]: "
                     f"{t.description or meta.description}\n"
                     f"  参数: {format_input_schema(t.inputSchema)}"
@@ -218,9 +222,14 @@ class ToolManager:
     async def stop(self):
         await self._stack.aclose()
         self._sessions.clear()
+        self._tool_names.clear()
 
     def describe(self) -> str:
         return self._catalog
+
+    def has_tool(self, qualified: str) -> bool:
+        """工具名必须与启动时 MCP 清单中的限定名完全一致。"""
+        return qualified in self._tool_names
 
     async def call(self, server: str, tool: str, arguments: dict) -> str:
         if server not in self._sessions:

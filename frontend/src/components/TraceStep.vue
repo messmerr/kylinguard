@@ -108,7 +108,7 @@ const statusText = computed(() => {
     case 'waiting': return '等待确认'
     case 'running': return '执行中'
     case 'done': return step.autoAllowed ? '自动执行' : '已执行'
-    case 'failed': return '执行失败'
+    case 'failed': return step.failureStage === 'planning' ? '工具无效' : '执行失败'
     case 'timed_out': return '确认超时'
     case 'cancelled': return '已停止'
     case 'result_unknown': return '结果未知'

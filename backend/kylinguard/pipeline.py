@@ -480,6 +480,31 @@ class Pipeline:
             failed_capabilities.add(rewrite_key)
             return rewrite_observation or "命令格式不受支持。"
         step = prepared
+        has_tool = getattr(self._tools, "has_tool", None)
+        if callable(has_tool) and not has_tool(step.tool):
+            invalid_tool = step.tool[:160]
+            failure_key = "unknown-tool:" + canonical_fingerprint({
+                "tool": invalid_tool,
+            })
+            repeated = failure_key in failed_capabilities
+            failed_capabilities.add(failure_key)
+            message = (
+                f"工具名称 {invalid_tool!r} 不存在。必须从可用工具清单逐字复制"
+                "完整的 server.tool 名称，不得添加“服务器”等前缀。"
+            )
+            await record("capability_error", {
+                "step_id": step_id,
+                "capability": invalid_tool,
+                "resource": "",
+                "code": "unknown_tool",
+                "message": message,
+                "do_not_retry": repeated,
+            })
+            return self._observation(
+                "invalid", "unknown_tool", message,
+                capability=invalid_tool,
+                do_not_retry=repeated,
+            )
         try:
             server, tool = split_qualified(step.tool)
         except ValueError as e:

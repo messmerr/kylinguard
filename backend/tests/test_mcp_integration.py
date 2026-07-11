@@ -137,6 +137,9 @@ async def test_启动_列举_调用_关闭(tmp_path):
                 '(可省略, 不可为 null, 默认=\"\")') in desc
         assert "operators: array<array<string>>" not in desc
         assert "operators: array<string> (可省略, 可为 null, 默认=null)" in desc
+        assert mgr.has_tool("files.list_directory") is True
+        assert mgr.has_tool("run_command.run_command") is True
+        assert mgr.has_tool("服务器.run_command.run_command") is False
         # 真实经 stdio 调一个工具：成功必须返回文本，底层命令不可用时
         # 必须显式抛错，不能再把失败字符串伪装成成功结果。
         try:

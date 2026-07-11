@@ -62,6 +62,15 @@ class BrokenTools(FakeTools):
         raise RuntimeError("不应进入事件的工具原始错误")
 
 
+class CatalogTools(FakeTools):
+    def has_tool(self, qualified):
+        return qualified in {
+            "sysinfo.disk_usage",
+            "files.list_directory",
+            "run_command.run_command",
+        }
+
+
 class FailingPlanner:
     async def next_actions(self, conversation, on_delta=None,
                            on_progress=None):
@@ -462,6 +471,38 @@ async def test_流式增量事件不落审计链(tmp_path):
     assert [d["text"] for d in deltas] == ["思考", "中…"]
     audit_types = {e["event_type"] for e in audit.events("s1")}
     assert "assistant_delta" not in audit_types  # 增量只走 UI，不进审计
+    assert audit.verify_chain("s1") is True
+
+
+@pytest.mark.parametrize("invalid_name", [
+    "服务器.run_command.run_command",
+    "pwd",
+])
+async def test_未知工具在Reviewer和权限确认前退回模型重规划(
+        tmp_path, invalid_name):
+    invalid = _plan(
+        invalid_name, {"command": "pwd"}, "low")
+    planner = FakePlanner([invalid, FINAL])
+    tools = CatalogTools()
+    p, audit, _ = _pipeline(
+        tmp_path, [], planner=planner, tools=tools)
+
+    events = await _collect(p, "查看当前目录")
+    event_types = _types(events)
+    capability = next(e for e in events if e["type"] == "capability_error")
+
+    assert capability["code"] == "unknown_tool"
+    assert capability["capability"] == invalid_name
+    assert capability["do_not_retry"] is False
+    assert "逐字复制" in capability["message"]
+    assert "verification" not in event_types
+    assert "permission_request" not in event_types
+    assert "execution_authorized" not in event_types
+    assert "execution" not in event_types
+    assert tools.calls == []
+    second_context = str(planner.received[1])
+    assert "unknown_tool" in second_context
+    assert "不得添加“服务器”等前缀" in second_context
     assert audit.verify_chain("s1") is True
 
 

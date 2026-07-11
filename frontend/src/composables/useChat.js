@@ -127,7 +127,7 @@ export function handleEvent(ev) {
             purpose: s.purpose, risk: s.risk,
             status: 'queued', verification: null, output: null, error: null,
             durationMs: null, autoAllowed: false, denyReason: '',
-            expanded: false, startedAt: null,
+            expanded: false, startedAt: null, failureStage: '',
           })
         }
       }
@@ -151,6 +151,23 @@ export function handleEvent(ev) {
     case 'intent_filter':
       push({ kind: 'intent', decision: ev.decision, expanded: false })
       break
+    case 'capability_error': {
+      const step = stepsById[ev.step_id]
+      if (!step) break
+      const message = ev.message || (ev.code === 'unknown_tool'
+        ? '模型选择了不存在的工具，正在重新规划。'
+        : '该能力在当前上下文中无法继续执行。')
+      step.status = 'failed'
+      step.failureStage = 'planning'
+      step.error = normalizeError({
+        code: ev.code || 'capability_error',
+        message,
+        detail: message,
+        retryable: !ev.do_not_retry,
+      }, message, { stage: 'planning' })
+      step.expanded = true
+      break
+    }
     case 'confirm_request':
       confirmsById[ev.confirm_id] = push({
         kind: 'confirm', confirmId: ev.confirm_id, stepId: ev.step_id,
@@ -257,6 +274,7 @@ export function handleEvent(ev) {
           && !['[工具调用失败]', '[执行失败]', '参数不合法']
             .some((prefix) => String(ev.output || '').trimStart().startsWith(prefix))
         step.status = ok ? 'done' : 'failed'
+        step.failureStage = ok ? '' : 'executing'
         step.output = ev.output
         step.error = ev.error ? normalizeError(ev.error, '工具调用失败。', { stage: 'executing' })
           : ok ? null : normalizeError(ev.output, '工具调用失败。', { stage: 'executing' })

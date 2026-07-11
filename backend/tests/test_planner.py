@@ -60,6 +60,11 @@ def test_系统提示明确参数契约与按意图选择回答格式():
     assert "只有当用户要求的是**故障诊断或运维处置**时" in prompt
     assert "系统快照只是背景证据" in prompt
     assert "不要在闲聊、创作或无关回答中主动汇报快照内容" in prompt
+    assert '"tool": "sysinfo.disk_usage"' in prompt
+    assert "服务器.工具名" not in prompt
+    assert "必须逐字复制“可用工具清单”" in prompt
+    assert "禁止添加“服务器”" in prompt
+    assert "code=unknown_tool" in prompt
 
 
 async def test_双段解析_文本加json块():

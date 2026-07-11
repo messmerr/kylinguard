@@ -258,6 +258,41 @@ test('planning 进度只保留白名单活动与生成计数', async () => {
   await request
 })
 
+test('未知工具在权限前标记为规划错误并允许模型重规划', async () => {
+  reset()
+  const sse = controlledSse()
+  chatResponses.push(sse)
+  const request = chat.sendMessage('查看当前目录')
+  await tick()
+
+  sse.event({
+    type: 'plan', thought: '先确认目录', final_answer: null,
+    steps: [{
+      step_id: 'bad-tool', tool: '服务器.run_command.run_command',
+      arguments: { command: 'pwd' }, purpose: '确认当前目录', risk: 'low',
+    }],
+  })
+  sse.event({
+    type: 'capability_error', step_id: 'bad-tool', code: 'unknown_tool',
+    capability: '服务器.run_command.run_command',
+    message: '工具名称不存在，必须从清单逐字复制。', do_not_retry: false,
+  })
+  await tick()
+
+  const step = chat.items.value.find((item) => item.kind === 'step')
+  assert.equal(step.status, 'failed')
+  assert.equal(step.failureStage, 'planning')
+  assert.equal(step.expanded, true)
+  assert.equal(step.error.code, 'unknown_tool')
+  assert.equal(step.error.retryable, true)
+  assert.match(step.error.message, /逐字复制/)
+
+  sse.event({ type: 'final_answer', answer: '已重新规划。', outcome: 'completed' })
+  sse.event({ type: 'done' })
+  sse.close()
+  await request
+})
+
 test('task_error 与失败 final_answer 只渲染一个错误项', async () => {
   reset()
   const sse = controlledSse()
