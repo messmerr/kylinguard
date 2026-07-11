@@ -48,10 +48,11 @@ if [ ! -f "$CONFIG_DIR/kylinguard.env" ]; then
   install -m 0640 -o root -g "$APP_USER" .env.example "$CONFIG_DIR/kylinguard.env"
   cat >> "$CONFIG_DIR/kylinguard.env" <<EOF
 KG_DB_PATH=$STATE_DIR/kylinguard.db
+KG_LLM_SECRETS_DIR=$STATE_DIR/provider-secrets
 KG_EXEC_USER=$EXEC_USER
 KG_PRIVILEGED_HELPER=$HELPER_DIR/execctl
 EOF
-  echo "已创建 $CONFIG_DIR/kylinguard.env，请填入真实 KG_LLM_API_KEY 与 KG_ADMIN_PASSWORD。"
+  echo "已创建 $CONFIG_DIR/kylinguard.env，请至少设置真实 KG_ADMIN_PASSWORD。"
 fi
 
 if ! grep -q '^KG_WORKSPACE_ROOT=' "$CONFIG_DIR/kylinguard.env"; then
@@ -78,5 +79,6 @@ cat <<EOF
 下一步：
 1. 编辑 $CONFIG_DIR/kylinguard.env
 2. 执行 systemctl start kylinguard
-3. 浏览器访问 http://<server-ip>:8000
+3. 本机浏览器访问 http://127.0.0.1:8000；远程访问请使用 SSH 端口转发，
+   或配置同机 HTTPS 反向代理，切勿在局域网明文暴露 8000 端口
 EOF

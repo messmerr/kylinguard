@@ -4,6 +4,15 @@
 import { computed, reactive, ref } from 'vue'
 import { apiFetch } from './useAuth.js'
 import {
+  applySessionModel,
+  beginNewModelSession,
+  bindModelSession,
+  loadSessionModel,
+  modelRequestPayload,
+  modelSelectionSnapshot,
+  sessionModel,
+} from './useModels.js'
+import {
   applyPermissionCapabilities,
   applyPermissionEvent,
   beginNewPermissionSession,
@@ -67,14 +76,16 @@ function push(item) {
 }
 
 function finishStreaming(role, text) {
+  const model = currentTurn.value?.model || modelSelectionSnapshot()
   // 定稿当前流式文本项；回放模式（无流）直接新建
   if (streamingItem) {
     streamingItem.role = role
     if (text) streamingItem.text = text
+    streamingItem.model = model
     streamingItem.streaming = false
     streamingItem = null
   } else if (text) {
-    push({ kind: 'assistant', role, text, streaming: false })
+    push({ kind: 'assistant', role, text, streaming: false, model })
   }
 }
 
@@ -84,11 +95,19 @@ export function handleEvent(ev) {
     case 'session_created':
       activeId.value = ev.session_id
       bindPermissionSession(ev.session_id)
+      {
+        const createdModel = ev.model_context || ev.session_model || ev.model || null
+        bindModelSession(
+          ev.session_id,
+          createdModel,
+        )
+        if (!createdModel) loadSessionModel(ev.session_id).catch(() => {})
+      }
       if (ev.permission || ev.permission_mode) {
         applyPermissionEvent({ ...ev, type: 'permission_context' })
       }
       loadPermissionContext(ev.session_id).catch(() => {})
-      refreshSessions()
+      refreshSessions().catch(() => {})
       break
     case 'permission_context':
     case 'permission_changed':
@@ -97,6 +116,20 @@ export function handleEvent(ev) {
     case 'permission_grants_revoked':
       applyPermissionEvent(ev)
       break
+    case 'model_context':
+    case 'model_changed': {
+      const agentModel = ev.agent || ev.model_context?.agent || null
+      const effectiveModel = agentModel ? {
+        ...agentModel,
+        version: ev.session_version ?? ev.version,
+        session_id: ev.session_id || activeId.value,
+      } : ev
+      applySessionModel(effectiveModel)
+      if (currentTurn.value) {
+        currentTurn.value.model = modelSelectionSnapshot(effectiveModel)
+      }
+      break
+    }
     case 'phase':
       // 兼容旧后端事件；新后端统一发送 progress。
       // operation_id 与新事件保持一致，避免同一阶段生成两条活动记录。
@@ -118,7 +151,8 @@ export function handleEvent(ev) {
       if (currentTurn.value) currentTurn.value.transport = 'streaming'
       if (!streamingItem) {
         streamingItem = push({ kind: 'assistant', role: 'streaming',
-                               text: '', streaming: true })
+                               text: '', streaming: true,
+                               model: currentTurn.value?.model || modelSelectionSnapshot() })
       }
       streamingItem.text += ev.text
       break
@@ -298,6 +332,10 @@ export function handleEvent(ev) {
       break
     }
     case 'final_answer':
+      if (ev.model_context || ev.model || ev.provider_id) {
+        const turnModel = ev.model_context || ev.model || ev
+        if (currentTurn.value) currentTurn.value.model = modelSelectionSnapshot(turnModel)
+      }
       if (currentTurn.value) currentTurn.value.terminalSeen = true
       // task_error 后端会紧接一个可审计的失败结论；错误块已承载该信息，
       // 不再重复渲染一条几乎相同的 assistant 消息。
@@ -399,9 +437,15 @@ export async function setChatPermissionMode(mode, options = {}) {
 
   fullAccessDraftPromise = (async () => {
     const requestedSessionId = secureDraftSessionId()
+    const draftModel = modelRequestPayload()
     const result = await createFullAccessDraftSession(
       requestedSessionId,
-      options,
+      {
+        ...options,
+        providerId: draftModel.provider_id,
+        modelId: draftModel.model_id,
+        reasoningEffort: draftModel.reasoning_effort,
+      },
     )
     if (!result.supported) {
       throw new Error(
@@ -412,6 +456,10 @@ export async function setChatPermissionMode(mode, options = {}) {
     // 只有服务端原子创建草稿成功后，才在同一个同步片段绑定聊天与权限状态。
     activeId.value = result.sessionId
     bindPermissionSession(result.sessionId)
+    bindModelSession(
+      result.sessionId,
+      result.body?.model_context || result.body?.session_model || result.body?.model || null,
+    )
     applyPermissionEvent({ type: 'permission_context', permission: result.permission })
     try {
       await refreshSessions()
@@ -433,6 +481,7 @@ export function newSession() {
   _loadRequest++
   resetSessionState()
   beginNewPermissionSession()
+  beginNewModelSession()
 }
 
 function turnId() {
@@ -446,7 +495,7 @@ function startTurn(prompt) {
     transport: 'connecting', startedAt: now, endedAt: null,
     elapsedMs: null, lastEventAt: now, stopRequested: false,
     outcome: null, error: null, activities: [], terminalSeen: false,
-    busy: true,
+    busy: true, model: modelSelectionSnapshot(),
   })
   currentTurn.value = turn
   activitiesById = {}
@@ -630,9 +679,14 @@ export async function loadSession(id) {
   const requestId = ++_loadRequest
   resetSessionState()
   beginNewPermissionSession()
+  beginNewModelSession()
   activeId.value = id
   const summary = sessions.value.find((session) => session.id === id)
   bindPermissionSession(id, { workspaceRoot: summary?.workspace_root || '' })
+  const summaryModel = summary?.model_context || summary?.session_model
+    || (summary?.model && typeof summary.model === 'object' ? summary.model : null)
+    || (summary?.provider_id && summary?.model_id ? summary : null)
+  bindModelSession(id, summaryModel)
   try {
     const r = await apiFetch(`/api/sessions/${id}/events`)
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
@@ -644,6 +698,7 @@ export async function loadSession(id) {
     // 历史 permission_changed 事件只用于回放；最后以服务器当前上下文校准，
     // 避免过期的 full_access 被历史事件重新点亮。
     await loadPermissionContext(id).catch(() => {})
+    await loadSessionModel(id).catch(() => {})
   } catch (error) {
     if (requestId === _loadRequest && activeId.value === id) {
       push({ kind: 'fatal', error: `任务记录读取失败：${error.message}` })
@@ -664,12 +719,14 @@ export async function sendMessage(text, { onUpdate } = {}) {
   push({ kind: 'user', text: prompt, turnId: turn.id })
   let sawDone = false
   try {
+    const includeDraftModel = !activeId.value || !sessionModel.synced
     const resp = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: prompt, session_id: activeId.value,
                              request_id: turn.id,
-                             ...(!activeId.value ? permissionRequestPayload() : {}) }),
+                             ...(!activeId.value ? permissionRequestPayload() : {}),
+                             ...(includeDraftModel ? modelRequestPayload() : {}) }),
       signal: controller.signal,
     })
     if (!resp.ok) {

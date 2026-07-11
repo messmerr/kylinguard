@@ -31,6 +31,7 @@ const PATHS = {
   activity: ['M3 12h4l2-6 4 12 2-6h6'],
   disk: ['M4 5h16v14H4z', 'M8 15h.01M12 15h4'],
   cpu: ['M9 9h6v6H9zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3'],
+  model: ['M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2L12 3Z', 'M8.5 9.5 12 11.4l3.5-1.9M12 11.4V16'],
   lock: ['M7 10V8a5 5 0 0 1 10 0v2M5 10h14v10H5z'],
   arrowUp: ['M12 19V5M6 11l6-6 6 6'],
   download: ['M12 3v12M7 10l5 5 5-5M4 20h16'],

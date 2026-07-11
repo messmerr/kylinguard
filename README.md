@@ -16,7 +16,7 @@
     # 1. 在 WSL 中进入仓库并配置项目
     cd /mnt/d/Documents/Study/3.3/cnsoft-projects
     cp .env.example .env
-    # 必填：KG_LLM_API_KEY、KG_ADMIN_PASSWORD
+    # 必填：KG_ADMIN_PASSWORD；模型提供商和 API Key 可登录后在界面配置
 
     # 2. 首次创建后端环境（只需执行一次）
     mkdir -p ~/.venvs
@@ -37,8 +37,10 @@
 
 若不需要热更新，也可以在 Windows 的 `frontend` 目录执行 `npm run build`，再只启动 WSL 后端；构建产物会由 8000 端口直接托管。
 
-浏览器打开前端地址 → 登录（用户名 `admin` + 你设置的密码）→ 顶栏切换五个视图：
-**任务 / 审计 / 权限与安全 / 总览 / 告警**。模型连接、重试、权限请求、风险复核和工具执行状态会在任务中实时显示。
+浏览器打开前端地址 → 登录（用户名 `admin` + 你设置的密码）→ 在“模型服务”
+添加 API 提供商、Key 和可用模型，再回到任务页开始使用。主模型和推理强度可按
+会话切换；安全 Reviewer 保持独立的全局配置。模型连接、重试、权限请求、风险复核
+和工具执行状态会在任务中实时显示。
 
 任务输入框旁可以随时查看或切换权限。新会话默认“确认后执行”；“信任目录”
 仅让结构化 `files.*` 工具在选定目录内自动创建和修改文件，删除和终端命令
@@ -53,6 +55,28 @@
 进入模型上下文；任务创建后锁定，避免对话中途悄悄切换项目。它不是浏览器本地
 文件夹选择器，也不是安全沙箱：完全访问仍可在 OS 身份允许时访问其他路径。
 
+### 模型服务配置
+
+登录后在“模型服务”中添加 OpenAI、DeepSeek、DashScope 或其他 OpenAI 兼容
+提供商。API Key 是只写字段；模型可以手工维护，也可通过提供商的 `/models`
+接口读取。模型发现只导入 ID，不猜测推理能力；管理员需要按该模型官方说明勾选
+支持的推理档位和 `temperature` 能力。新任务使用全局 Agent 默认值，安全 Reviewer
+单独配置；任务建立后保存自己的主模型，可在输入框旁切换，下一轮生效。
+
+DeepSeek 的 `thinking/reasoning_effort`、DashScope 的
+`enable_thinking/thinking_budget` 与 OpenAI 的 `reasoning_effort` 会由后端适配，
+参考 [DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)、
+[阿里云深度思考](https://help.aliyun.com/en/model-studio/deep-thinking) 和
+[OpenAI 模型文档](https://developers.openai.com/api/docs/models)。会话固定模型和
+能力随模型变化的交互也参考了
+[Claude Code 模型配置](https://code.claude.com/docs/en/model-config)。
+
+GUI Key 不进入 SQLite、审计、SSE 或工具子进程，而是保存到工作区外的受限独立
+文件；数据库只保存随机引用。此处的文件权限不能替代账户隔离：完全访问与后端
+共用同一 UID 时仍可能读取同身份文件，生产环境应配置独立 `KG_EXEC_USER`。
+旧 `.env` Key 不会自动迁移或删除；确认 GUI 提供商可用并设为默认后，应清空
+`KG_LLM_API_KEY` 并重启服务，避免项目工作区继续留有兼容凭据。
+
 ## Docker 启动（推荐快速体验）
 
 要求：已安装 Docker 与 Docker Compose 插件（`docker compose`）。
@@ -64,13 +88,13 @@
 `start.sh` 会自动检查：
 - `docker` / `docker compose` 是否可用
 - `.env` 是否存在
-- `KG_LLM_API_KEY` 与 `KG_ADMIN_PASSWORD` 是否仍是模板占位值
+- `KG_ADMIN_PASSWORD` 是否仍为空或使用公开示例值
 
 若你想手动执行，也可以：
 
-    # 1. 配置：复制模板并填写至少两个必填项
+    # 1. 配置：复制模板并设置登录密码
     cp .env.example .env
-    #   必填：KG_LLM_API_KEY、KG_ADMIN_PASSWORD
+    #   必填：KG_ADMIN_PASSWORD
 
     # 2. 构建并后台启动
     docker compose up -d --build
@@ -84,6 +108,10 @@
 
 说明：
 - Docker 方案会把 SQLite 数据库存到命名卷 `kylinguard-data`。
+- 宿主机端口只绑定 `127.0.0.1`。远程访问必须使用 HTTPS 反向代理或
+  `ssh -L 8000:127.0.0.1:8000 user@server`，不要在局域网以 HTTP 明文提交
+  管理员密码或模型 API Key。
+- GUI 保存的模型 API Key 也位于该数据卷的受限独立目录；接口和数据库不回显 Key。
 - 可写文件工作区挂载为命名卷 `kylinguard-workspace`，容器内路径 `/workspace`；
   容器根文件系统保持只读，进程使用非 root 账户且移除 Linux capabilities。
 - 容器内默认把 `KG_DB_PATH` 设为 `/app/data/kylinguard.db`，避免相对路径歧义。
@@ -97,7 +125,7 @@
     backend/kylinguard/          Agent 核心（流水线、权限内核、三道闸、审计链、鉴权、会话）
     backend/kylinguard/plugins/  7 个领域 MCP 插件 + run_command（含结构化 files）
     backend/tests/               pytest 测试
-    frontend/src/views/          五个视图页（任务/审计/策略/总览/告警）
+    frontend/src/views/          视图页（任务/模型服务/审计/策略/总览/告警）
     frontend/src/components/      可复用组件（步骤行/确认卡/markdown/侧栏/状态面板）
     frontend/src/composables/    前端状态层（useChat / usePermissions / useAuth）
     HANDOFF.md                   项目交接文档（当前状态、进度、未完成清单）
@@ -126,6 +154,9 @@
   事件同 SQLite 事务提交，审计写入失败立即回滚并中止任务。
 - **过程可见**：模型认证、限流重试、超时、风险复核和工具执行均以结构化
   事件实时反馈；错误只暴露清洗后的状态码与诊断编号，不传输密钥或原始请求。
+- **模型运行快照**：提供商、可用模型和默认 Agent/Reviewer 可在界面管理；每轮
+  在会话锁内冻结模型与推理强度，运行中修改只影响下一轮，并把不含凭据的模型
+  上下文写入审计链。API Key 为只写字段，单独存放在工作区外的 `0600` 文件。
 - **授权可撤销**：批准绑定会话、权限版本、能力、资源与动作指纹；支持仅一次、
   本会话和可信目录授权；一次授权只有收到其 grant id 的原等待步骤可消费，
   高风险永远只能单次授权。TTL 到期不可因系统时钟回拨复活。

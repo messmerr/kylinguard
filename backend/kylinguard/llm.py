@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
+import httpx
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 
 from kylinguard.config import Settings
@@ -205,19 +206,74 @@ async def _close_stream(stream) -> None:
 
 class LLMClient:
     def __init__(self, base_url: str, api_key: str, model: str,
-                 max_retries: int = 3, timeout: float = 60.0):
+                 max_retries: int = 3, timeout: float = 60.0, *,
+                 adapter: str = "openai_compatible",
+                 reasoning_effort: str = "auto",
+                 supports_temperature: bool = True):
         self._configured = bool(api_key.strip())
         # 空密钥仍允许服务启动；第一次真实调用会返回结构化配置错误。
+        # 禁止 30x 自动转发请求。跨 origin 时即使 Authorization 被移除，
+        # 对话、系统快照和工具观察正文仍不应被重定向到未知主机。
+        self._http_client = httpx.AsyncClient(follow_redirects=False)
         self._client = AsyncOpenAI(
             base_url=base_url,
             api_key=api_key or "unset",
             max_retries=0,
             timeout=timeout,
+            http_client=self._http_client,
         )
         self.model = model
+        self.adapter = adapter
+        self.reasoning_effort = reasoning_effort
+        self.supports_temperature = supports_temperature
         # 为兼容现有配置名，max_retries 表示包含首次请求在内的最大尝试数。
         self.max_attempts = max(1, max_retries)
         self.max_retries = self.max_attempts
+
+    async def close(self) -> None:
+        await self._client.close()
+
+    def _completion_options(self, messages: list[dict], temperature: float,
+                            *, stream: bool = False) -> dict:
+        """按模型声明的能力和提供商协议构造请求，不根据模型名猜参数。"""
+        options: dict = {"model": self.model, "messages": messages}
+        if stream:
+            options["stream"] = True
+        if self.supports_temperature:
+            options["temperature"] = temperature
+
+        effort = self.reasoning_effort
+        if effort == "auto":
+            return options
+        if self.adapter == "deepseek":
+            if effort == "none":
+                options["extra_body"] = {"thinking": {"type": "disabled"}}
+            else:
+                options["reasoning_effort"] = (
+                    "max" if effort in {"xhigh", "max"} else effort)
+                options["extra_body"] = {"thinking": {"type": "enabled"}}
+            return options
+        if self.adapter == "dashscope":
+            if effort == "none":
+                options["extra_body"] = {"enable_thinking": False}
+            else:
+                budgets = {
+                    "minimal": 1024,
+                    "low": 2048,
+                    "medium": 8192,
+                    "high": 24576,
+                    "xhigh": 65536,
+                    "max": 65536,
+                }
+                extra = {"enable_thinking": True}
+                if effort in budgets:
+                    extra["thinking_budget"] = budgets[effort]
+                options["extra_body"] = extra
+            return options
+        # OpenAI 与显式选择兼容协议的提供商均使用标准字段；是否可选由
+        # 模型 supported_efforts 能力列表在配置层提前校验。
+        options["reasoning_effort"] = effort
+        return options
 
     def _missing_key_error(self) -> PublicError | None:
         if self._configured:
@@ -241,7 +297,7 @@ class LLMClient:
                 raise LLMError(missing, attempts=attempt)
             try:
                 resp = await self._client.chat.completions.create(
-                    model=self.model, messages=messages, temperature=temperature
+                    **self._completion_options(messages, temperature)
                 )
             except _ProgressCallbackError as exc:
                 raise exc.__cause__ from exc
@@ -288,8 +344,8 @@ class LLMClient:
             streaming_notified = False
             try:
                 stream = await self._client.chat.completions.create(
-                    model=self.model, messages=messages,
-                    temperature=temperature, stream=True,
+                    **self._completion_options(
+                        messages, temperature, stream=True)
                 )
                 async for chunk in stream:
                     if not chunk.choices:

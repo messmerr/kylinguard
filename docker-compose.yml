@@ -5,11 +5,14 @@ services:
       dockerfile: Dockerfile
     container_name: kylinguard
     ports:
-      - "8000:8000"
+      # API Key/管理员密码只通过本机回环暴露；远程访问请在宿主机配置
+      # HTTPS 反向代理，不要把 8000 明文发布到局域网。
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env
     environment:
       KG_DB_PATH: /app/data/kylinguard.db
+      KG_LLM_SECRETS_DIR: /app/data/provider-secrets
       KG_WORKSPACE_ROOT: /workspace
     volumes:
       - kylinguard-data:/app/data

@@ -52,6 +52,12 @@
               </div>
               <MarkdownText :text="it.text" />
               <span v-if="it.streaming" class="cursor">▍</span>
+              <div v-if="it.role === 'answer' && !it.streaming && it.model?.modelId"
+                   class="assistant-model" :title="it.model.providerName || it.model.providerId">
+                <KgIcon name="model" :size="12" />
+                <span>{{ it.model.modelLabel || it.model.modelId }}</span>
+                <span>· 推理{{ effortText(it.model.reasoningEffort) }}</span>
+              </div>
               <button v-if="it.isReport && !it.streaming" type="button"
                       class="inline-action" @click="downloadReport(it.text)">
                 <KgIcon name="download" :size="14" />下载 Markdown
@@ -80,7 +86,8 @@
             <ConfirmCard v-else-if="it.kind === 'confirm' && !it.hidden" :card="it" />
 
             <TaskError v-else-if="it.kind === 'task_error'" :item="it"
-                       :disabled="running" @retry="retryTask(it)" />
+                       :disabled="running" @retry="retryTask(it)"
+                       @configure-model="emit('open-model-settings')" />
 
             <el-alert v-else-if="it.kind === 'fatal'" type="error"
                       :closable="false" :title="it.error" class="fatal" />
@@ -120,8 +127,6 @@
           </div>
           <div class="composer-footer">
             <div class="composer-meta">
-              <span>Enter 发送 · Shift+Enter 换行</span>
-              <span class="composer-separator shortcut-separator" aria-hidden="true"></span>
               <button
                 type="button"
                 class="workspace-control"
@@ -139,6 +144,12 @@
                 <span>{{ workspaceDisplay }}</span>
                 <KgIcon :name="activeId ? 'lock' : 'chevron'" :size="11" class="workspace-state" />
               </button>
+              <span class="composer-separator" aria-hidden="true"></span>
+              <ModelSelector
+                :disabled="running"
+                :has-history="Boolean(items.length)"
+                @configure="emit('open-model-settings')"
+              />
               <span class="composer-separator" aria-hidden="true"></span>
               <PermissionSelector
                 :disabled="running && currentTurn?.status !== 'waiting_user'"
@@ -162,6 +173,7 @@ import ConfirmCard from '../components/ConfirmCard.vue'
 import KgIcon from '../components/KgIcon.vue'
 import KgLogo from '../components/KgLogo.vue'
 import MarkdownText from '../components/MarkdownText.vue'
+import ModelSelector from '../components/ModelSelector.vue'
 import PermissionSelector from '../components/PermissionSelector.vue'
 import TaskError from '../components/TaskError.vue'
 import TraceStep from '../components/TraceStep.vue'
@@ -173,6 +185,7 @@ import {
   permissionContext,
   setDraftWorkspaceRoot,
 } from '../composables/usePermissions.js'
+import { effortLabel } from '../composables/useModels.js'
 import {
   planningProgressCount,
   planningProgressText,
@@ -183,6 +196,8 @@ const WELCOME_HINTS = [
   { icon: 'cpu', title: '查看高占用进程', description: '只读取状态', text: '列出 CPU 占用最高的进程' },
   { icon: 'activity', title: '检查失败服务', description: '只读取状态', text: '检查失败的服务' },
 ]
+
+const emit = defineEmits(['open-model-settings'])
 
 const input = ref('')
 const chatRef = ref(null)
@@ -257,7 +272,8 @@ const activityMeta = computed(() => {
     const remaining = Math.max(0, Math.ceil((activity.retryInMs - (now.value - activity.updatedAt)) / 1000))
     const attempt = activity.attempt && activity.maxAttempts
       ? ` · 已尝试 ${activity.attempt}/${activity.maxAttempts} 次` : ''
-    return `${remaining} 秒后重试${attempt}`
+    const reason = activity.error?.message ? `${activity.error.message} · ` : ''
+    return `${reason}${remaining} 秒后重试${attempt}`
   }
   const detail = []
   const generated = planningProgressCount(activity)
@@ -275,6 +291,8 @@ const elapsedText = computed(() => {
   if (elapsed >= 60000) return `${Math.floor(elapsed / 60000)}:${String(Math.floor(elapsed / 1000) % 60).padStart(2, '0')}`
   return `${(elapsed / 1000).toFixed(1)}s`
 })
+
+const effortText = (effort) => effortLabel(effort)
 
 function scrollToBottom() {
   nextTick(() => {
@@ -580,6 +598,8 @@ function downloadReport(text) {
   background: var(--kg-danger-soft);
 }
 .assistant.interrupted { border-left: 2px solid var(--kg-danger-border); padding-left: 12px; }
+.assistant-model { display: flex; align-items: center; gap: 5px; margin-top: 8px; color: var(--kg-text-tertiary); font-size: 11px; }
+.assistant-model span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .cursor { color: var(--kg-accent); animation: blink 1s step-start infinite; }
 @keyframes blink { 50% { opacity: 0; } }
@@ -685,7 +705,6 @@ function downloadReport(text) {
   gap: 7px;
 }
 
-.composer-meta > span:first-child { white-space: nowrap; }
 .composer-separator { width: 1px; height: 14px; background: var(--kg-border-subtle); }
 
 .workspace-control {
@@ -729,8 +748,20 @@ function downloadReport(text) {
   .chat-inner { padding: 22px 20px 32px; }
   .composer { padding-right: 20px; padding-left: 20px; }
   .record-meta { display: none; }
-  .composer-meta > span:first-child,
-  .shortcut-separator { display: none; }
   .workspace-control { max-width: 170px; }
+}
+
+@media (max-width: 600px) {
+  .chat-inner { padding-right: 20px; padding-left: 20px; }
+  .welcome { margin-top: 38px; }
+  .welcome-hints {
+    max-width: 320px;
+    grid-template-columns: 1fr;
+    margin-right: auto;
+    margin-left: auto;
+  }
+  .hint { min-height: 50px; }
+  .composer { padding-right: 12px; padding-left: 12px; }
+  .workspace-control { max-width: 92px; }
 }
 </style>

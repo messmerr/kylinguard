@@ -18,14 +18,10 @@ if [ ! -f .env ]; then
   cp .env.example .env
   cat <<'EOF'
 已自动创建 .env，请至少补充以下配置后重新执行：
-- KG_LLM_API_KEY
 - KG_ADMIN_PASSWORD
-EOF
-  exit 1
-fi
 
-if grep -q '^KG_LLM_API_KEY=sk-你的密钥$' .env 2>/dev/null; then
-  echo "检测到 .env 仍在使用示例 KG_LLM_API_KEY，请先改成真实密钥。" >&2
+模型提供商与 API Key 可以在登录后的“模型服务”页面配置。
+EOF
   exit 1
 fi
 

@@ -15,17 +15,31 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from kylinguard.audit import AuditError, AuditLog
 from kylinguard.authorization import execution_profile_fingerprint
 from kylinguard.auth import AuthStore, TokenManager
 from kylinguard.config import Settings, get_settings
-from kylinguard.llm import LLMError, build_clients, internal_error
+from kylinguard.llm import (
+    LLMError,
+    internal_error,
+    public_error,
+    public_error_from_exception,
+)
+from kylinguard.llm_config import (
+    LLMConfigError,
+    LLMConfigStore,
+    LLMConfigVersionConflict,
+    LLMRuntime,
+    ModelSelection,
+)
 from kylinguard.mcp_client import ToolManager
 from kylinguard.models import (
     PermissionDecision,
@@ -55,6 +69,13 @@ from kylinguard.subprocess_env import safe_subprocess_env
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 logger = logging.getLogger(__name__)
 
+ReasoningEffort = Literal[
+    "auto", "none", "minimal", "low", "medium", "high", "xhigh", "max",
+]
+ProviderAdapter = Literal[
+    "openai", "deepseek", "dashscope", "openai_compatible",
+]
+
 
 class ChatRequest(BaseModel):
     message: str
@@ -67,9 +88,16 @@ class ChatRequest(BaseModel):
     trusted_roots: list[str] = Field(default_factory=list, max_length=32)
     permission_ttl_seconds: int | None = Field(default=None, ge=1)
     workspace_root: str = Field(default="", max_length=4096)
+    provider_id: str = Field(default="", max_length=64)
+    model_id: str = Field(default="", max_length=256)
+    reasoning_effort: ReasoningEffort = "auto"
 
     @model_validator(mode="after")
     def validate_initial_permissions(self):
+        if bool(self.provider_id) != bool(self.model_id):
+            raise ValueError("provider_id 与 model_id 必须同时提供")
+        if not self.provider_id and self.reasoning_effort != "auto":
+            raise ValueError("指定推理强度时必须同时指定模型")
         if self.permission_mode is None:
             if self.trusted_roots or self.permission_ttl_seconds is not None:
                 raise ValueError("设置可信目录或有效期时必须同时指定 permission_mode")
@@ -106,12 +134,92 @@ class SessionCreateRequest(BaseModel):
     ttl_seconds: int = Field(ge=1)
     password: str = Field(min_length=1, max_length=1024)
     workspace_root: str = Field(default="", max_length=4096)
+    provider_id: str = Field(default="", max_length=64)
+    model_id: str = Field(default="", max_length=256)
+    reasoning_effort: ReasoningEffort = "auto"
 
     @model_validator(mode="after")
     def require_full_access(self):
         if self.mode != PermissionMode.FULL_ACCESS:
             raise ValueError("预创建会话接口仅接受 full_access 模式")
+        if bool(self.provider_id) != bool(self.model_id):
+            raise ValueError("provider_id 与 model_id 必须同时提供")
+        if not self.provider_id and self.reasoning_effort != "auto":
+            raise ValueError("指定推理强度时必须同时指定模型")
         return self
+
+
+class LLMModelRequest(BaseModel):
+    id: str = Field(min_length=1, max_length=256)
+    label: str = Field(default="", max_length=256)
+    enabled: bool = True
+    supported_efforts: list[ReasoningEffort] = Field(
+        default_factory=list, max_length=8,
+    )
+    supports_temperature: bool = False
+
+    @field_validator("id", "label")
+    @classmethod
+    def clean_model_text(cls, value: str) -> str:
+        value = value.strip()
+        if any(ord(char) < 32 for char in value):
+            raise ValueError("模型名称不能包含控制字符")
+        return value
+
+    @field_validator("supported_efforts")
+    @classmethod
+    def unique_efforts(cls, value: list[str]) -> list[str]:
+        if "auto" in value:
+            raise ValueError("auto 是界面回退选项，不写入模型能力列表")
+        return list(dict.fromkeys(value))
+
+
+class LLMProviderRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    adapter: ProviderAdapter
+    base_url: str = Field(min_length=1, max_length=2048)
+    api_key: SecretStr | None = None
+    clear_api_key: bool = False
+    models: list[LLMModelRequest] = Field(default_factory=list, max_length=256)
+    enabled: bool = True
+    allow_insecure_http: bool = False
+    admin_password: SecretStr | None = None
+    version: int | None = Field(default=None, ge=1)
+
+    @field_validator("name", "base_url")
+    @classmethod
+    def strip_provider_text(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_secret_action(self):
+        if self.api_key is not None and self.clear_api_key:
+            raise ValueError("不能同时更新并清除 API Key")
+        model_ids = [model.id for model in self.models]
+        if len(model_ids) != len(set(model_ids)):
+            raise ValueError("同一提供商不能配置重复模型")
+        return self
+
+
+class LLMSelectionRequest(BaseModel):
+    provider_id: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=256)
+    reasoning_effort: ReasoningEffort = "auto"
+
+
+class LLMDefaultsRequest(BaseModel):
+    version: int = Field(ge=0)
+    agent: LLMSelectionRequest
+    reviewer: LLMSelectionRequest
+
+
+class SessionModelRequest(LLMSelectionRequest):
+    version: int = Field(ge=1)
+
+
+class LLMProviderActionRequest(BaseModel):
+    version: int = Field(ge=1)
+    admin_password: SecretStr | None = None
 
 
 class PermissionUpdateRequest(BaseModel):
@@ -171,6 +279,8 @@ def create_app(settings: Settings | None = None,
     secure_database_path(settings.db_path)
     audit = AuditLog(settings.db_path)
     sessions = SessionStore(settings.db_path)
+    llm_config = LLMConfigStore(settings.db_path, settings)
+    llm_runtime = LLMRuntime(llm_config, settings)
     current_execution_profile = execution_profile_fingerprint(settings)
     # FULL_ACCESS 从不跨后端进程重启继承。sudoers、附加组、capabilities 或
     # 服务沙箱都可能在配置指纹未变化时扩大同一 UID 的权限；重启后重新复验
@@ -223,7 +333,8 @@ def create_app(settings: Settings | None = None,
     snapshot_cache = SnapshotCache(settings.snapshot_interval)
     alert_rule_store = AlertRuleStore(settings.db_path)
     snapshot_cache.set_rule_store(alert_rule_store)
-    planner_llm, reviewer_llm = build_clients(settings)
+    planner_llm = llm_runtime.routed_client("agent")
+    reviewer_llm = llm_runtime.routed_client("reviewer")
     pipeline = Pipeline(
         settings=settings, audit=audit, tools=tools,
         planner=Planner(planner_llm, settings.max_json_retries),
@@ -233,6 +344,7 @@ def create_app(settings: Settings | None = None,
         policy_store=policies,
         session_store=sessions,
         permission_requests=permission_requests,
+        llm_runtime=llm_runtime,
     )
 
     @asynccontextmanager
@@ -244,6 +356,7 @@ def create_app(settings: Settings | None = None,
         if with_tools:
             await snapshot_cache.stop()
             await tools.stop()
+        llm_config.close()
         sessions.close()
         auth_store.close()
         policies.close()
@@ -251,6 +364,19 @@ def create_app(settings: Settings | None = None,
         audit.close()
 
     app = FastAPI(title="麒盾 KylinGuard", lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def safe_validation_error(_request, exc: RequestValidationError):
+        """FastAPI 默认 422 会复制原始 input；配置接口可能包含只写 Key。"""
+        errors = []
+        for item in exc.errors():
+            safe = {
+                key: value for key, value in item.items()
+                if key not in {"input", "ctx"}
+            }
+            errors.append(safe)
+        return JSONResponse(status_code=422, content={"detail": errors})
+
     app.state.pipeline = pipeline
     app.state.confirmations = confirmations
     app.state.permission_requests = permission_requests
@@ -261,6 +387,8 @@ def create_app(settings: Settings | None = None,
     app.state.auth = auth_store
     app.state.tokens = tokens
     app.state.policies = policies
+    app.state.llm_config = llm_config
+    app.state.llm_runtime = llm_runtime
 
     async def require_auth(authorization: str = Header("")) -> str:
         """所有业务端点的鉴权依赖：返回当前管理员用户名。"""
@@ -286,7 +414,7 @@ def create_app(settings: Settings | None = None,
         """把权限状态变更与哈希链事件提交在同一个 SQLite 事务中。"""
         with app.state.audit.serialized():
             with app.state.sessions.transaction() as connection:
-                result, payload = mutation()
+                result, payload = mutation(connection)
                 app.state.audit.append(
                     session_id,
                     event_type,
@@ -316,6 +444,20 @@ def create_app(settings: Settings | None = None,
             return uid != os.geteuid()
         except KeyError:
             return False
+
+    def llm_config_payload() -> dict:
+        payload = app.state.llm_config.public_config()
+        isolated = execution_account_separated()
+        payload["security"] = {
+            "credentials_isolated": isolated,
+            "message": (
+                "Agent 使用独立 OS 执行账户；模型凭据只保存在控制面账户的受限目录。"
+                if isolated else
+                "当前 Agent 与后端共用 OS 身份。完全访问模式下这不构成凭据隔离；"
+                "生产部署请配置独立 KG_EXEC_USER，并仅通过 HTTPS 远程提交 API Key。"
+            ),
+        }
+        return payload
 
     def execution_grants_root() -> bool:
         if settings.exec_user:
@@ -426,6 +568,58 @@ def create_app(settings: Settings | None = None,
         )
         return payload
 
+    def llm_http_error(error: LLMConfigError) -> HTTPException:
+        return HTTPException(
+            error.status_code,
+            detail={"code": error.code, "message": error.message},
+        )
+
+    def model_selection(provider_id: str, model_id: str,
+                        reasoning_effort: str) -> ModelSelection | None:
+        if not provider_id and not model_id:
+            return None
+        return ModelSelection(provider_id, model_id, reasoning_effort)
+
+    def default_agent_selection() -> ModelSelection:
+        raw = app.state.llm_config.get_defaults()["agent"]
+        return ModelSelection(
+            raw["provider_id"], raw["model_id"], raw["reasoning_effort"])
+
+    def require_config_reauthentication(
+        user: str, password: SecretStr | None,
+    ) -> None:
+        raw = password.get_secret_value() if password is not None else ""
+        if not raw or not app.state.auth.verify(user, raw):
+            app.state.audit.append("__llm_config__", "llm_reauthentication_failed", {
+                "operator": user,
+            })
+            raise HTTPException(403, detail={
+                "code": "llm_reauthentication_failed",
+                "message": "保存模型提供商前需要重新验证管理员密码。",
+            })
+
+    def audit_llm_config(event_type: str, user: str, **payload) -> None:
+        # 白名单调用点只传元数据；禁止把 Pydantic 请求整体写入审计链。
+        app.state.audit.append("__llm_config__", event_type, {
+            "operator": user,
+            **payload,
+        })
+
+    def transactional_llm_audit(
+        session_id: str, event_type: str, user: str, payload_builder,
+    ):
+        """生成在 LLM 配置事务内写入同库审计链的回调。"""
+        def append(value, connection):
+            app.state.audit.append(
+                session_id,
+                event_type,
+                {"operator": user, **payload_builder(value)},
+                connection=connection,
+                commit=False,
+                lock_held=True,
+            )
+        return append
+
     def permission_expiry(mode: PermissionMode, ttl_seconds: int | None) -> float | None:
         if mode not in {
             PermissionMode.TRUSTED_WORKSPACE,
@@ -464,9 +658,209 @@ def create_app(settings: Settings | None = None,
             authorization.removeprefix("Bearer ").strip())
         return {"ok": True}
 
+    # ---- 模型服务与运行时配置 ----
+
+    @app.get("/api/llm/config")
+    async def get_llm_config(_user: str = Depends(require_auth)):
+        return llm_config_payload()
+
+    @app.post("/api/llm/providers", status_code=201)
+    async def create_llm_provider(
+        req: LLMProviderRequest, user: str = Depends(require_auth),
+    ):
+        require_config_reauthentication(user, req.admin_password)
+        api_key = (req.api_key.get_secret_value()
+                   if req.api_key is not None else "")
+        try:
+            with app.state.audit.serialized():
+                provider = app.state.llm_config.create_provider(
+                    name=req.name,
+                    adapter=req.adapter,
+                    base_url=req.base_url,
+                    api_key=api_key,
+                    models=[model.model_dump() for model in req.models],
+                    enabled=req.enabled,
+                    allow_insecure_http=req.allow_insecure_http,
+                    updated_by=user,
+                    audit=transactional_llm_audit(
+                        "__llm_config__", "llm_provider_created", user,
+                        lambda item: {
+                            "provider_id": item["id"], "name": item["name"],
+                            "adapter": item["adapter"],
+                            "models": [model["id"] for model in item["models"]],
+                            "api_key_changed": bool(api_key),
+                        },
+                    ),
+                )
+        except LLMConfigError as exc:
+            raise llm_http_error(exc) from exc
+        return {"provider": provider}
+
+    @app.put("/api/llm/providers/{provider_id}")
+    async def update_llm_provider(
+        provider_id: str, req: LLMProviderRequest,
+        user: str = Depends(require_auth),
+    ):
+        require_config_reauthentication(user, req.admin_password)
+        if req.version is None:
+            raise HTTPException(422, detail={
+                "code": "provider_version_required",
+                "message": "编辑提供商必须携带当前版本。",
+            })
+        api_key = (req.api_key.get_secret_value()
+                   if req.api_key is not None else None)
+        try:
+            with app.state.audit.serialized():
+                provider = app.state.llm_config.update_provider(
+                    provider_id,
+                    expected_version=req.version,
+                    name=req.name,
+                    adapter=req.adapter,
+                    base_url=req.base_url,
+                    models=[model.model_dump() for model in req.models],
+                    enabled=req.enabled,
+                    allow_insecure_http=req.allow_insecure_http,
+                    api_key=api_key,
+                    clear_api_key=req.clear_api_key,
+                    updated_by=user,
+                    audit=transactional_llm_audit(
+                        "__llm_config__", "llm_provider_updated", user,
+                        lambda item: {
+                            "provider_id": provider_id,
+                            "name": item["name"], "adapter": item["adapter"],
+                            "version": item["version"],
+                            "models": [model["id"] for model in item["models"]],
+                            "api_key_changed": bool(api_key) or req.clear_api_key,
+                        },
+                    ),
+                )
+        except LLMConfigError as exc:
+            raise llm_http_error(exc) from exc
+        return {"provider": provider}
+
+    @app.delete("/api/llm/providers/{provider_id}")
+    async def delete_llm_provider(
+        provider_id: str, req: LLMProviderActionRequest,
+        user: str = Depends(require_auth),
+    ):
+        require_config_reauthentication(user, req.admin_password)
+        try:
+            with app.state.audit.serialized():
+                app.state.llm_config.delete_provider(
+                    provider_id,
+                    expected_version=req.version,
+                    audit=transactional_llm_audit(
+                        "__llm_config__", "llm_provider_deleted", user,
+                        lambda item: {
+                            "provider_id": provider_id,
+                            "name": item["name"], "adapter": item["adapter"],
+                        },
+                    ),
+                )
+        except LLMConfigError as exc:
+            raise llm_http_error(exc) from exc
+        return {"ok": True}
+
+    def provider_action_error(exc: Exception) -> HTTPException:
+        if isinstance(exc, LLMConfigError):
+            return llm_http_error(exc)
+        error = public_error_from_exception(exc)
+        status = 503 if error.retryable else 400
+        return HTTPException(status, detail=error.to_dict())
+
+    @app.post("/api/llm/providers/{provider_id}/test")
+    async def test_llm_provider(
+        provider_id: str, req: LLMProviderActionRequest,
+        user: str = Depends(require_auth),
+    ):
+        require_config_reauthentication(user, req.admin_password)
+        try:
+            provider = app.state.llm_config.get_provider(provider_id)
+            if provider["version"] != req.version:
+                raise LLMConfigVersionConflict()
+            result = await app.state.llm_runtime.test_provider(provider_id)
+            if app.state.llm_config.get_provider(provider_id)["version"] != req.version:
+                raise LLMConfigVersionConflict()
+        except Exception as exc:
+            raise provider_action_error(exc) from exc
+        audit_llm_config(
+            "llm_provider_tested", user,
+            provider_id=provider_id, ok=True,
+            latency_ms=result["latency_ms"],
+            model_count=result["model_count"],
+        )
+        return result
+
+    @app.post("/api/llm/providers/{provider_id}/discover-models")
+    async def discover_llm_models(
+        provider_id: str, req: LLMProviderActionRequest,
+        user: str = Depends(require_auth),
+    ):
+        require_config_reauthentication(user, req.admin_password)
+        try:
+            provider = app.state.llm_config.get_provider(provider_id)
+            if provider["version"] != req.version:
+                raise LLMConfigVersionConflict()
+            ids = await app.state.llm_runtime.fetch_model_ids(provider_id)
+            with app.state.audit.serialized():
+                updated_provider = app.state.llm_config.add_discovered_models(
+                    provider_id,
+                    ids,
+                    expected_version=req.version,
+                    updated_by=user,
+                    audit=transactional_llm_audit(
+                        "__llm_config__", "llm_models_discovered", user,
+                        lambda item: {
+                            "provider_id": provider_id,
+                            "models": [model["id"] for model in item["models"]],
+                        },
+                    ),
+                )
+            result = {"provider": updated_provider, "discovered": len(ids)}
+        except Exception as exc:
+            raise provider_action_error(exc) from exc
+        return result
+
+    @app.put("/api/llm/defaults")
+    async def update_llm_defaults(
+        req: LLMDefaultsRequest, user: str = Depends(require_auth),
+    ):
+        try:
+            with app.state.audit.serialized():
+                defaults = app.state.llm_config.update_defaults(
+                    agent=ModelSelection(
+                        req.agent.provider_id, req.agent.model_id,
+                        req.agent.reasoning_effort),
+                    reviewer=ModelSelection(
+                        req.reviewer.provider_id, req.reviewer.model_id,
+                        req.reviewer.reasoning_effort),
+                    expected_version=req.version,
+                    updated_by=user,
+                    audit=transactional_llm_audit(
+                        "__llm_config__", "llm_defaults_updated", user,
+                        lambda item: {
+                            "version": item["version"],
+                            "agent": item["agent"],
+                            "reviewer": item["reviewer"],
+                        },
+                    ),
+                )
+        except LLMConfigError as exc:
+            raise llm_http_error(exc) from exc
+        return llm_config_payload()
+
     @app.post("/api/chat")
     async def chat(req: ChatRequest, user: str = Depends(require_auth)):
         created = not req.session_id
+        requested_model = model_selection(
+            req.provider_id, req.model_id, req.reasoning_effort)
+        if created and requested_model is None:
+            requested_model = default_agent_selection()
+        if requested_model is not None:
+            try:
+                app.state.llm_config.validate_selection(requested_model)
+            except LLMConfigError as exc:
+                raise llm_http_error(exc) from exc
         if created:
             session_id = uuid.uuid4().hex
             initial_mode = req.permission_mode or PermissionMode.ASK
@@ -475,11 +869,21 @@ def create_app(settings: Settings | None = None,
                 initial_expiry = permission_expiry(
                     initial_mode, req.permission_ttl_seconds)
                 if req.permission_mode is None:
-                    app.state.sessions.create(
-                        session_id, req.message, workspace_root=workspace_root,
-                    )
+                    # 与 sessions 行共用一个 BEGIN IMMEDIATE 事务，避免模型
+                    # 绑定失败后留下前端不知道的幽灵会话。
+                    with app.state.sessions.transaction() as connection:
+                        app.state.sessions.create(
+                            session_id, req.message, workspace_root=workspace_root,
+                            commit=False,
+                        )
+                        session_model = (
+                            app.state.llm_config.create_session_with_connection(
+                                connection, session_id, requested_model,
+                                updated_by=user,
+                            )
+                        )
                 else:
-                    def create_session_with_permissions():
+                    def create_session_with_permissions(connection):
                         app.state.sessions.create(
                             session_id,
                             req.message,
@@ -491,7 +895,11 @@ def create_app(settings: Settings | None = None,
                             commit=False,
                         )
                         context = app.state.sessions.get_permissions(session_id)
-                        return context, {
+                        session_model = app.state.llm_config.create_session_with_connection(
+                            connection, session_id, requested_model,
+                            updated_by=user,
+                        )
+                        return (context, session_model), {
                             "operator": user,
                             "source": "session_created",
                             "from_mode": None,
@@ -501,27 +909,35 @@ def create_app(settings: Settings | None = None,
                             "version": context.version,
                         }
 
-                    audited_permission_mutation(
+                    context, session_model = audited_permission_mutation(
                         session_id,
                         "permission_changed",
                         create_session_with_permissions,
                     )
             except SessionPermissionError as exc:
                 raise permission_http_error(exc) from exc
+            except LLMConfigError as exc:
+                raise llm_http_error(exc) from exc
         else:
             session_id = req.session_id
             if not app.state.sessions.exists(session_id):
                 raise HTTPException(404, "会话不存在")
             if (req.permission_mode is not None or req.trusted_roots
                     or req.permission_ttl_seconds is not None
-                    or req.workspace_root):
+                    or req.workspace_root or req.provider_id or req.model_id
+                    or req.reasoning_effort != "auto"):
                 raise HTTPException(
                     400,
                     detail={
                         "code": "permission_update_requires_endpoint",
-                        "message": "已有会话请通过权限接口更新权限。",
+                        "message": "已有会话请通过专用接口更新权限或模型。",
                     },
                 )
+            try:
+                session_model = app.state.llm_config.ensure_session(
+                    session_id, updated_by=user)
+            except LLMConfigError as exc:
+                raise llm_http_error(exc) from exc
             app.state.sessions.touch(session_id, first_message=req.message)
         queue: asyncio.Queue = asyncio.Queue()
         last_progress: dict = {}
@@ -587,8 +1003,13 @@ def create_app(settings: Settings | None = None,
                                  "error": "审计写入失败，任务已中止。",
                                  "request_id": req.request_id})
             except Exception as exc:  # 未知错误也必须形成可回放的安全终态
-                error = (exc.error if isinstance(exc, LLMError)
-                         else internal_error())
+                if isinstance(exc, LLMError):
+                    error = exc.error
+                elif isinstance(exc, LLMConfigError):
+                    error = public_error(
+                        "llm_config_invalid", exc.message, retryable=False)
+                else:
+                    error = internal_error()
                 elapsed_ms = int((time.monotonic() - started) * 1000)
                 logger.error(
                     "chat task failed incident_id=%s exception_type=%s",
@@ -639,7 +1060,8 @@ def create_app(settings: Settings | None = None,
             if created:
                 yield ("data: " + json.dumps(
                     {"type": "session_created", "session_id": session_id,
-                     "request_id": req.request_id},
+                     "request_id": req.request_id,
+                     "model_context": session_model},
                     ensure_ascii=False) + "\n\n")
             task = asyncio.create_task(run())
             try:
@@ -684,11 +1106,20 @@ def create_app(settings: Settings | None = None,
                 "code": "full_access_reauthentication_failed",
                 "message": "管理员密码复验失败，完全访问会话未创建。",
             })
+        requested_model = model_selection(
+            req.provider_id, req.model_id, req.reasoning_effort)
+        if requested_model is None:
+            requested_model = default_agent_selection()
+        if requested_model is not None:
+            try:
+                app.state.llm_config.validate_selection(requested_model)
+            except LLMConfigError as exc:
+                raise llm_http_error(exc) from exc
         try:
             workspace_root = resolve_session_workspace(req.workspace_root)
             expiry = permission_expiry(req.mode, req.ttl_seconds)
 
-            def create_with_full_access():
+            def create_with_full_access(connection):
                 app.state.sessions.create(
                     req.session_id,
                     "新任务",
@@ -703,7 +1134,11 @@ def create_app(settings: Settings | None = None,
                 )
                 context = app.state.sessions.get_permissions(req.session_id)
                 assert context is not None
-                return context, {
+                session_model = app.state.llm_config.create_session_with_connection(
+                    connection, req.session_id, requested_model,
+                    updated_by=user,
+                )
+                return (context, session_model), {
                     "operator": user,
                     "source": "pre_message",
                     "from_mode": None,
@@ -714,7 +1149,7 @@ def create_app(settings: Settings | None = None,
                     "draft": True,
                 }
 
-            context = audited_permission_mutation(
+            context, session_model = audited_permission_mutation(
                 req.session_id,
                 "permission_changed",
                 create_with_full_access,
@@ -722,18 +1157,76 @@ def create_app(settings: Settings | None = None,
         except SessionPermissionError as exc:
             status = 409 if exc.code == "session_already_exists" else 400
             raise permission_http_error(exc, status) from exc
+        except LLMConfigError as exc:
+            raise llm_http_error(exc) from exc
         return {
             "session_id": req.session_id,
             "draft": True,
             "permission": permission_payload(context),
+            "model_context": session_model,
         }
 
     @app.get("/api/sessions")
     async def list_sessions(_user: str = Depends(require_auth)):
+        summaries = app.state.sessions.list()
+        for summary in summaries:
+            try:
+                summary["model"] = app.state.llm_config.get_session(
+                    summary["id"], ensure=True)
+            except LLMConfigError:
+                # 配置被外部破坏时任务列表仍可用；进入会话后模型接口会返回
+                # 明确诊断，绝不静默换到另一个提供商。
+                summary["model"] = None
         return {
-            "sessions": app.state.sessions.list(),
+            "sessions": summaries,
             "permission_capabilities": permission_capabilities_payload(),
         }
+
+    @app.get("/api/sessions/{session_id}/model")
+    async def get_session_model(
+        session_id: str, _user: str = Depends(require_auth),
+    ):
+        if not app.state.sessions.exists(session_id):
+            raise HTTPException(404, "会话不存在")
+        try:
+            return app.state.llm_config.get_session(session_id, ensure=True)
+        except LLMConfigError as exc:
+            raise llm_http_error(exc) from exc
+
+    @app.put("/api/sessions/{session_id}/model")
+    async def update_session_model(
+        session_id: str, req: SessionModelRequest,
+        user: str = Depends(require_auth),
+    ):
+        if not app.state.sessions.exists(session_id):
+            raise HTTPException(404, "会话不存在")
+        is_busy = getattr(app.state.pipeline, "session_busy", lambda _id: False)
+        if is_busy(session_id):
+            raise HTTPException(409, detail={
+                "code": "session_busy",
+                "message": "当前回合仍在运行，模型切换将在任务结束后开放。",
+            })
+        try:
+            with app.state.audit.serialized():
+                context = app.state.llm_config.update_session(
+                    session_id,
+                    selection=ModelSelection(
+                        req.provider_id, req.model_id, req.reasoning_effort),
+                    expected_version=req.version,
+                    updated_by=user,
+                    audit=transactional_llm_audit(
+                        session_id, "session_model_changed", user,
+                        lambda item: {
+                            "provider_id": item["provider_id"],
+                            "model_id": item["model_id"],
+                            "reasoning_effort": item["reasoning_effort"],
+                            "version": item["version"],
+                        },
+                    ),
+                )
+        except LLMConfigError as exc:
+            raise llm_http_error(exc) from exc
+        return context
 
     @app.get("/api/sessions/{session_id}/permissions")
     async def get_session_permissions(
@@ -772,7 +1265,7 @@ def create_app(settings: Settings | None = None,
                 })
         try:
             expiry = permission_expiry(req.mode, req.ttl_seconds)
-            def mutate_permissions():
+            def mutate_permissions(_connection):
                 context = app.state.sessions.set_permissions(
                     session_id,
                     mode=req.mode,
@@ -826,7 +1319,7 @@ def create_app(settings: Settings | None = None,
     ):
         if not app.state.sessions.exists(session_id):
             raise HTTPException(404, "会话不存在")
-        def mutate_revoke_all():
+        def mutate_revoke_all(_connection):
             count = app.state.sessions.revoke_grants(
                 session_id, commit=False)
             return count, {
@@ -849,7 +1342,7 @@ def create_app(settings: Settings | None = None,
     ):
         if not app.state.sessions.exists(session_id):
             raise HTTPException(404, "会话不存在")
-        def mutate_revoke_one():
+        def mutate_revoke_one(_connection):
             count = app.state.sessions.revoke_grants(
                 session_id, grant_id, commit=False)
             if not count:
@@ -1025,7 +1518,7 @@ def create_app(settings: Settings | None = None,
         # 此处到 resolve 之间没有 await，同一事件循环上的并发请求不能插入。
         if not app.state.permission_requests.resolve(resolution):
             if grant is not None:
-                def revoke_unclaimed_grant():
+                def revoke_unclaimed_grant(_connection):
                     count = app.state.sessions.revoke_grants(
                         pending.session_id, grant.id, commit=False)
                     return count, {

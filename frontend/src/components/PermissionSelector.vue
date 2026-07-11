@@ -154,6 +154,7 @@ async function chooseMode(mode) {
   background: transparent;
   color: var(--kg-text-tertiary);
   font-size: 11px;
+  white-space: nowrap;
   cursor: pointer;
   transition: color var(--kg-motion-fast), background var(--kg-motion-fast),
     border-color var(--kg-motion-fast);

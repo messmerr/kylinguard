@@ -9,6 +9,10 @@
         <code v-for="entry in meta" :key="entry">{{ entry }}</code>
       </div>
       <div class="error-actions">
+        <button v-if="showModelSettings" type="button"
+                :disabled="disabled" @click="$emit('configure-model')">
+          <KgIcon name="model" :size="13" />检查模型设置
+        </button>
         <button v-if="error.retryable !== false" type="button"
                 :disabled="disabled" @click="$emit('retry')">
           <KgIcon name="refresh" :size="13" />重新尝试
@@ -27,10 +31,14 @@ const props = defineProps({
   item: { type: Object, required: true },
   disabled: { type: Boolean, default: false },
 })
-defineEmits(['retry'])
+defineEmits(['retry', 'configure-model'])
 
 const copied = ref(false)
 const error = computed(() => props.item.error || {})
+const showModelSettings = computed(() => new Set([
+  'llm_config_missing', 'llm_auth_invalid', 'llm_forbidden',
+  'llm_model_not_found', 'llm_provider_unavailable',
+]).has(error.value.code))
 const answerDetail = computed(() => {
   const answer = String(props.item.answer || '').trim()
   const message = String(error.value.message || '').trim()

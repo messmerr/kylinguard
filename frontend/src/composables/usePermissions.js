@@ -399,6 +399,7 @@ export async function loadPermissionContext(sessionId = permissionContext.sessio
 export async function createFullAccessDraftSession(sessionId, {
   password = '', durationMinutes = 30, ttlSeconds = null,
   workspaceRoot = permissionContext.workspaceRoot,
+  providerId = '', modelId = '', reasoningEffort = 'auto',
 } = {}) {
   const requestedSessionId = String(sessionId || '')
   if (!/^[a-f0-9]{32}$/.test(requestedSessionId)) {
@@ -424,6 +425,11 @@ export async function createFullAccessDraftSession(sessionId, {
       ttl_seconds: effectiveTtl,
       password,
       ...(selectedWorkspaceRoot ? { workspace_root: selectedWorkspaceRoot } : {}),
+      ...(providerId && modelId ? {
+        provider_id: providerId,
+        model_id: modelId,
+        reasoning_effort: reasoningEffort || 'auto',
+      } : {}),
     }),
   })
   if (isCompatibilityMiss(response)) {

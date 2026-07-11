@@ -27,7 +27,8 @@
       </header>
 
       <div class="content-area" :inert="showPanel">
-        <ChatView v-if="view === 'chat'" />
+        <ChatView v-if="view === 'chat'" @open-model-settings="changeView('models')" />
+        <ModelSettingsView v-else-if="view === 'models'" />
         <AuditView v-else-if="view === 'audit'" />
         <PolicyView v-else-if="view === 'policy'" />
         <DashboardView v-else-if="view === 'dashboard'" />
@@ -48,6 +49,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { authed } from './composables/useAuth.js'
 import { activeId, refreshSessions, sessions } from './composables/useChat.js'
+import { loadModelConfig } from './composables/useModels.js'
 import {
   fullAccessActive,
   fullAccessRemainingMs,
@@ -60,6 +62,7 @@ import ChatView from './views/ChatView.vue'
 import DashboardView from './views/DashboardView.vue'
 import LoginView from './views/LoginView.vue'
 import AlertsView from './views/AlertsView.vue'
+import ModelSettingsView from './views/ModelSettingsView.vue'
 import PolicyView from './views/PolicyView.vue'
 import KgIcon from './components/KgIcon.vue'
 import Sidebar from './components/Sidebar.vue'
@@ -71,6 +74,7 @@ const statusTrigger = ref(null)
 
 const VIEWS = {
   chat: { label: '任务' },
+  models: { label: '模型服务' },
   audit: { label: '审计记录' },
   policy: { label: '权限与安全' },
   dashboard: { label: '总览' },
@@ -144,7 +148,10 @@ function closeStatusPanel() {
 }
 
 watch(authed, (v) => {
-  if (v) refreshSessions()
+  if (v) {
+    refreshSessions().catch(() => {})
+    loadModelConfig().catch(() => {})
+  }
 }, { immediate: true })
 </script>
 

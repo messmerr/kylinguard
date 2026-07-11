@@ -109,7 +109,8 @@ class Pipeline:
     def __init__(self, settings: Settings, audit: AuditLog, tools,
                  planner, reviewer, confirmations: Confirmations,
                  snapshot_fn=_fresh_snapshot, policy_store=None,
-                 session_store=None, permission_requests=None):
+                 session_store=None, permission_requests=None,
+                 llm_runtime=None):
         self._settings = settings
         self._audit = audit
         self._tools = tools
@@ -120,8 +121,14 @@ class Pipeline:
         self._policy_store = policy_store  # 鸭子类型：extra() -> ExtraPolicies
         self._session_store = session_store
         self._permission_requests = permission_requests
+        self._llm_runtime = llm_runtime
         self._conversations: dict[str, list[dict]] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
+
+    def session_busy(self, session_id: str) -> bool:
+        """供配置 API 拒绝在本轮运行中修改会话模型。"""
+        lock = self._session_locks.get(session_id)
+        return bool(lock and lock.locked())
 
     def _effective_permission_context(self, context):
         """服务端 kill switch 永远优先于数据库中尚未到期的旧会话。"""
@@ -179,10 +186,20 @@ class Pipeline:
                 "message": "该会话已有任务在执行，本轮将在其完成后开始。",
             })
         async with lock:
-            await self._handle_serialized(session_id, user_query, emit)
+            if self._llm_runtime is None:
+                await self._handle_serialized(session_id, user_query, emit)
+                return
+            # 一轮内固定同一份模型配置快照。配置页或其他会话随后发生的
+            # 修改只影响下一轮，且 ContextVar 路由不会在并发会话间串用。
+            async with self._llm_runtime.bind(session_id) as model_context:
+                await self._handle_serialized(
+                    session_id, user_query, emit,
+                    model_context=model_context.public_payload(),
+                )
 
     async def _handle_serialized(
         self, session_id: str, user_query: str, emit,
+        model_context: dict | None = None,
     ) -> None:
         """在工作副本中处理一轮，对取消实行会话上下文原子回滚。"""
         conversation = self._get_conversation(session_id)
@@ -193,7 +210,10 @@ class Pipeline:
             conversation.extend(working[base_length:])
 
         try:
-            await self._handle_turn(session_id, user_query, emit, working)
+            await self._handle_turn(
+                session_id, user_query, emit, working,
+                model_context=model_context,
+            )
         except asyncio.CancelledError:
             # working 尚未提交，共享上下文天然保持本轮开始前的状态。
             raise
@@ -205,7 +225,8 @@ class Pipeline:
             commit()
 
     async def _handle_turn(self, session_id: str, user_query: str, emit,
-                           conversation: list[dict]) -> None:
+                           conversation: list[dict],
+                           model_context: dict | None = None) -> None:
         started = time.monotonic()
 
         async def record(
@@ -292,6 +313,8 @@ class Pipeline:
             "query": user_query,
             "workspace_root": effective_workspace,
         })
+        if model_context is not None:
+            await record("model_context", model_context)
 
         permission_context = self._effective_permission_context(
             self._session_store.get_permission_context(session_id)

@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     reviewer_model: str = "deepseek-v4-pro"
     llm_max_retries: int = 3
     llm_timeout: float = 60.0
+    # GUI 保存的模型凭据不再写回项目 .env。留空时放到
+    # XDG_STATE_HOME（或 ~/.local/state）下的受限目录；生产部署可显式
+    # 指向 /var/lib/kylinguard 等仅控制面账户可读的位置。
+    llm_secrets_dir: str = ""
 
     # 存储
     db_path: str = "data/kylinguard.db"
