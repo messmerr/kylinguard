@@ -12,7 +12,19 @@ services:
       KG_DB_PATH: /app/data/kylinguard.db
     volumes:
       - kylinguard-data:/app/data
+      - kylinguard-workspace:/workspace
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 2.0
     restart: unless-stopped
 
 volumes:
   kylinguard-data:
+  kylinguard-workspace:

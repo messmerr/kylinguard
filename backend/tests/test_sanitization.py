@@ -33,4 +33,3 @@ def test_action_fingerprint与字典插入顺序无关():
     left = canonical_fingerprint({"tool": "x", "arguments": {"a": 1, "b": 2}})
     right = canonical_fingerprint({"arguments": {"b": 2, "a": 1}, "tool": "x"})
     assert left == right
-

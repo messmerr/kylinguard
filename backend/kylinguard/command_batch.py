@@ -99,4 +99,3 @@ def parse_simple_batch(text: str) -> CommandBatch:
             raise CommandSyntaxError("批处理中包含空命令")
         commands.append(argv)
     return CommandBatch(commands=commands, operators=operators)
-

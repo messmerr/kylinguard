@@ -27,7 +27,15 @@ COPY backend/ /app/backend/
 RUN pip install -e /app/backend
 
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
-RUN mkdir -p /app/data
+RUN groupadd --system --gid 10001 kylinguard \
+    && useradd --system --uid 10001 --gid kylinguard \
+        --home-dir /nonexistent --shell /usr/sbin/nologin kylinguard \
+    && mkdir -p /app/data /workspace \
+    && chown -R kylinguard:kylinguard /app/data /workspace
+
+# Web/API 控制面默认不以 root 运行。需要写入的持久化目录由 compose
+# 显式挂载，Agent 的“完全访问”也只代表该执行账户拥有的 OS 权限。
+USER kylinguard
 
 EXPOSE 8000
 

@@ -38,4 +38,3 @@ def test_引号内分号不是连接符():
 def test_不支持的shell语义给出可改写错误(command):
     with pytest.raises(CommandSyntaxError):
         parse_simple_batch(command)
-

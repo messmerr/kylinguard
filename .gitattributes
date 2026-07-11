@@ -1,0 +1,5 @@
+*.sh text eol=lf
+deploy/execctl text eol=lf
+deploy/*.service text eol=lf
+deploy/sudoers-* text eol=lf
+Dockerfile text eol=lf

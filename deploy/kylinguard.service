@@ -12,15 +12,25 @@ EnvironmentFile=/etc/kylinguard/kylinguard.env
 ExecStart=/opt/kylinguard/.venv/bin/python -m uvicorn --factory kylinguard.api:create_app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=3
-NoNewPrivileges=true
+# 控制面通过 sudoers 只能降权到 kylinguard-exec，或调用 root-owned execctl。
+# NoNewPrivileges=true 会让这两条既有边界全部失效，因此在此保留 setuid，
+# 再用下方 capability bounding set 与 sudoers 收窄可获得的主机能力。
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/kylinguard
+# 控制面只写数据库目录；受控文件工作区由管理员预先创建并授权给
+# kylinguard-exec。前导 “-” 允许未启用工作区的部署正常启动。
+ReadWritePaths=/var/lib/kylinguard -/srv/kylinguard-workspaces
 ReadOnlyPaths=/opt/kylinguard /etc/kylinguard
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
 AmbientCapabilities=
 SystemCallArchitectures=native
+# 所有执行子进程仍留在服务 cgroup；即使某命令错误 fork，也不能无限占用主机。
+TasksMax=128
+MemoryMax=1G
+CPUQuota=200%
+LimitNOFILE=4096
 
 [Install]
 WantedBy=multi-user.target
