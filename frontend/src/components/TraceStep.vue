@@ -12,8 +12,7 @@
       </span>
       <span class="spacer"></span>
       <span class="risk-badge" :class="riskClass">{{ riskLabel }}</span>
-      <span v-if="step.status !== 'denied' && step.status !== 'skipped'"
-            class="status-text" :class="step.status">{{ statusText }}</span>
+      <span class="status-text" :class="step.status">{{ statusText }}</span>
       <span v-if="step.durationMs != null" class="duration">{{ durationText }}</span>
       <KgIcon name="chevron" :size="14" class="chevron"
               :class="{ open: step.expanded }" />
@@ -57,6 +56,8 @@
         </div>
       </section>
 
+      <div v-if="step.error" class="step-error"
+           :class="{ warning: step.status === 'result_unknown' }">{{ errorText }}</div>
       <template v-if="step.output != null">
         <div class="output-head">
           <span>原始输出</span>
@@ -82,32 +83,35 @@ const argsText = computed(() => {
 })
 
 const riskClass = computed(() => {
-  if (step.status === 'denied' || step.status === 'skipped') return 'deny'
   return step.verification?.decision.risk || step.risk || 'low'
 })
 
 const riskLabel = computed(() => {
-  if (step.status === 'skipped') return '已取消'
   return ({
-    low: '低风险', medium: '中风险', high: '高风险', deny: '已阻止',
+    low: '低风险', medium: '中风险', high: '高风险',
   }[riskClass.value] || '待检查')
 })
 
-const isActive = computed(() => ['verifying', 'reviewing', 'running'].includes(step.status))
+const isActive = computed(() => ['reviewing', 'running'].includes(step.status))
 const statusIcon = computed(() => {
   if (step.status === 'done') return 'check'
-  if (step.status === 'denied' || step.status === 'skipped') return 'close'
-  if (step.status === 'waiting') return 'warning'
+  if (['denied', 'skipped', 'failed', 'cancelled'].includes(step.status)) return 'close'
+  if (['waiting', 'timed_out', 'result_unknown'].includes(step.status)) return 'warning'
   return 'terminal'
 })
 
 const statusText = computed(() => {
   switch (step.status) {
-    case 'verifying': return '检查中'
+    case 'queued': return '等待检查'
     case 'reviewing': return '复核中'
+    case 'ready': return '待执行'
     case 'waiting': return '等待确认'
     case 'running': return '执行中'
     case 'done': return step.autoAllowed ? '自动执行' : '已执行'
+    case 'failed': return '执行失败'
+    case 'timed_out': return '确认超时'
+    case 'cancelled': return '已停止'
+    case 'result_unknown': return '结果未知'
     case 'denied': return '已阻止'
     case 'skipped': return '已取消'
     default: return ''
@@ -124,6 +128,12 @@ const preview = computed(() => {
   const lines = step.output.split('\n').filter((line) => line.trim())
   const head = lines.slice(0, 2).join('  ')
   return lines.length > 2 ? `${head}  …` : head
+})
+
+const errorText = computed(() => {
+  if (!step.error) return ''
+  if (typeof step.error === 'string') return step.error
+  return step.error.message || step.error.detail || '操作未能完成。'
 })
 
 const ruleLabel = computed(() => {
@@ -191,7 +201,11 @@ const decisionClass = computed(() => ({
 .status-node.done { border-color: var(--kg-success-border); background: var(--kg-success-soft); color: var(--kg-success); }
 .status-node.waiting { border-color: var(--kg-warning-border); background: var(--kg-warning-soft); color: var(--kg-warning); }
 .status-node.denied,
-.status-node.skipped { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); color: var(--kg-danger); }
+.status-node.skipped,
+.status-node.failed { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); color: var(--kg-danger); }
+.status-node.cancelled { color: var(--kg-text-tertiary); }
+.status-node.timed_out,
+.status-node.result_unknown { border-color: var(--kg-warning-border); background: var(--kg-warning-soft); color: var(--kg-warning); }
 .status-node.verifying,
 .status-node.reviewing,
 .status-node.running { border-color: var(--kg-info-border); background: var(--kg-info-soft); color: var(--kg-info); }
@@ -211,7 +225,11 @@ const decisionClass = computed(() => ({
 .status-text.done { color: var(--kg-success); }
 .status-text.waiting { color: var(--kg-warning); }
 .status-text.denied,
-.status-text.skipped { color: var(--kg-danger); }
+.status-text.skipped,
+.status-text.failed { color: var(--kg-danger); }
+.status-text.cancelled { color: var(--kg-text-tertiary); }
+.status-text.timed_out,
+.status-text.result_unknown { color: var(--kg-warning); }
 .status-text.verifying,
 .status-text.reviewing,
 .status-text.running { color: var(--kg-info); }
@@ -267,6 +285,8 @@ const decisionClass = computed(() => ({
 .output-head { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--kg-border-subtle); }
 .output-head span:last-child { color: var(--kg-text-tertiary); font: 12px/1 var(--kg-font-mono); font-weight: 400; }
 .output-block { max-height: 280px; margin: 0; padding: 11px 12px; overflow: auto; background: var(--kg-bg-code); color: var(--kg-text-secondary); font: 12px/1.55 var(--kg-font-mono); white-space: pre-wrap; word-break: break-all; }
+.step-error { padding: 11px 12px; border-top: 1px solid var(--kg-danger-border); background: var(--kg-danger-soft); color: var(--kg-danger); font-size: 12px; line-height: 1.55; }
+.step-error.warning { border-top-color: var(--kg-warning-border); background: var(--kg-warning-soft); color: var(--kg-warning); }
 
 @media (max-width: 1080px) {
   .step-identity code,

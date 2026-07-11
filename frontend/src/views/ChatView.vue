@@ -45,7 +45,7 @@
             </section>
 
             <article v-else-if="it.kind === 'assistant'"
-                     class="assistant" :class="[it.role, { aborted: it.aborted }]">
+                     class="assistant" :class="[it.role, { aborted: it.aborted, interrupted: it.interrupted }]">
               <div v-if="it.role === 'thinking'" class="assistant-state">
                 <span v-if="it.streaming" class="state-dot"></span>
                 <span>{{ it.streaming ? '正在分析' : '分析过程' }}</span>
@@ -79,14 +79,27 @@
 
             <ConfirmCard v-else-if="it.kind === 'confirm' && !it.hidden" :card="it" />
 
+            <TaskError v-else-if="it.kind === 'task_error'" :item="it"
+                       :disabled="running" @retry="retryTask(it)" />
+
             <el-alert v-else-if="it.kind === 'fatal'" type="error"
                       :closable="false" :title="it.error" class="fatal" />
           </template>
 
-          <div v-if="running && !hasStreaming" class="phase-bar">
-            <span class="kg-spinner" aria-hidden="true"></span>
-            <span class="phase-text">{{ phaseText }}</span>
-            <span class="phase-timer">{{ timer }}s</span>
+          <div v-if="showTurnActivity" class="turn-activity"
+               :class="`is-${currentTurn.status}`" aria-live="polite">
+            <span class="activity-node">
+              <span v-if="running" class="kg-spinner" aria-hidden="true"></span>
+              <KgIcon v-else name="close" :size="13" />
+            </span>
+            <span class="activity-copy">
+              <strong>{{ activityText }}</strong>
+              <small v-if="activityMeta">{{ activityMeta }}</small>
+            </span>
+            <span class="activity-timer">{{ elapsedText }}</span>
+            <button v-if="running" type="button" class="stop-action" @click="stopTurn">
+              <span class="stop-square" aria-hidden="true"></span>停止
+            </button>
           </div>
         </div>
       </div>
@@ -96,10 +109,12 @@
           <div class="composer-box">
             <el-input v-model="input" type="textarea" :rows="1" autosize
                       resize="none" placeholder="描述运维任务…"
-                      :disabled="running" @keydown.enter.exact.prevent="submit" />
-            <button type="button" class="send-btn" aria-label="发送运维指令"
-                    :disabled="running || !input.trim()" @click="submit">
-              <span v-if="running" class="send-spinner"></span>
+                      @keydown.enter.exact.prevent="submit" @keydown.esc="stopTurn" />
+            <button type="button" class="send-btn" :class="{ stop: running }"
+                    :aria-label="running ? '停止等待' : '发送运维指令'"
+                    :disabled="!running && !input.trim()"
+                    @click="running ? stopTurn() : submit()">
+              <span v-if="running" class="stop-square"></span>
               <KgIcon v-else name="arrowUp" :size="16" />
             </button>
           </div>
@@ -122,8 +137,12 @@ import ConfirmCard from '../components/ConfirmCard.vue'
 import KgIcon from '../components/KgIcon.vue'
 import KgLogo from '../components/KgLogo.vue'
 import MarkdownText from '../components/MarkdownText.vue'
+import TaskError from '../components/TaskError.vue'
 import TraceStep from '../components/TraceStep.vue'
-import { activeId, generateReport, items, phase, running, sendMessage } from '../composables/useChat.js'
+import {
+  activeId, cancelCurrentTurn, currentTurn, generateReport, items,
+  retryMessage, running, sendMessage,
+} from '../composables/useChat.js'
 
 const WELCOME_HINTS = [
   { icon: 'disk', title: '检查磁盘使用', description: '只读取状态', text: '查看磁盘使用情况' },
@@ -134,29 +153,16 @@ const WELCOME_HINTS = [
 const input = ref('')
 const chatRef = ref(null)
 
-const hasStreaming = computed(() => items.value.some((item) => item.streaming))
 const ageText = (age) => (age < 3 ? '刚刚' : `${Math.round(age)} 秒前`)
 
-const phaseText = computed(() => {
-  const current = phase.value
-  if (!current) return '正在准备…'
-  if (current.name === 'planning') return '正在分析当前状态…'
-  if (current.name === 'reviewing') {
-    const tool = current.tool ? current.tool.split('.').pop() : '操作'
-    return `正在检查 ${tool}…`
-  }
-  return '处理中…'
-})
-
-const timer = ref('0.0')
+const now = ref(Date.now())
 let timerId = null
-let startAt = 0
 watch(running, (active) => {
   if (active) {
-    startAt = performance.now()
-    timer.value = '0.0'
+    now.value = Date.now()
+    if (timerId) clearInterval(timerId)
     timerId = setInterval(() => {
-      timer.value = ((performance.now() - startAt) / 1000).toFixed(1)
+      now.value = Date.now()
     }, 100)
   } else if (timerId) {
     clearInterval(timerId)
@@ -164,6 +170,68 @@ watch(running, (active) => {
   }
 })
 onUnmounted(() => timerId && clearInterval(timerId))
+
+const currentActivity = computed(() => currentTurn.value?.activities?.at(-1) || null)
+const showTurnActivity = computed(() => currentTurn.value
+  && ['running', 'retry_wait', 'waiting_user', 'cancelling', 'cancelled'].includes(currentTurn.value.status))
+
+const activityText = computed(() => {
+  const turn = currentTurn.value
+  const activity = currentActivity.value
+  if (!turn) return ''
+  if (turn.status === 'cancelling') return '正在停止等待…'
+  if (turn.status === 'cancelled') return '已停止等待后续结果'
+  if (turn.status === 'waiting_user') return '等待你的确认'
+  const stage = activity?.stage || turn.stage
+  const state = activity?.state
+  if (state === 'retry_wait') {
+    return stage === 'reviewing' ? '安全检查暂时没有响应' : '模型服务暂时没有响应'
+  }
+  if (state === 'failed') {
+    return stage === 'executing' ? '操作执行失败' : '本次请求未能完成'
+  }
+  if (state === 'completed') {
+    if (stage === 'planning') return '分析完成，正在整理下一步…'
+    if (stage === 'reviewing') return '安全检查已完成…'
+    if (stage === 'executing') return '操作已完成，正在整理结果…'
+  }
+  if (stage === 'planning') return state === 'streaming' ? '正在分析请求…' : '正在连接规划模型…'
+  if (stage === 'reviewing') return '正在检查操作是否安全…'
+  if (stage === 'executing') return '正在执行操作…'
+  if (stage === 'confirmation') return '等待你的确认'
+  return '正在准备…'
+})
+
+const activityMeta = computed(() => {
+  const turn = currentTurn.value
+  const activity = currentActivity.value
+  if (!turn) return ''
+  if (turn.status === 'cancelled') return '已停止接收后续结果；已经开始的操作不会自动回滚'
+  if (turn.status === 'waiting_user' && activity?.deadlineAt) {
+    const seconds = Math.max(0, Math.ceil((activity.deadlineAt - now.value) / 1000))
+    const minutes = Math.floor(seconds / 60)
+    const tail = String(seconds % 60).padStart(2, '0')
+    return `${minutes}:${tail} 后自动拒绝`
+  }
+  if (activity?.state === 'retry_wait') {
+    const remaining = Math.max(0, Math.ceil((activity.retryInMs - (now.value - activity.updatedAt)) / 1000))
+    const attempt = activity.attempt && activity.maxAttempts
+      ? ` · 已尝试 ${activity.attempt}/${activity.maxAttempts} 次` : ''
+    return `${remaining} 秒后重试${attempt}`
+  }
+  if (activity?.attempt && activity.maxAttempts > 1) {
+    return `第 ${activity.attempt}/${activity.maxAttempts} 次尝试`
+  }
+  return ''
+})
+
+const elapsedText = computed(() => {
+  const turn = currentTurn.value
+  if (!turn) return ''
+  const elapsed = turn.elapsedMs ?? Math.max(0, (turn.endedAt || now.value) - turn.startedAt)
+  if (elapsed >= 60000) return `${Math.floor(elapsed / 60000)}:${String(Math.floor(elapsed / 1000) % 60).padStart(2, '0')}`
+  return `${(elapsed / 1000).toFixed(1)}s`
+})
 
 function scrollToBottom() {
   nextTick(() => {
@@ -183,12 +251,23 @@ watch(() => items.value.length, () => {
     if (element) element.scrollTop = element.scrollHeight
   })
 })
+watch(() => `${currentTurn.value?.status}:${currentActivity.value?.id}:${currentActivity.value?.state}`,
+  scrollToBottom)
 
 async function submit() {
+  if (running.value) return
   const text = input.value.trim()
   if (!text) return
   input.value = ''
   await sendMessage(text, { onUpdate: scrollToBottom })
+}
+
+function stopTurn() {
+  cancelCurrentTurn()
+}
+
+async function retryTask(item) {
+  await retryMessage(item.prompt, { onUpdate: scrollToBottom })
 }
 
 async function sendHint(text) {
@@ -426,24 +505,31 @@ function downloadReport(text) {
   border-radius: var(--kg-radius-md);
   background: var(--kg-danger-soft);
 }
+.assistant.interrupted { border-left: 2px solid var(--kg-danger-border); padding-left: 12px; }
 
 .cursor { color: var(--kg-accent); animation: blink 1s step-start infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
-.phase-bar {
+.turn-activity {
   min-height: 42px;
   display: flex;
   align-items: center;
   gap: 10px;
   margin: 12px 0 12px 42px;
   padding: 8px 11px;
-  border: 1px solid var(--kg-info-border);
+  border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-md);
-  background: var(--kg-info-soft);
+  background: var(--kg-bg-surface-1);
 }
-
-.phase-text { flex: 1; color: var(--kg-text-secondary); font-size: 13px; }
-.phase-timer { color: var(--kg-text-tertiary); font: 12px/1 var(--kg-font-mono); }
+.activity-node { width: 18px; display: grid; place-items: center; flex: none; color: var(--kg-info); }
+.turn-activity.is-cancelled .activity-node { color: var(--kg-text-tertiary); }
+.activity-copy { min-width: 0; display: flex; flex: 1; align-items: baseline; gap: 8px; }
+.activity-copy strong { color: var(--kg-text-secondary); font-size: 13px; font-weight: 500; }
+.activity-copy small { overflow: hidden; color: var(--kg-text-tertiary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.activity-timer { flex: none; color: var(--kg-text-tertiary); font: 12px/1 var(--kg-font-mono); }
+.stop-action { display: inline-flex; align-items: center; gap: 6px; padding: 4px 7px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-sm); background: transparent; color: var(--kg-text-tertiary); font-size: 12px; cursor: pointer; }
+.stop-action:hover { border-color: var(--kg-border-default); color: var(--kg-text-primary); }
+.stop-square { width: 9px; height: 9px; display: block; border-radius: 2px; background: currentColor; }
 
 .intent-card {
   margin: 12px 0 12px 42px;
@@ -462,7 +548,6 @@ function downloadReport(text) {
 .intent-reason { margin: 8px 0 0 25px; color: var(--kg-text-secondary); font-size: 13px; }
 .intent-detail { margin: 10px 0 0 25px; padding: 10px; border-radius: var(--kg-radius-sm); background: var(--kg-bg-code); }
 .fatal { margin: 12px 0 12px 42px; }
-
 .composer {
   flex: none;
   padding: 8px 24px 14px;
@@ -504,8 +589,9 @@ function downloadReport(text) {
 }
 
 .send-btn:hover:not(:disabled) { background: var(--kg-accent-hover); }
+.send-btn.stop { border-color: var(--kg-border-default); background: var(--kg-bg-surface-2); color: var(--kg-text-secondary); }
+.send-btn.stop:hover { border-color: var(--kg-danger-border); color: var(--kg-danger); }
 .send-btn:disabled { border-color: var(--kg-border-subtle); background: var(--kg-bg-surface-2); color: var(--kg-text-disabled); cursor: not-allowed; }
-.send-spinner { width: 13px; height: 13px; border: 2px solid var(--kg-border-strong); border-top-color: var(--kg-text-primary); border-radius: 50%; animation: kg-spin 800ms linear infinite; }
 
 .composer-footer {
   min-height: 30px;

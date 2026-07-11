@@ -35,7 +35,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import KgIcon from './KgIcon.vue'
 import { resolveConfirm } from '../composables/useChat.js'
 
@@ -64,8 +64,9 @@ async function act(approved) {
   resolving.value = true
   try {
     await resolveConfirm(props.card, approved)
-  } finally {
+  } catch (error) {
     resolving.value = false
+    ElMessage.error(error.message || '确认操作失败，请重试')
   }
 }
 </script>

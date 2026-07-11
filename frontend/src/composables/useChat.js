@@ -7,12 +7,21 @@ import { apiFetch } from './useAuth.js'
 export const sessions = ref([])
 export const activeId = ref('')
 export const items = ref([])
-export const running = ref(false)
-export const phase = ref(null) // 当前阶段指示：{ name, tool? }，null=空闲
+export const currentTurn = ref(null)
+const ACTIVE_TURN_STATES = new Set(['running', 'retry_wait', 'waiting_user', 'cancelling'])
+// busy 描述 SSE 生命周期；业务终态可能先于 done 到达，此时仍不能开启新回合。
+export const running = computed(() => currentTurn.value?.busy === true)
+export const activities = computed(() => currentTurn.value?.activities || [])
+// 兼容仍依赖 phase 的外围代码；新的展示直接消费 currentTurn/activities。
+export const phase = computed(() => currentTurn.value?.stage
+  ? { name: currentTurn.value.stage }
+  : null)
 
 let stepsById = {}
 let confirmsById = {}
+let activitiesById = {}
 let streamingItem = null // 当前正在流式累积的 assistant 文本项
+let activeController = null
 let _nextIsReport = false // 下一条 final_answer 标记为报告
 let _loadRequest = 0
 
@@ -51,27 +60,31 @@ function finishStreaming(role, text) {
 }
 
 export function handleEvent(ev) {
+  if (currentTurn.value) currentTurn.value.lastEventAt = Date.now()
   switch (ev.type) {
     case 'session_created':
       activeId.value = ev.session_id
       refreshSessions()
       break
     case 'phase':
-      // 规划相位清空 tool（整体思考中）；审查相位带上工具名
-      phase.value = ev.phase === 'reviewing'
-        ? { name: 'reviewing', tool: ev.tool }
-        : { name: ev.phase }
-      // 审查相位：把对应步骤行标记为"审查中"，比笼统的"校验中"更具体
-      if (ev.phase === 'reviewing' && stepsById[ev.step_id]) {
-        stepsById[ev.step_id].status = 'reviewing'
-      }
+      // 兼容旧后端事件；新后端统一发送 progress。
+      // operation_id 与新事件保持一致，避免同一阶段生成两条活动记录。
+      upsertActivity({ stage: ev.phase, state: 'connecting',
+        operation_id: ev.phase === 'planning'
+          ? `planning:${ev.round ?? 0}`
+          : ev.phase === 'reviewing' && ev.step_id
+            ? `reviewing:${ev.step_id}` : `phase:${ev.phase}`,
+        step_id: ev.step_id })
+      break
+    case 'progress':
+      upsertActivity(ev)
       break
     case 'snapshot':
       push({ kind: 'snapshot', snapshot: ev.snapshot,
              age: ev.collected_ago_seconds ?? 0, expanded: false })
       break
     case 'assistant_delta':
-      phase.value = null // 首 token 到达，退出"规划中"指示
+      if (currentTurn.value) currentTurn.value.transport = 'streaming'
       if (!streamingItem) {
         streamingItem = push({ kind: 'assistant', role: 'streaming',
                                text: '', streaming: true })
@@ -85,16 +98,15 @@ export function handleEvent(ev) {
           stepsById[s.step_id] = push({
             kind: 'step', tool: s.tool, args: s.arguments,
             purpose: s.purpose, risk: s.risk,
-            status: 'verifying', verification: null, output: null,
+            status: 'queued', verification: null, output: null, error: null,
             durationMs: null, autoAllowed: false, denyReason: '',
-            expanded: false,
+            expanded: false, startedAt: null,
           })
         }
       }
       // steps 为空时不定稿：等 final_answer 统一处理（文本即答案）
       break
     case 'verification': {
-      phase.value = null // 判定已出，退出"审查中"指示
       const step = stepsById[ev.step_id]
       if (!step) break
       step.verification = { rule: ev.rule, review: ev.review, decision: ev.decision }
@@ -102,7 +114,7 @@ export function handleEvent(ev) {
         step.status = 'denied'
         step.denyReason = ev.decision.reason
       } else if (ev.decision.action === 'auto') {
-        step.status = 'running'
+        step.status = 'ready'
         step.autoAllowed = true
       } else {
         step.status = 'waiting'
@@ -116,26 +128,65 @@ export function handleEvent(ev) {
       confirmsById[ev.confirm_id] = push({
         kind: 'confirm', confirmId: ev.confirm_id, stepId: ev.step_id,
         step: ev.step, decision: ev.decision, hidden: false,
+        timeoutSeconds: ev.timeout_seconds ?? null,
       })
+      if (currentTurn.value) {
+        currentTurn.value.status = 'waiting_user'
+        const activity = upsertActivity({ stage: 'confirmation', state: 'waiting',
+          operation_id: `confirm:${ev.confirm_id}`, step_id: ev.step_id })
+        if (activity && ev.timeout_seconds != null) {
+          activity.deadlineAt = Date.now() + ev.timeout_seconds * 1000
+        }
+      }
       break
     case 'confirm_result': {
       const card = confirmsById[ev.confirm_id]
       if (card) card.hidden = true
       const step = stepsById[ev.step_id]
-      if (step) step.status = ev.approved ? 'running' : 'skipped'
+      const timedOut = ev.timed_out || ev.operator === '(超时)'
+      if (step) step.status = ev.approved ? 'ready' : timedOut ? 'timed_out' : 'skipped'
+      if (currentTurn.value?.status === 'waiting_user') currentTurn.value.status = 'running'
+      const activity = activitiesById[`confirm:${ev.confirm_id}`]
+      if (activity) {
+        activity.state = ev.approved ? 'completed' : timedOut ? 'timed_out' : 'cancelled'
+        activity.updatedAt = Date.now()
+      }
       break
     }
     case 'execution': {
       const step = stepsById[ev.step_id]
       if (step) {
-        step.status = 'done'
+        const ok = ev.ok !== false && !ev.error
+          && !['[工具调用失败]', '[执行失败]', '参数不合法']
+            .some((prefix) => String(ev.output || '').trimStart().startsWith(prefix))
+        step.status = ok ? 'done' : 'failed'
         step.output = ev.output
+        step.error = ev.error ? normalizeError(ev.error, '工具调用失败。', { stage: 'executing' })
+          : ok ? null : normalizeError(ev.output, '工具调用失败。', { stage: 'executing' })
         step.durationMs = ev.duration_ms ?? null
+        if (!ok) step.expanded = true
+        const activity = activitiesById[ev.operation_id || ev.step_id]
+          || Object.values(activitiesById).find((entry) => (
+            entry.stage === 'executing' && entry.stepId === ev.step_id
+          ))
+        if (activity) {
+          activity.state = ok ? 'completed' : 'failed'
+          activity.elapsedMs = ev.duration_ms ?? activity.elapsedMs
+          activity.error = step.error
+          activity.updatedAt = Date.now()
+        }
       }
       break
     }
     case 'final_answer':
-      finishStreaming('answer', ev.answer)
+      if (currentTurn.value) currentTurn.value.terminalSeen = true
+      // task_error 后端会紧接一个可审计的失败结论；错误块已承载该信息，
+      // 不再重复渲染一条几乎相同的 assistant 消息。
+      if (items.value[items.value.length - 1]?.kind === 'task_error') {
+        items.value[items.value.length - 1].answer = ev.answer
+      } else {
+        finishStreaming('answer', ev.answer)
+      }
       if (ev.aborted) {
         const last = items.value[items.value.length - 1]
         if (last?.kind === 'assistant') last.aborted = true
@@ -145,10 +196,53 @@ export function handleEvent(ev) {
         if (last?.kind === 'assistant') last.isReport = true
         _nextIsReport = false
       }
+      if (currentTurn.value) {
+        const outcome = ev.outcome || (ev.aborted ? 'failed' : 'completed')
+        const lowered = String(outcome).toLowerCase()
+        const status = lowered.includes('cancel') || lowered.includes('stop')
+          ? 'cancelled'
+          : lowered.includes('block') || lowered.includes('deny') || lowered.includes('reject')
+            ? 'blocked'
+            : lowered.includes('fail') || lowered.includes('error') || ev.aborted
+              ? 'failed' : 'succeeded'
+        finishTurn(status, { outcome, elapsedMs: ev.elapsed_ms })
+      }
       break
     case 'fatal':
-      streamingItem = null
-      push({ kind: 'fatal', error: ev.error })
+    case 'task_error':
+      if (currentTurn.value) currentTurn.value.terminalSeen = true
+      appendTaskError(ev, ev.type === 'fatal' ? '任务未能完成。' : '请求未能完成。')
+      break
+    case 'task_cancelled': {
+      const step = stepsById[ev.step_id]
+      if (step && !['done', 'failed', 'denied', 'skipped'].includes(step.status)) {
+        step.status = ev.stage === 'executing' ? 'result_unknown' : 'cancelled'
+        if (step.status === 'result_unknown') {
+          step.error = {
+            message: '任务在执行过程中断开，操作结果需要重新核验。',
+            detail: '系统没有把该步骤记录为成功。',
+          }
+          step.expanded = true
+        }
+      }
+      for (const card of Object.values(confirmsById)) card.hidden = true
+      break
+    }
+    case 'done':
+      if (currentTurn.value) {
+        currentTurn.value.transport = 'closed'
+        if (ACTIVE_TURN_STATES.has(currentTurn.value.status)
+            && !currentTurn.value.terminalSeen) {
+          appendTaskError({
+            stage: currentTurn.value.stage,
+            error: {
+              code: 'terminal_event_missing',
+              message: '任务连接已结束，但没有收到明确的完成状态。',
+              retryable: true,
+            },
+          }, '任务没有返回明确结果。')
+        }
+      }
       break
     case 'user_query':
       // 回放模式渲染历史用户消息；实时模式已在发送时本地插入
@@ -168,11 +262,158 @@ export function newSession() {
   resetSessionState()
 }
 
+function turnId() {
+  return globalThis.crypto?.randomUUID?.() || `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function startTurn(prompt) {
+  const now = Date.now()
+  const turn = reactive({
+    id: turnId(), prompt, status: 'running', stage: 'accepting',
+    transport: 'connecting', startedAt: now, endedAt: null,
+    elapsedMs: null, lastEventAt: now, stopRequested: false,
+    outcome: null, error: null, activities: [], terminalSeen: false,
+    busy: true,
+  })
+  currentTurn.value = turn
+  activitiesById = {}
+  return turn
+}
+
+function finishTurn(status, { outcome = null, elapsedMs = null, error = null } = {}) {
+  const turn = currentTurn.value
+  if (!turn) return
+  const now = Date.now()
+  turn.status = status
+  turn.terminalSeen = true
+  turn.outcome = outcome || status
+  turn.endedAt = now
+  turn.elapsedMs = elapsedMs ?? Math.max(0, now - turn.startedAt)
+  if (error) turn.error = error
+}
+
+function redactSecrets(value) {
+  return String(value || '')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, 'sk-[已隐藏]')
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s,"']+/ig, '$1[已隐藏]')
+    .replace(/(api[_ -]?key\s*[:=]\s*)[^\s,"']+/ig, '$1[已隐藏]')
+}
+
+function normalizeError(raw, fallback = '请求未能完成。', extra = {}) {
+  const source = raw && typeof raw === 'object' ? raw : {}
+  const message = typeof raw === 'string'
+    ? raw
+    : source.message || source.detail || fallback
+  return {
+    stage: extra.stage || source.stage || currentTurn.value?.stage || 'request',
+    code: source.code || source.category || extra.code || 'request_failed',
+    message: redactSecrets(message),
+    detail: redactSecrets(source.detail || source.message || message),
+    retryable: source.retryable ?? extra.retryable ?? true,
+    httpStatus: source.http_status ?? source.httpStatus ?? extra.httpStatus ?? null,
+    requestId: source.request_id || source.requestId || null,
+    incidentId: source.incident_id || source.incidentId || null,
+  }
+}
+
+function finishStreamingInterrupted() {
+  if (streamingItem) {
+    streamingItem.streaming = false
+    streamingItem.interrupted = true
+    streamingItem = null
+    return
+  }
+  const dangling = [...items.value].reverse().find((item) => item.streaming)
+  if (dangling) {
+    dangling.streaming = false
+    dangling.interrupted = true
+  }
+}
+
+function activityId(ev) {
+  return ev.operation_id || `${ev.stage || 'request'}:${ev.step_id || 'current'}`
+}
+
+function upsertActivity(ev) {
+  const turn = currentTurn.value
+  if (!turn) return null
+  const id = activityId(ev)
+  let activity = activitiesById[id]
+  if (!activity) {
+    activity = reactive({
+      id, stage: ev.stage || 'request', state: ev.state || 'connecting',
+      operationId: ev.operation_id || '', stepId: ev.step_id || '',
+      attempt: ev.attempt ?? null, maxAttempts: ev.max_attempts ?? null,
+      elapsedMs: ev.elapsed_ms ?? 0, retryInMs: ev.retry_in_ms ?? 0,
+      error: null, startedAt: Date.now(), updatedAt: Date.now(), deadlineAt: null,
+    })
+    activitiesById[id] = activity
+    turn.activities.push(activity)
+  }
+  activity.stage = ev.stage || activity.stage
+  activity.state = ev.state || activity.state
+  activity.operationId = ev.operation_id || activity.operationId
+  activity.stepId = ev.step_id || activity.stepId
+  activity.attempt = ev.attempt ?? activity.attempt
+  activity.maxAttempts = ev.max_attempts ?? activity.maxAttempts
+  activity.elapsedMs = ev.elapsed_ms ?? activity.elapsedMs
+  activity.retryInMs = ev.retry_in_ms ?? 0
+  if (ev.error) {
+    activity.error = normalizeError(ev.error, '本次尝试失败。', { stage: activity.stage })
+  } else if (['connecting', 'streaming', 'completed'].includes(activity.state)) {
+    // 新尝试已经开始或成功，旧的退避原因不再属于当前状态。
+    activity.error = null
+  }
+  activity.updatedAt = Date.now()
+  turn.stage = activity.stage
+  turn.lastEventAt = activity.updatedAt
+  if (activity.state === 'retry_wait') turn.status = 'retry_wait'
+  else if (turn.status === 'retry_wait') turn.status = 'running'
+  turn.transport = activity.state === 'connecting' ? 'connecting' : 'streaming'
+
+  const step = stepsById[ev.operation_id] || stepsById[ev.step_id]
+  if (step && activity.stage === 'reviewing') {
+    step.status = activity.state === 'failed' ? 'failed' : 'reviewing'
+    step.startedAt ||= Date.now() - (activity.elapsedMs || 0)
+    if (activity.error) step.error = activity.error
+  }
+  if (step && activity.stage === 'executing') {
+    if (activity.state === 'failed') step.status = 'failed'
+    else if (activity.state === 'completed') step.status = step.status === 'failed' ? 'failed' : 'done'
+    else step.status = 'running'
+    step.startedAt ||= Date.now() - (activity.elapsedMs || 0)
+    if (activity.state === 'completed' && step.durationMs == null) {
+      step.durationMs = activity.elapsedMs
+    }
+    if (activity.error) step.error = activity.error
+  }
+  return activity
+}
+
+function appendTaskError(ev, fallback) {
+  const error = normalizeError(ev.error || ev, fallback, { stage: ev.stage })
+  finishStreamingInterrupted()
+  finishTurn('failed', { outcome: ev.outcome || 'failed', elapsedMs: ev.elapsed_ms, error })
+  const prompt = currentTurn.value?.prompt
+    || [...items.value].reverse().find((item) => item.kind === 'user')?.text || ''
+  const previous = items.value[items.value.length - 1]
+  if (previous?.kind === 'task_error' && previous.turnId === currentTurn.value?.id) {
+    previous.error = error
+    return
+  }
+  push({ kind: 'task_error', error, prompt, turnId: currentTurn.value?.id || '',
+         elapsedMs: ev.elapsed_ms ?? currentTurn.value?.elapsedMs ?? null })
+}
+
 function resetSessionState() {
+  activeController?.abort()
+  activeController = null
   activeId.value = ''
   items.value = []
+  currentTurn.value = null
   stepsById = {}
   confirmsById = {}
+  activitiesById = {}
   streamingItem = null
 }
 
@@ -199,18 +440,31 @@ export async function loadSession(id) {
 export async function sendMessage(text, { onUpdate } = {}) {
   if (!text.trim() || running.value) return
   _loadRequest++
-  running.value = true
+  const prompt = text.trim()
+  const turn = startTurn(prompt)
+  const controller = new AbortController()
+  activeController = controller
   stepsById = {}
   confirmsById = {}
   streamingItem = null
-  push({ kind: 'user', text })
+  push({ kind: 'user', text: prompt, turnId: turn.id })
+  let sawDone = false
   try {
     const resp = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, session_id: activeId.value }),
+      body: JSON.stringify({ message: prompt, session_id: activeId.value,
+                             request_id: turn.id }),
+      signal: controller.signal,
     })
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}))
+      const error = new Error(body.detail || `请求失败（HTTP ${resp.status}）`)
+      error.httpStatus = resp.status
+      throw error
+    }
+    turn.transport = 'streaming'
+    if (!resp.body) throw new Error('服务未返回事件流。')
     const reader = resp.body.getReader()
     const decoder = new TextDecoder()
     let buf = ''
@@ -218,29 +472,100 @@ export async function sendMessage(text, { onUpdate } = {}) {
       const { done, value } = await reader.read()
       if (done) break
       buf += decoder.decode(value, { stream: true })
-      let idx
-      while ((idx = buf.indexOf('\n\n')) >= 0) {
-        const line = buf.slice(0, idx)
-        buf = buf.slice(idx + 2)
-        if (line.startsWith('data: ')) handleEvent(JSON.parse(line.slice(6)))
+      let boundary
+      while ((boundary = /\r?\n\r?\n/.exec(buf))) {
+        const block = buf.slice(0, boundary.index)
+        buf = buf.slice(boundary.index + boundary[0].length)
+        const data = block.split(/\r?\n/)
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trimStart()).join('\n')
+        if (!data) continue
+        const event = JSON.parse(data)
+        if (event.type === 'done') sawDone = true
+        handleEvent(event)
       }
       onUpdate?.()
     }
+    if (turn.stopRequested) {
+      finishStreamingInterrupted()
+      finishTurn('cancelled', { outcome: 'cancelled' })
+      turn.transport = 'closed'
+      return
+    }
+    if (!sawDone && !turn.stopRequested && !turn.terminalSeen) {
+      const error = new Error('事件流提前结束，回复可能不完整。')
+      error.code = 'stream_interrupted'
+      throw error
+    }
   } catch (e) {
-    push({ kind: 'fatal', error: `连接中断：${e.message}` })
+    if (e.name === 'AbortError' || turn.stopRequested) {
+      finishStreamingInterrupted()
+      finishTurn('cancelled', { outcome: 'cancelled' })
+      turn.transport = 'closed'
+    } else if (!turn.terminalSeen) {
+      turn.transport = 'broken'
+      appendTaskError({
+        error: { code: e.code || 'connection_interrupted', message: e.message,
+          detail: e.message, retryable: true, http_status: e.httpStatus },
+        stage: turn.stage, elapsed_ms: Date.now() - turn.startedAt,
+      }, '与服务的连接中断。')
+    }
   } finally {
-    running.value = false
-    phase.value = null
-    refreshSessions()
+    turn.busy = false
+    if (turn.transport !== 'broken') turn.transport = 'closed'
+    if (activeController === controller) activeController = null
+    refreshSessions().catch(() => {})
   }
 }
 
+export function cancelCurrentTurn() {
+  const turn = currentTurn.value
+  if (!turn || !running.value) return
+  turn.stopRequested = true
+  turn.status = 'cancelling'
+  finishStreamingInterrupted()
+
+  for (const card of Object.values(confirmsById)) card.hidden = true
+  for (const step of Object.values(stepsById)) {
+    if (['queued', 'verifying', 'reviewing', 'waiting', 'ready'].includes(step.status)) {
+      step.status = 'cancelled'
+    } else if (step.status === 'running') {
+      step.status = 'result_unknown'
+      step.error = {
+        message: '已停止等待该操作的结果；操作可能已经开始，结果暂时未知。',
+        detail: '已经开始的系统操作不会自动回滚。',
+      }
+      step.expanded = true
+    }
+  }
+  for (const activity of turn.activities) {
+    if (['completed', 'failed', 'cancelled', 'timed_out', 'result_unknown'].includes(activity.state)) continue
+    const step = stepsById[activity.stepId]
+    activity.state = step?.status === 'result_unknown' ? 'result_unknown' : 'cancelled'
+    activity.retryInMs = 0
+    activity.deadlineAt = null
+    activity.updatedAt = Date.now()
+  }
+  activeController?.abort()
+}
+
+export async function retryMessage(text, options = {}) {
+  if (running.value || !text?.trim()) return
+  return sendMessage(text, options)
+}
+
 export async function resolveConfirm(card, approved) {
-  await apiFetch('/api/confirm', {
+  const response = await apiFetch('/api/confirm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ confirm_id: card.confirmId, approved }),
   })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(body.detail || `确认失败（HTTP ${response.status}）`)
+  }
+  const body = await response.json()
+  if (!body.ok) throw new Error('该确认请求已失效或已经处理。')
 }
 
 function _buildReportPrompt() {
