@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 globalThis.localStorage = {
@@ -13,6 +14,15 @@ let fetchImpl = async (url) => {
 globalThis.fetch = (url, options) => fetchImpl(url, options)
 
 const permissions = await import('../src/composables/usePermissions.js')
+const policyViewSource = await readFile(
+  new URL('../src/views/PolicyView.vue', import.meta.url), 'utf8',
+)
+const permissionSelectorSource = await readFile(
+  new URL('../src/components/PermissionSelector.vue', import.meta.url), 'utf8',
+)
+const chatViewSource = await readFile(
+  new URL('../src/views/ChatView.vue', import.meta.url), 'utf8',
+)
 
 function reset() {
   permissions._resetPermissionStateForTests()
@@ -29,7 +39,48 @@ test('新会话固定回到确认后执行，并收回已有授权', () => {
 
   assert.equal(permissions.permissionMode.value, 'ask')
   assert.equal(permissions.permissionContext.sessionId, '')
+  assert.equal(permissions.permissionContext.executorIdentitySource, 'unknown')
   assert.deepEqual(permissions.trustedRoots.value, [])
+})
+
+test('完全访问文案明确完整能力且不把 Reviewer 描述成硬否决', () => {
+  const fullAccess = permissions.PERMISSION_MODES.find((mode) => mode.value === 'full_access')
+  assert.match(fullAccess.description, /shell.*文件.*网络.*进程/)
+  assert.match(fullAccess.description, /不再逐项确认/)
+  assert.doesNotMatch(fullAccess.description, /Reviewer|独立安全复核|硬拒绝/)
+  assert.doesNotMatch(fullAccess.description, /控制面隔离/)
+})
+
+test('内置策略页面按风险分类解释完整 Shell 能力', () => {
+  assert.match(policyViewSource, /高风险命令模式/)
+  assert.match(policyViewSource, /不会仅因提权或启动子 Shell 而直接拒绝/)
+  assert.match(policyViewSource, /普通模式会拦截或复核显式控制面路径/)
+  assert.match(policyViewSource, /完全访问可覆盖产品层路径限制/)
+  assert.match(policyViewSource, /不代表出现即拒绝/)
+  assert.doesNotMatch(policyViewSource, /以下执行器会被直接拒绝|对这些路径的写操作会被拒绝/)
+})
+
+test('权限界面用不同 UID 表达账户分离并显著显示 root 警告', () => {
+  assert.match(policyViewSource, /执行账户 UID/)
+  assert.match(policyViewSource, /permissionContext\.grantsRoot/)
+  assert.match(policyViewSource, /该执行身份拥有 root 权限/)
+  assert.match(permissionSelectorSource, /root-badge/)
+  assert.match(permissionSelectorSource, /将获得 root 权限/)
+  assert.doesNotMatch(policyViewSource, /OS 账户隔离|ACL 控制面隔离/)
+})
+
+test('两个权限入口复用首条消息前的会话权限编排', () => {
+  assert.match(permissionSelectorSource, /setChatPermissionMode\(mode/)
+  assert.match(policyViewSource, /setChatPermissionMode\(mode/)
+  assert.doesNotMatch(permissionSelectorSource, /发送第一条消息后可开启/)
+  assert.doesNotMatch(policyViewSource, /发送第一条消息创建任务后/)
+})
+
+test('新任务 composer 明确选择服务器工作目录且已有任务锁定', () => {
+  assert.match(chatViewSource, /设置服务器工作目录/)
+  assert.match(chatViewSource, /不是浏览器本地文件夹，也不是安全沙箱/)
+  assert.match(chatViewSource, /:disabled="running \|\| Boolean\(activeId\)"/)
+  assert.match(chatViewSource, /setDraftWorkspaceRoot/)
 })
 
 test('可信目录规范化去重并进入首轮 chat 权限载荷', async () => {
@@ -52,7 +103,11 @@ test('从会话权限接口读取模式、执行身份与有效授权', async ()
     if (url === '/api/sessions/session-1/permissions') {
       return Response.json({
         mode: 'workspace', version: 3,
-        executor_identity: 'kylinguard-exec', full_access_available: true,
+        execution_identity: 'backend-user', execution_identity_source: 'backend_process',
+        workspace_root: '/srv/project', command_shell: '/bin/bash',
+        command_max_timeout: 900, execution_account_separated: false,
+        control_plane_isolated: true, grants_root: true,
+        full_access_available: true,
         trusted_roots: ['/srv/project'],
       })
     }
@@ -70,7 +125,14 @@ test('从会话权限接口读取模式、执行身份与有效授权', async ()
   assert.equal(result.supported, true)
   assert.equal(permissions.permissionMode.value, 'trusted_workspace')
   assert.equal(permissions.permissionContext.version, 3)
-  assert.equal(permissions.permissionContext.executorIdentity, 'kylinguard-exec')
+  assert.equal(permissions.permissionContext.executorIdentity, 'backend-user')
+  assert.equal(permissions.permissionContext.executorIdentitySource, 'backend_process')
+  assert.equal(permissions.permissionContext.workspaceRoot, '/srv/project')
+  assert.equal(permissions.permissionContext.commandShell, '/bin/bash')
+  assert.equal(permissions.permissionContext.commandMaxTimeout, 900)
+  assert.equal(permissions.permissionContext.executionAccountSeparated, false)
+  assert.equal(permissions.permissionContext.grantsRoot, true)
+  assert.equal(permissions.executionIdentitySourceLabel(), '后端当前 OS 身份')
   assert.deepEqual(permissions.trustedRoots.value, ['/srv/project'])
   assert.equal(permissions.permissionGrants.value.length, 1)
   assert.equal(permissions.permissionGrants.value[0].label, '/srv/project/report.md')
@@ -88,7 +150,8 @@ test('完全访问升级集中通过 permissions PUT 并携带密码与时限', 
     submitted = JSON.parse(options.body)
     return Response.json({
       mode: 'full_access', version: 1,
-      executor_identity: 'root', expires_at: 2_000_000_000,
+      executor_identity: 'root', control_plane_isolated: true,
+      grants_root: true, expires_at: 2_000_000_000,
     })
   }
 
@@ -102,7 +165,23 @@ test('完全访问升级集中通过 permissions PUT 并携带密码与时限', 
   })
   assert.equal(permissions.fullAccessActive.value, true)
   assert.equal(permissions.permissionContext.executorIdentity, 'root')
+  assert.equal(permissions.permissionContext.executorIdentitySource, 'legacy')
+  assert.equal(permissions.executionIdentitySourceLabel(), '旧版 API（身份来源未说明）')
+  assert.equal(permissions.permissionContext.executionAccountSeparated, true)
+  assert.equal(permissions.permissionContext.grantsRoot, true)
   assert.equal(permissions.permissionContext.expiresAt, 2_000_000_000_000)
+})
+
+test('完全访问默认时长使用默认TTL而不是直接取最大TTL', () => {
+  reset()
+  permissions.applyPermissionEvent({
+    type: 'permission_context',
+    mode: 'ask',
+    permission_default_ttl: 15 * 60,
+    full_access_max_ttl: 2 * 60 * 60,
+  })
+
+  assert.equal(permissions.fullAccessDurationMinutes.value, 15)
 })
 
 test('动作授权即使资源是路径也不会升级成可信目录', () => {
@@ -121,6 +200,7 @@ test('动作授权即使资源是路径也不会升级成可信目录', () => {
   assert.deepEqual(permissions.trustedRoots.value, [])
   assert.equal(permissions.permissionGrants.value.length, 0)
   assert.equal(permissions.permissionContext.executorIdentity, 'ops')
+  assert.equal(permissions.permissionContext.executorIdentitySource, 'legacy')
 })
 
 test('限时权限到期后在前端立即恢复为确认后执行', () => {

@@ -5,7 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根的 .env 用绝对路径定位：无论从哪个目录启动服务都能读到；
 # 当前工作目录若另有 .env 则优先（后加载覆盖）
-_ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_ROOT_ENV = _PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
@@ -25,14 +26,17 @@ class Settings(BaseSettings):
     db_path: str = "data/kylinguard.db"
 
     # 执行器
+    workspace_root: str = str(_PROJECT_ROOT)
+    command_shell: str = "/bin/bash"
     command_timeout: int = 30
+    command_max_timeout: int = 900
     output_max_bytes: int = 65536
     exec_user: str = ""  # 生产环境设为 kylinguard-exec；空 = 当前用户（开发）
     privileged_helper: str = ""  # 生产环境设为 root-owned 受限 helper；空 = 不启用
 
-    # 会话权限。full_access 只跳过产品内确认，不会获得 root，且强制要求
-    # 与后端服务不同的非 root exec_user；控制面不能与执行面共用账户。
-    allow_full_access: bool = False
+    # 会话权限。full_access 默认可用；显式设为 false 才关闭。它以配置的
+    # exec_user 或后端当前 OS 身份执行，仍需管理员密码复验并受 TTL 限制。
+    allow_full_access: bool = True
     permission_default_ttl: int = 30 * 60
     permission_max_ttl: int = 12 * 3600
     full_access_max_ttl: int = 30 * 60

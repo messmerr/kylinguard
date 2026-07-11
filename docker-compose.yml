@@ -10,6 +10,7 @@ services:
       - .env
     environment:
       KG_DB_PATH: /app/data/kylinguard.db
+      KG_WORKSPACE_ROOT: /workspace
     volumes:
       - kylinguard-data:/app/data
       - kylinguard-workspace:/workspace

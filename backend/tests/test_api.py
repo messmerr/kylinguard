@@ -332,6 +332,31 @@ async def test_策略CRUD端点(app):
         assert r4.json()["ok"] is True
         r5 = await c.delete("/api/policies/99999", headers=h)
         assert r5.status_code == 404
+    events = app.state.audit.events("__policies__")
+    assert [event["event_type"] for event in events] == [
+        "policy_added", "policy_removed",
+    ]
+    assert all(event["payload"]["operator"] == "admin" for event in events)
+    assert app.state.audit.verify_chain("__policies__") is True
+
+
+async def test_策略审计失败会回滚策略变更(app, monkeypatch):
+    original = app.state.audit.append
+
+    def fail_policy_audit(session_id, event_type, payload, **kwargs):
+        if event_type == "policy_added":
+            raise AuditError("模拟策略审计失败")
+        return original(session_id, event_type, payload, **kwargs)
+
+    monkeypatch.setattr(app.state.audit, "append", fail_policy_audit)
+    async with _client(app) as client:
+        headers = await _login(client)
+        with pytest.raises(AuditError):
+            await client.post("/api/policies", headers=headers, json={
+                "kind": "blacklist", "pattern": r"\bdanger-tool\b",
+                "note": "必须审计",
+            })
+    assert app.state.policies.list() == []
 
 
 async def test_失败服务告警规则归一为布尔条件(app):

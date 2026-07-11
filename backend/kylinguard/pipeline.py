@@ -1,4 +1,4 @@
-"""五阶段安全流水线编排：感知→规划→校验→受限执行→溯源。
+"""五阶段 Agent 流水线编排：感知→规划→校验→执行→溯源。
 
 - 每个事件先落审计链再对外发射；审计失败（AuditError）直接上抛中止任务。
   例外：assistant_delta 流式增量只走 UI 不逐条入审计——整轮完整文本
@@ -15,8 +15,11 @@ import time
 import uuid
 
 from kylinguard.audit import AuditLog
-from kylinguard.authorization import apply_permission_mode, describe_action
-from kylinguard.command_batch import CommandSyntaxError, parse_simple_batch
+from kylinguard.authorization import (
+    apply_permission_mode,
+    describe_action,
+    execution_profile_fingerprint,
+)
 from kylinguard.config import Settings
 from kylinguard.gate import decide
 from kylinguard.intent import screen_user_intent
@@ -28,7 +31,7 @@ from kylinguard.models import (
 from kylinguard.mcp_client import ToolCallError, split_qualified
 from kylinguard.planner import PlanningError, build_system_prompt
 from kylinguard.registry import get_meta
-from kylinguard.rules import check_command
+from kylinguard.rules import check_argv, check_command
 from kylinguard.sanitization import canonical_fingerprint, redact_text, safe_step
 from kylinguard.snapshot import collect_snapshot, format_snapshot
 
@@ -36,6 +39,17 @@ from kylinguard.snapshot import collect_snapshot, format_snapshot
 async def _fresh_snapshot() -> tuple[dict[str, str], float]:
     """默认快照源：即时采集（生产环境注入 SnapshotCache.get 走缓存）。"""
     return await collect_snapshot(), 0.0
+
+
+def _compact_tool_output(value: str, limit: int = 8000) -> str:
+    """保留工具输出首尾；构建/测试的关键报错通常位于末尾。"""
+    if len(value) <= limit:
+        return value
+    marker = "\n…[中间输出已省略]…\n"
+    remaining = max(0, limit - len(marker))
+    head = remaining // 2
+    tail = remaining - head
+    return value[:head] + marker + (value[-tail:] if tail else "")
 
 
 def _historical_failure_message(payload: dict) -> str | None:
@@ -107,6 +121,27 @@ class Pipeline:
         self._session_store = session_store
         self._permission_requests = permission_requests
         self._conversations: dict[str, list[dict]] = {}
+        self._session_locks: dict[str, asyncio.Lock] = {}
+
+    def _effective_permission_context(self, context):
+        """服务端 kill switch 永远优先于数据库中尚未到期的旧会话。"""
+        if (context is not None
+                and context.mode == PermissionMode.FULL_ACCESS
+                and (
+                    not self._settings.allow_full_access
+                    or (
+                        context.execution_profile
+                        and context.execution_profile
+                        != execution_profile_fingerprint(self._settings)
+                    )
+                )):
+            return context.model_copy(update={
+                "mode": PermissionMode.ASK,
+                "trusted_roots": [],
+                "expires_at": None,
+                "expired": True,
+            })
+        return context
 
     def _get_conversation(self, session_id: str) -> list[dict]:
         conv = self._conversations.get(session_id)
@@ -132,6 +167,23 @@ class Pipeline:
         return conv
 
     async def handle(self, session_id: str, user_query: str, emit) -> None:
+        """同一会话串行处理；等待取消不会泄漏锁或污染共享上下文。"""
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        if lock.locked():
+            await emit({
+                "type": "progress",
+                "session_id": session_id,
+                "stage": "queued",
+                "operation_id": "session_turn",
+                "state": "waiting",
+                "message": "该会话已有任务在执行，本轮将在其完成后开始。",
+            })
+        async with lock:
+            await self._handle_serialized(session_id, user_query, emit)
+
+    async def _handle_serialized(
+        self, session_id: str, user_query: str, emit,
+    ) -> None:
         """在工作副本中处理一轮，对取消实行会话上下文原子回滚。"""
         conversation = self._get_conversation(session_id)
         base_length = len(conversation)
@@ -227,9 +279,21 @@ class Pipeline:
                 "elapsed_ms": elapsed_ms(),
             })
 
-        await record("user_query", {"query": user_query})
+        stored_workspace = ""
+        if self._session_store is not None:
+            get_workspace = getattr(
+                self._session_store, "get_workspace_root", None,
+            )
+            if callable(get_workspace):
+                stored_workspace = get_workspace(session_id)
+        effective_workspace = stored_workspace or self._settings.workspace_root
 
-        permission_context = (
+        await record("user_query", {
+            "query": user_query,
+            "workspace_root": effective_workspace,
+        })
+
+        permission_context = self._effective_permission_context(
             self._session_store.get_permission_context(session_id)
             if self._session_store else None
         )
@@ -237,15 +301,25 @@ class Pipeline:
             await emit({
                 "type": "permission_context",
                 "session_id": session_id,
+                "workspace_root": effective_workspace,
                 **permission_context.model_dump(mode="json"),
             })
 
+        full_access_active = bool(
+            permission_context is not None
+            and permission_context.mode == PermissionMode.FULL_ACCESS
+            and not permission_context.expired
+        )
         intent = screen_user_intent(user_query)
         if intent.decision == RuleDecision.DENY:
-            if (intent.matched_rule or "").startswith("destructive:"):
+            if ((intent.matched_rule or "").startswith("destructive:")
+                    or (full_access_active and intent.matched_rule != "empty")):
                 await record("intent_signal", {
                     "decision": intent.model_dump(),
-                    "outcome": "continue_with_high_risk_gates",
+                    "outcome": (
+                        "continue_in_full_access" if full_access_active
+                        else "continue_with_high_risk_gates"
+                    ),
                 })
             else:
                 await record("intent_filter", {"decision": intent.model_dump()})
@@ -263,9 +337,39 @@ class Pipeline:
                                   "collected_ago_seconds": round(age, 1)})
         env_summary = format_snapshot(snapshot, per_item=1500)
 
-        conversation.append(
-            {"role": "user",
-             "content": f"管理员指令：{user_query}\n\n当前系统快照：\n{env_summary}"})
+        permission_summary = ""
+        if permission_context is not None:
+            mode_notes = {
+                PermissionMode.READ_ONLY: "只读：不要规划任何修改动作。",
+                PermissionMode.ASK: (
+                    "确认后执行：完整工具能力可用；需要修改时正常提出工具调用，"
+                    "系统会向管理员请求授权。"
+                ),
+                PermissionMode.TRUSTED_WORKSPACE: (
+                    "信任目录：可信目录内的结构化文件编辑可自动执行；"
+                    "其他完整能力仍可提出并由系统按需确认。"
+                ),
+                PermissionMode.FULL_ACCESS: (
+                    "完全访问：完整 shell、文件、网络与进程能力可用且不逐项确认；"
+                    "不要因为命令类型自行放弃，实际权限由操作系统执行身份决定。"
+                ),
+            }
+            permission_summary = (
+                "\n\n服务端权限上下文："
+                + mode_notes[permission_context.mode]
+            )
+        workspace_summary = (
+            f"\n\n当前会话工作目录：{effective_workspace}。"
+            "这是命令默认 cwd 与项目上下文，不是访问范围沙箱；"
+            "除非任务明确要求，不要切换到其他目录。"
+        )
+        conversation.append({
+            "role": "user",
+            "content": (
+                f"管理员指令：{user_query}{permission_summary}{workspace_summary}"
+                f"\n\n当前系统快照：\n{env_summary}"
+            ),
+        })
 
         failed_capabilities: set[str] = set()
         for round_no in range(self._settings.max_iterations):
@@ -321,7 +425,8 @@ class Pipeline:
             for step, step_id in zip(plan.steps, step_ids):
                 observations.append(await self._run_step(
                     session_id, user_query, env_summary, step, step_id,
-                    record, phase, progress, failed_capabilities))
+                    record, phase, progress, failed_capabilities,
+                    stored_workspace))
 
             conversation.append({"role": "assistant",
                                  "content": plan.model_dump_json()})
@@ -357,50 +462,7 @@ class Pipeline:
             **extra,
         }, ensure_ascii=False)
 
-    async def _prepare_command_step(self, step: PlanStep, step_id: str,
-                                    record) -> tuple[PlanStep | None, str | None]:
-        """把简单复合命令改写为结构化批处理；不支持语法返回可纠正结果。"""
-        if step.tool != "run_command.run_command":
-            return step, None
-        command = str(step.arguments.get("command", ""))
-        try:
-            batch = parse_simple_batch(command)
-        except CommandSyntaxError as exc:
-            message = str(exc)
-            await record("step_rewrite", {
-                "step_id": step_id,
-                "outcome": "rewrite_required",
-                "reason": message,
-                "original_step": safe_step(step),
-                "suggested_tools": ["files.write_file", "run_command.run_batch"],
-                "do_not_retry": True,
-            })
-            return None, self._observation(
-                "rewrite_required", "unsupported_shell_syntax",
-                message,
-                suggested_tools=["files.write_file", "run_command.run_batch"],
-                do_not_retry=True,
-            )
-        if len(batch.commands) == 1:
-            return step, None
-        rewritten = step.model_copy(update={
-            "tool": "run_command.run_batch",
-            "arguments": {
-                "commands": batch.commands,
-                "operators": batch.operators,
-            },
-        })
-        await record("step_rewrite", {
-            "step_id": step_id,
-            "outcome": "rewritten",
-            "reason": "复合命令已拆成逐条 argv 批处理，不启动 shell。",
-            "original_step": safe_step(step),
-            "rewritten_step": safe_step(rewritten),
-        })
-        return rewritten, None
-
-    def _dynamic_rule(self, step: PlanStep) -> RuleVerdict:
-        extra = self._policy_store.extra() if self._policy_store else None
+    def _dynamic_rule(self, step: PlanStep, extra=None) -> RuleVerdict:
         if step.tool == "run_command.run_command":
             return check_command(str(step.arguments.get("command", "")), extra=extra)
 
@@ -419,15 +481,18 @@ class Pipeline:
         verdicts: list[RuleVerdict] = []
         for index, argv in enumerate(commands):
             if (not isinstance(argv, list) or not argv
-                    or any(not isinstance(arg, str) or not arg or "\x00" in arg
-                           for arg in argv)):
+                    or any(
+                        not isinstance(arg, str) or "\x00" in arg
+                        or (arg_index == 0 and not arg)
+                        for arg_index, arg in enumerate(argv)
+                    )):
                 return RuleVerdict(
                     decision=RuleDecision.DENY,
                     reason=f"批处理第 {index + 1} 条 argv 不合法。",
                     matched_rule="invalid_batch_argv",
                     hard=True,
                 )
-            verdicts.append(check_command(shlex.join(argv), extra=extra))
+            verdicts.append(check_argv(argv, extra=extra))
         hard = next((v for v in verdicts
                      if v.decision == RuleDecision.DENY and v.hard), None)
         if hard:
@@ -462,24 +527,9 @@ class Pipeline:
 
     async def _run_step(self, session_id: str, user_query: str, env_summary: str,
                          step: PlanStep, step_id: str, record, phase,
-                         progress, failed_capabilities: set[str]) -> str:
-        # ③ 校验：三道闸
-        prepared, rewrite_observation = await self._prepare_command_step(
-            step, step_id, record)
-        if prepared is None:
-            rewrite_key = "rewrite:" + canonical_fingerprint({
-                "user_query": user_query.strip().casefold(),
-                "class": "unsupported_shell_syntax",
-            })
-            if rewrite_key in failed_capabilities:
-                return self._observation(
-                    "blocked", "repeated_unsupported_attempt",
-                    "相同目的已经遇到不支持的 shell 写法，停止重复尝试。",
-                    do_not_retry=True,
-                )
-            failed_capabilities.add(rewrite_key)
-            return rewrite_observation or "命令格式不受支持。"
-        step = prepared
+                         progress, failed_capabilities: set[str],
+                         workspace_root: str = "") -> str:
+        # ③ 校验：风险分类与权限门控。完整 shell 语法由执行器支持，不在此改写。
         has_tool = getattr(self._tools, "has_tool", None)
         if callable(has_tool) and not has_tool(step.tool):
             invalid_tool = step.tool[:160]
@@ -509,10 +559,72 @@ class Pipeline:
             server, tool = split_qualified(step.tool)
         except ValueError as e:
             return f"步骤 {step.tool!r} 无效：{e}"
+        if (workspace_root and server == "run_command"
+                and tool in {"run_command", "run_batch"}
+                and "cwd" not in step.arguments):
+            step = step.model_copy(update={
+                "arguments": {**step.arguments, "cwd": workspace_root},
+            })
         meta = get_meta(server, tool)
+        permission_context = self._effective_permission_context(
+            self._session_store.get_permission_context(session_id)
+            if self._session_store else None
+        )
+        full_access_active = bool(
+            permission_context is not None
+            and permission_context.mode == PermissionMode.FULL_ACCESS
+            and not permission_context.expired
+        )
+        policy_revision = 0
+        extra_policies = None
+        if self._policy_store is not None:
+            snapshot = getattr(self._policy_store, "snapshot", None)
+            if callable(snapshot):
+                policy_revision, extra_policies = snapshot()
+            else:
+                extra_policies = self._policy_store.extra()
 
         if meta.dynamic:
-            rule = self._dynamic_rule(step)
+            rule = self._dynamic_rule(step, extra_policies)
+            if (step.tool == "run_command.run_command"
+                    and rule.decision == RuleDecision.ALLOW
+                    and not full_access_active):
+                # 被证明只读的简单命令走精确 argv，不交给 Bash 再做一次展开。
+                # 这样 READ_ONLY 自动执行不会因遗漏的 glob/ANSI-C quoting 等
+                # shell 语法意外访问另一资源；完整 shell 仍用于所有显式授权调用。
+                try:
+                    argv = shlex.split(str(step.arguments.get("command", "")))
+                except ValueError:
+                    argv = []
+                batch_tool = "run_command.run_batch"
+                batch_available = not callable(has_tool) or has_tool(batch_tool)
+                if argv and batch_available:
+                    batch_arguments = {"commands": [argv]}
+                    for optional in ("cwd", "timeout"):
+                        if optional in step.arguments:
+                            batch_arguments[optional] = step.arguments[optional]
+                    rewritten = step.model_copy(update={
+                        "tool": batch_tool,
+                        "arguments": batch_arguments,
+                    })
+                    await record("step_rewrite", {
+                        "step_id": step_id,
+                        "outcome": "readonly_argv",
+                        "reason": "已证明只读的简单命令改用无 shell argv 执行。",
+                        "original_step": safe_step(step),
+                        "rewritten_step": safe_step(rewritten),
+                    })
+                    step = rewritten
+                    server, tool = split_qualified(step.tool)
+                    meta = get_meta(server, tool)
+                    rule = self._dynamic_rule(step, extra_policies)
+                elif not batch_available:
+                    rule = RuleVerdict(
+                        decision=RuleDecision.REVIEW,
+                        reason="无 shell 的只读执行通道不可用，需要显式权限。",
+                        matched_rule="readonly_executor_unavailable",
+                        hard=False,
+                    )
             visible_arguments = safe_step(step)["arguments"]
             action_desc = (f"执行命令能力 {step.tool}，参数 "
                            f"{json.dumps(visible_arguments, ensure_ascii=False)}"
@@ -526,10 +638,14 @@ class Pipeline:
                            f"{json.dumps(visible_arguments, ensure_ascii=False)}"
                            f"（声称目的：{step.purpose}）")
 
-        action = describe_action(step, meta, rule, self._settings)
-        permission_context = (
-            self._session_store.get_permission_context(session_id)
-            if self._session_store else None
+        action = describe_action(
+            step,
+            meta,
+            rule,
+            self._settings,
+            protected_prefixes=(
+                tuple(extra_policies.protected) if extra_policies else ()
+            ),
         )
         context_version = permission_context.version if permission_context else 0
         failure_keys = {canonical_fingerprint({
@@ -564,8 +680,8 @@ class Pipeline:
             )
 
         deterministic_block = (
-            action.hard_block_reason
-            or (rule.decision == RuleDecision.DENY and rule.hard)
+            (rule.decision == RuleDecision.DENY and rule.hard)
+            or (action.hard_block_reason and not full_access_active)
         )
         if deterministic_block:
             review = ReviewVerdict(
@@ -574,6 +690,21 @@ class Pipeline:
                 risk=RiskLevel.HIGH,
                 reason="确定性安全边界已给出结论，不调用 Reviewer 覆盖。",
             )
+        elif full_access_active:
+            # 完全访问是管理员经密码复验开启的显式信任边界。Reviewer 在
+            # 普通模式中负责提高风险和触发确认，但不能成为完整能力的第二个
+            # 在线依赖或否决者；否则一次模型误判/故障就会让“完全访问”失真。
+            review = ReviewVerdict(
+                safe=True,
+                matches_intent=True,
+                risk=step.risk,
+                reason="完全访问模式不把独立 Reviewer 作为执行前置条件。",
+            )
+            await record("review_bypassed", {
+                "step_id": step_id,
+                "tool": step.tool,
+                "reason": "full_access",
+            })
         else:
             await phase("reviewing", step_id=step_id, tool=step.tool)
             review_operation = f"reviewing:{step_id}"
@@ -588,8 +719,8 @@ class Pipeline:
                 user_query, env_summary, action_desc,
                 on_progress=on_review_progress,
             )
-        # 完全访问只取消逐项人工确认，不伪造 Reviewer 结论。独立审查员对
-        # 间接提示注入、越出原始意图等判断仍是一票否决。
+        # 普通模式下 Reviewer 只提升风险/确认强度；完全访问已在上方明确
+        # 跳过该在线依赖。仅协议/参数级 hard deny 保持不可覆盖。
         base_decision = decide(meta, rule, review, step.risk)
         grant = None
         if (self._session_store is not None and permission_context is not None
@@ -608,6 +739,15 @@ class Pipeline:
             )
             if permission_context is not None else base_decision
         )
+        if (permission_context is None and action.destructive
+                and decision.action != GateAction.DENY):
+            decision = decision.model_copy(update={
+                "action": GateAction.DOUBLE_CONFIRM,
+                "risk": RiskLevel.HIGH,
+                "reason": (
+                    f"{decision.reason}；该动作具有删除、提权或不可逆副作用。"
+                ),
+            })
         await record("verification", {
             "step_id": step_id,
             "step": safe_step(step), "rule": rule.model_dump(),
@@ -618,12 +758,15 @@ class Pipeline:
                 "resource": action.resource,
                 "mutable": action.mutable,
                 "destructive": action.destructive,
+                "policy_protected": action.policy_protected,
+                "control_path_signal": action.control_path_signal,
             },
             "permission": (
                 permission_context.model_dump(mode="json")
                 if permission_context is not None else None
             ),
             "grant_id": grant.id if grant else None,
+            "policy_revision": policy_revision,
         })
 
         if decision.action == GateAction.DENY:
@@ -761,8 +904,8 @@ class Pipeline:
             authorization_hash = None
             with self._audit.serialized():
                 with self._session_store.transaction() as connection:
-                    fresh_context = self._session_store.get_permission_context(
-                        session_id)
+                    fresh_context = self._effective_permission_context(
+                        self._session_store.get_permission_context(session_id))
                     if fresh_context is None:
                         authorization_failure = {
                             "code": "permission_context_missing",
@@ -817,6 +960,7 @@ class Pipeline:
                                 "action_fingerprint": action.fingerprint,
                                 "context_version": fresh_context.version,
                                 "mode": fresh_context.mode.value,
+                                "execution_profile": fresh_context.execution_profile,
                                 "grant_id": (fresh_grant.id
                                              if fresh_grant else None),
                             }
@@ -849,7 +993,7 @@ class Pipeline:
                 precommitted_hash=authorization_hash,
             )
 
-        # ④ 受限执行（经 MCP 插件进程）
+        # ④ 执行（经 MCP 插件进程；能力边界由所选工具与 OS 身份决定）
         started = time.monotonic()
         execution_operation = f"executing:{step_id}"
         base_progress = {
@@ -863,13 +1007,116 @@ class Pipeline:
             {"state": "connecting", **base_progress},
             step_id=step_id, tool=step.tool,
         )
+        if self._policy_store is not None and not full_access_active:
+            current_revision = getattr(
+                self._policy_store, "revision", lambda: policy_revision
+            )()
+            if current_revision != policy_revision:
+                policy_error = public_error(
+                    "policy_changed_before_execution",
+                    "风险策略在等待期间发生变化，工具未启动，请重新评估。",
+                    retryable=False,
+                )
+                await record("execution_authorization_failed", {
+                    "step_id": step_id,
+                    "action_fingerprint": action.fingerprint,
+                    "code": "policy_changed_before_execution",
+                    "message": policy_error.message,
+                    "policy_revision": policy_revision,
+                    "current_policy_revision": current_revision,
+                })
+                await progress(
+                    "executing", execution_operation,
+                    {
+                        "state": "failed",
+                        "attempt": 1,
+                        "max_attempts": 1,
+                        "elapsed_ms": 0,
+                        "retry_in_ms": 0,
+                        "error": policy_error.to_dict(),
+                    },
+                    step_id=step_id, tool=step.tool,
+                )
+                return self._observation(
+                    "blocked",
+                    "policy_changed_before_execution",
+                    "风险策略已变化，本步骤未执行；应按新策略重新规划。",
+                    capability=action.capability,
+                    do_not_retry=False,
+                )
         ok = True
         error_payload = None
+        command_result = None
         try:
             output = await self._tools.call(server, tool, step.arguments)
+            if server == "run_command":
+                try:
+                    parsed_result = json.loads(output)
+                except (TypeError, ValueError):
+                    parsed_result = None
+                if (tool == "run_command"
+                        and isinstance(parsed_result, dict)
+                        and isinstance(parsed_result.get("exit_code"), int)
+                        and not isinstance(parsed_result.get("exit_code"), bool)
+                        and isinstance(parsed_result.get("timed_out", False), bool)):
+                    command_result = {
+                        "exit_code": parsed_result["exit_code"],
+                        "timed_out": parsed_result.get("timed_out", False),
+                        "truncated": parsed_result.get("truncated", False),
+                        "duration_ms": parsed_result.get("duration_ms"),
+                    }
+                    if (command_result["timed_out"]
+                            or command_result["exit_code"] != 0):
+                        ok = False
+                        code = ("command_timed_out"
+                                if command_result["timed_out"]
+                                else "command_nonzero_exit")
+                        message = (
+                            "命令执行超时，已终止进程组。"
+                            if command_result["timed_out"]
+                            else ("命令已执行，但以退出码 "
+                                  f"{command_result['exit_code']} 结束。")
+                        )
+                        error_payload = public_error(
+                            code, message, retryable=False,
+                        ).to_dict()
+                elif (tool == "run_batch"
+                      and isinstance(parsed_result, dict)
+                      and isinstance(parsed_result.get("ok"), bool)):
+                    command_result = {
+                        "batch": True,
+                        "ok": parsed_result["ok"],
+                        "commands_requested": parsed_result.get("commands_requested"),
+                        "commands_executed": parsed_result.get("commands_executed"),
+                        "commands_skipped": parsed_result.get("commands_skipped"),
+                        "commands_short_circuited": parsed_result.get(
+                            "commands_short_circuited"
+                        ),
+                        "commands_omitted_after_stop": parsed_result.get(
+                            "commands_omitted_after_stop"
+                        ),
+                        "stopped_early": parsed_result.get("stopped_early", False),
+                    }
+                    if not command_result["ok"]:
+                        ok = False
+                        error_payload = public_error(
+                            "command_batch_failed",
+                            "批量命令已执行，但最终状态为失败。",
+                            retryable=False,
+                        ).to_dict()
+                else:
+                    # MCP 调用本身成功不代表执行结果协议有效。缺失退出码/ok
+                    # 时绝不能把畸形响应显示为“命令完成”。
+                    ok = False
+                    command_result = {"invalid": True, "tool": tool}
+                    error_payload = public_error(
+                        "command_result_invalid",
+                        "命令工具返回了无法验证的结果，未将本步骤视为成功。",
+                        retryable=False,
+                    ).to_dict()
         except ToolCallError as exc:
             ok = False
-            output = str(exc)[:8000] or "工具未返回错误详情。"
+            output = str(exc) or "工具未返回错误详情。"
             error = public_error(
                 "tool_call_failed",
                 "工具返回失败，未完成该步骤。",
@@ -887,15 +1134,17 @@ class Pipeline:
             output = error.message
         duration_ms = int((time.monotonic() - started) * 1000)
         public_output = redact_text(output)
+        compact_output = _compact_tool_output(public_output)
         # ⑤ 溯源
         await record("execution", {
             "step_id": step_id,
             "operation_id": execution_operation,
             "step": safe_step(step),
             "duration_ms": duration_ms,
-            "output": public_output[:8000],
+            "output": compact_output,
             "ok": ok,
             "error": error_payload,
+            "command_result": command_result,
         })
         await progress(
             "executing", execution_operation,
@@ -910,6 +1159,11 @@ class Pipeline:
             step_id=step_id, tool=step.tool,
         )
         if not ok:
-            return (f"步骤 {step.tool} 调用失败：{public_output}"
+            if command_result is not None:
+                return (
+                    f"步骤 {step.tool} 的命令已经结束："
+                    f"{error_payload['message']}\n{compact_output}"
+                )
+            return (f"步骤 {step.tool} 调用失败：{compact_output}"
                     f"（错误编号：{error_payload['incident_id']}）")
-        return f"步骤 {step.tool} 输出：\n{public_output[:4000]}"
+        return f"步骤 {step.tool} 输出：\n{compact_output}"

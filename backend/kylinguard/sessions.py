@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    draft INTEGER NOT NULL DEFAULT 0,
+    workspace_root TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS session_permissions (
     session_id TEXT PRIMARY KEY,
@@ -40,6 +42,7 @@ CREATE TABLE IF NOT EXISTS session_permissions (
     version INTEGER NOT NULL DEFAULT 1,
     updated_at REAL NOT NULL,
     updated_by TEXT NOT NULL DEFAULT '',
+    execution_profile TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS permission_grants (
@@ -73,6 +76,10 @@ _TITLE_MAX = 30
 def _migrate_permission_schema(connection: sqlite3.Connection) -> None:
     """补齐开发中间版本缺失的列；CREATE TABLE IF NOT EXISTS 不会补列。"""
     expected = {
+        "sessions": {
+            "draft": "INTEGER NOT NULL DEFAULT 0",
+            "workspace_root": "TEXT NOT NULL DEFAULT ''",
+        },
         "session_permissions": {
             "trusted_roots": "TEXT NOT NULL DEFAULT '[]'",
             "expires_at": "REAL",
@@ -80,6 +87,7 @@ def _migrate_permission_schema(connection: sqlite3.Connection) -> None:
             "version": "INTEGER NOT NULL DEFAULT 1",
             "updated_at": "REAL NOT NULL DEFAULT 0",
             "updated_by": "TEXT NOT NULL DEFAULT ''",
+            "execution_profile": "TEXT NOT NULL DEFAULT ''",
         },
         "permission_grants": {
             "scope": "TEXT NOT NULL DEFAULT 'once'",
@@ -139,36 +147,74 @@ class SessionStore:
         permission_mode: PermissionMode = PermissionMode.ASK,
         trusted_roots: list[str] | None = None,
         permission_expires_at: float | None = None,
+        permission_execution_profile: str = "",
         updated_by: str = "",
+        draft: bool = False,
+        workspace_root: str = "",
+        strict: bool = False,
         commit: bool = True,
     ) -> None:
         now = time.time()
         roots = self._validate_permission_values(
             permission_mode, trusted_roots or [], permission_expires_at, now)
         with self._lock:
-            self._conn.execute(
-                "INSERT INTO sessions(id, title, created_at, updated_at) "
-                "VALUES (?,?,?,?) "
-                "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at",
-                (session_id, title.strip()[:_TITLE_MAX] or "新会话", now, now),
+            insert_session = (
+                "INSERT INTO sessions(id, title, created_at, updated_at, draft, "
+                "workspace_root) VALUES (?,?,?,?,?,?)"
             )
+            if not strict:
+                insert_session += (
+                    " ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at"
+                )
+            try:
+                self._conn.execute(
+                    insert_session,
+                    (
+                        session_id,
+                        title.strip()[:_TITLE_MAX] or "新会话",
+                        now,
+                        now,
+                        int(draft),
+                        workspace_root,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                if strict:
+                    raise PermissionError(
+                        "session_already_exists", "会话标识已存在。"
+                    ) from exc
+                raise
             self._conn.execute(
                 "INSERT OR IGNORE INTO session_permissions"
                 "(session_id, mode, trusted_roots, expires_at, version, "
-                "updated_at, updated_by) VALUES (?,?,?,?,1,?,?)",
+                "updated_at, updated_by, execution_profile) "
+                "VALUES (?,?,?,?,1,?,?,?)",
                 (session_id, permission_mode.value,
                  json.dumps(roots, ensure_ascii=False),
-                 permission_expires_at, now, updated_by),
+                 permission_expires_at, now, updated_by,
+                 permission_execution_profile),
             )
             if commit:
                 self._conn.commit()
 
-    def touch(self, session_id: str) -> None:
+    def touch(self, session_id: str, *, first_message: str | None = None) -> None:
+        """更新会话时间；首条消息会可靠地把预创建草稿转为正式会话。"""
         with self._lock:
-            self._conn.execute(
-                "UPDATE sessions SET updated_at=? WHERE id=?",
-                (time.time(), session_id),
-            )
+            now = time.time()
+            if first_message is None:
+                self._conn.execute(
+                    "UPDATE sessions SET updated_at=? WHERE id=?",
+                    (now, session_id),
+                )
+            else:
+                title = first_message.strip()[:_TITLE_MAX] or "新会话"
+                self._conn.execute(
+                    "UPDATE sessions SET updated_at=?, "
+                    "title=CASE WHEN draft=1 THEN ? ELSE title END, "
+                    "draft=CASE WHEN draft=1 THEN 0 ELSE draft END "
+                    "WHERE id=?",
+                    (now, title, session_id),
+                )
             self._conn.commit()
 
     def exists(self, session_id: str) -> bool:
@@ -176,10 +222,18 @@ class SessionStore:
             "SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone()
         return row is not None
 
+    def get_workspace_root(self, session_id: str) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT workspace_root FROM sessions WHERE id=?", (session_id,)
+            ).fetchone()
+            return str(row[0]) if row and row[0] else ""
+
     def list(self) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, title, created_at, updated_at FROM sessions "
+                "SELECT id, title, created_at, updated_at, draft, workspace_root "
+                "FROM sessions "
                 "ORDER BY updated_at DESC"
             ).fetchall()
             result = []
@@ -188,6 +242,8 @@ class SessionStore:
                 result.append({
                     "id": row[0], "title": row[1],
                     "created_at": row[2], "updated_at": row[3],
+                    "draft": bool(row[4]),
+                    "workspace_root": row[5],
                     "permission_mode": permission.mode.value,
                     "permission_version": permission.version,
                     "permission_expires_at": permission.expires_at,
@@ -242,7 +298,8 @@ class SessionStore:
             return None
         row = self._conn.execute(
             "SELECT mode, trusted_roots, expires_at, version, updated_at, "
-            "updated_by, expiry_observed_at FROM session_permissions "
+            "updated_by, expiry_observed_at, execution_profile "
+            "FROM session_permissions "
             "WHERE session_id=?",
             (session_id,),
         ).fetchone()
@@ -252,12 +309,13 @@ class SessionStore:
             self._conn.execute(
                 "INSERT INTO session_permissions"
                 "(session_id, mode, trusted_roots, expires_at, version, "
-                "updated_at, updated_by) VALUES (?,'ask','[]',NULL,1,?,'')",
+                "updated_at, updated_by, execution_profile) "
+                "VALUES (?,'ask','[]',NULL,1,?,'','')",
                 (session_id, now),
             )
             if owned_transaction:
                 self._conn.commit()
-            row = ("ask", "[]", None, 1, now, "", None)
+            row = ("ask", "[]", None, 1, now, "", None, "")
         return row
 
     def _get_permissions_locked(
@@ -290,6 +348,7 @@ class SessionStore:
             updated_at=row[4],
             updated_by=row[5],
             expired=expired,
+            execution_profile=row[7],
         )
 
     def get_permissions(
@@ -311,6 +370,7 @@ class SessionStore:
         expires_at: float | None,
         expected_version: int,
         updated_by: str,
+        execution_profile: str = "",
         commit: bool = True,
     ) -> SessionPermissionContext:
         now = time.time()
@@ -327,10 +387,11 @@ class SessionStore:
             self._conn.execute(
                 "UPDATE session_permissions SET mode=?, trusted_roots=?, "
                 "expires_at=?, expiry_observed_at=NULL, version=?, "
-                "updated_at=?, updated_by=? "
+                "updated_at=?, updated_by=?, execution_profile=? "
                 "WHERE session_id=? AND version=?",
                 (mode.value, json.dumps(roots, ensure_ascii=False), expires_at,
-                 next_version, now, updated_by, session_id, expected_version),
+                 next_version, now, updated_by, execution_profile,
+                 session_id, expected_version),
             )
             # 权限上下文改变后，旧上下文版本签发的授权全部失效。
             self._conn.execute(

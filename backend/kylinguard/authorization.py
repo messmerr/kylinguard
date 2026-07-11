@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import pwd
 import shlex
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +28,34 @@ _FILE_READ_TOOLS = {"read_file", "list_directory"}
 _FILE_WRITE_TOOLS = {"mkdir", "write_file", "replace_text", "move"}
 _FILE_DELETE_TOOLS = {"delete"}
 _SERVICE_MUTATIONS = {"start_service", "restart_service", "stop_service"}
+_DESTRUCTIVE_COMMAND_RULES = {
+    "dangerous_command",
+    "protected_path",
+    "privilege_escalator",
+    "control_command",
+}
+
+
+def execution_profile_fingerprint(settings) -> str:
+    """绑定 FULL_ACCESS 获批时的实际执行边界，配置改变后必须重新复验。"""
+    target_uid = os.geteuid()
+    if settings.exec_user:
+        try:
+            target_uid = pwd.getpwnam(settings.exec_user).pw_uid
+        except KeyError:
+            target_uid = -1
+    shell = settings.command_shell
+    shell_path = shell if os.path.isabs(shell) else (shutil.which(shell) or shell)
+    return canonical_fingerprint({
+        "service_euid": os.geteuid(),
+        "exec_user": settings.exec_user,
+        "target_uid": target_uid,
+        "workspace_root": str(
+            Path(settings.workspace_root).expanduser().resolve(strict=False)
+        ),
+        "command_shell": str(Path(shell_path).resolve(strict=False)),
+        "privileged_helper": settings.privileged_helper,
+    })
 
 
 @dataclass(frozen=True)
@@ -38,6 +68,8 @@ class ActionDescriptor:
     paths: tuple[str, ...] = ()
     suggested_path: str = ""
     hard_block_reason: str = ""
+    policy_protected: bool = False
+    control_path_signal: bool = False
 
 
 def _path(value) -> str:
@@ -85,13 +117,25 @@ def _command_argvs(step: PlanStep, tool: str) -> tuple[tuple[str, ...], ...]:
     return tuple(result)
 
 
-def _command_paths(step: PlanStep, tool: str) -> tuple[str, ...]:
-    """保守解析 argv 中可能被命令访问的路径，用于控制面硬隔离。
+def _command_paths(
+    step: PlanStep,
+    tool: str,
+    default_cwd: str = "",
+) -> tuple[str, ...]:
+    """保守解析 argv 中可能被命令访问的路径，用于拦截显式控制面访问。
 
     不尝试猜测每个 Unix 命令的完整语法；所有非选项值及 ``key=value``
-    右侧都按当前工作目录解析。多报只会在值恰好指向控制面时触发硬拒绝，
-    却能覆盖 ``rm data/db``、``dd of=/path`` 与批处理等常见写法。
+    右侧都按工具调用声明的 cwd（否则配置的 workspace_root）解析。多报只会
+    在值恰好指向控制面时触发产品层拒绝，覆盖 ``rm data/db``、
+    ``dd of=/path`` 与批处理等常见写法。任意 shell 无法靠字符串分析形成
+    真正隔离；生产环境必须使用不同 OS 账户和文件权限保护控制面。
     """
+    raw_cwd = step.arguments.get("cwd")
+    base = _path(raw_cwd) if isinstance(raw_cwd, str) else ""
+    if not base:
+        base = _path(default_cwd) if default_cwd else ""
+    working_directory = Path(base) if base else Path.cwd()
+
     candidates: list[str] = []
     for argv in _command_argvs(step, tool):
         for argument in argv[1:]:
@@ -105,7 +149,7 @@ def _command_paths(step: PlanStep, tool: str) -> tuple[str, ...]:
                     continue
                 candidate = Path(value).expanduser()
                 if not candidate.is_absolute():
-                    candidate = Path.cwd() / candidate
+                    candidate = working_directory / candidate
                 resolved = _path(str(candidate))
                 if resolved and resolved not in candidates:
                     candidates.append(resolved)
@@ -176,12 +220,7 @@ def _protected_path_reason(
         (Path(f"{db_path}-wal"), "审计数据库 WAL 属于控制面"),
         (Path(f"{db_path}-shm"), "审计数据库共享内存属于控制面"),
         (Path("/etc/kylinguard"), "服务配置与密钥目录属于控制面"),
-        (Path("/etc/sudoers"), "sudoers 属于提权控制面"),
-        (Path("/etc/sudoers.d"), "sudoers 规则属于提权控制面"),
         (Path("/usr/local/libexec/kylinguard"), "特权 helper 属于控制面"),
-        (Path("/proc"), "伪文件系统不可作为普通文件工作区"),
-        (Path("/sys"), "内核配置文件系统不可作为普通文件工作区"),
-        (Path("/dev"), "设备文件不可作为普通文件工作区"),
     ])
     root_env = Path(__file__).resolve().parents[2] / ".env"
     candidates.append((root_env.resolve(strict=False), "LLM 与管理员密钥文件受保护"))
@@ -204,6 +243,7 @@ def describe_action(
     meta: ToolMeta,
     rule: RuleVerdict,
     settings,
+    protected_prefixes: tuple[str, ...] = (),
 ) -> ActionDescriptor:
     """生成授权绑定的动作清单；指纹使用真实参数，展示资源会脱敏。"""
     server, _, tool = step.tool.partition(".")
@@ -230,11 +270,12 @@ def describe_action(
             else "command.execute"
         )
         mutable = rule.decision != RuleDecision.ALLOW
-        destructive = rule.matched_rule in {
-            "privilege_escalator", "payload_executor", "control_command",
-        }
+        # 解释器、下载器等 payload_executor 只说明命令可以承载二级动作，
+        # 不能据此一概判为破坏性；真正的高危由命中规则或有效可执行文件决定。
+        destructive = rule.matched_rule in _DESTRUCTIVE_COMMAND_RULES
         argvs = _command_argvs(step, tool)
-        paths = _command_paths(step, tool)
+        paths = _command_paths(
+            step, tool, getattr(settings, "workspace_root", ""))
         command = step.arguments.get("command")
         if isinstance(command, str):
             resource = redact_text(command)
@@ -263,13 +304,36 @@ def describe_action(
         paths = _file_paths(step, tool)
         resource = " → ".join(paths)
 
+    policy_protected = bool(
+        mutable
+        and paths
+        and any(
+            _within_root(path, prefix)
+            for path in paths
+            for prefix in protected_prefixes
+            if prefix
+        )
+    )
+    if policy_protected:
+        destructive = True
+
     hard_reason = ""
+    control_path_signal = False
     protect_ancestors = destructive or (server == "files" and tool == "move")
     for path in paths:
         if reason := _protected_path_reason(
             path, settings, protect_ancestors=protect_ancestors
         ):
-            hard_reason = f"拒绝访问 {path}：{reason}。"
+            if server == "run_command":
+                # shell 参数路径只能保守猜测：把它作为高风险信号，不能用
+                # 会误杀/可绕过的字符串分析伪装成隔离边界。
+                control_path_signal = True
+                mutable = True
+                destructive = True
+                capability = "command.execute"
+            else:
+                # 结构化文件工具的路径是精确参数，可以可靠阻止直接读写控制面。
+                hard_reason = f"拒绝访问 {path}：{reason}。"
             break
     fingerprint = canonical_fingerprint({
         "tool": step.tool,
@@ -285,6 +349,8 @@ def describe_action(
         paths=paths,
         suggested_path=suggested,
         hard_block_reason=hard_reason,
+        policy_protected=policy_protected,
+        control_path_signal=control_path_signal,
     )
 
 
@@ -317,15 +383,21 @@ def apply_permission_mode(
     has_grant: bool = False,
     grant_scope: PermissionGrantScope | None = None,
 ) -> GateDecision:
-    """在风险裁决上应用会话权限；确定性硬拒绝永远不能被模式覆盖。"""
-    if action.hard_block_reason:
+    """在风险裁决上应用会话权限。
+
+    FULL_ACCESS 是管理员复验后的绝对产品权限：它可以覆盖精确路径等产品层
+    限制，避免结构化文件工具与 shell 出现路线依赖。协议/参数无效等规则层
+    hard deny 仍由 ``base.action == DENY`` 保持不可执行。
+    """
+    mode = PermissionMode.ASK if context.expired else context.mode
+    if action.hard_block_reason and mode != PermissionMode.FULL_ACCESS:
         return GateDecision(
             action=GateAction.DENY,
             risk=RiskLevel.HIGH,
             reason=action.hard_block_reason,
         )
-    if not action.mutable:
-        return base
+    # gate 只会把确定性硬规则收敛为 DENY。权限模式不能覆盖该结论；
+    # Reviewer 的负面意见则已被 gate 转换为可确认的高风险告警。
     if base.action == GateAction.DENY:
         return base
 
@@ -336,18 +408,24 @@ def apply_permission_mode(
             reason=f"{base.reason}；该动作具有删除、提权或不可逆副作用。",
         )
 
-    mode = PermissionMode.ASK if context.expired else context.mode
+    # 完全访问覆盖 Reviewer 告警、路径策略和产品层确认；风险级别与告警
+    # 原因仍保留在审计中。规则层协议 hard deny 已在上方保持拒绝。
+    if mode == PermissionMode.FULL_ACCESS:
+        return GateDecision(
+            action=GateAction.AUTO,
+            risk=base.risk,
+            reason=(
+                "当前会话已由管理员启用完全访问；产品层不再限制该动作，"
+                "仍受执行账户 OS 权限约束。"
+            ),
+        )
+    if not action.mutable:
+        return base
     if mode == PermissionMode.READ_ONLY:
         return GateDecision(
             action=GateAction.DENY,
             risk=base.risk,
             reason="当前会话处于只读模式，修改操作不会执行。",
-        )
-    if mode == PermissionMode.FULL_ACCESS:
-        return GateDecision(
-            action=GateAction.AUTO,
-            risk=base.risk,
-            reason="当前会话已由管理员启用完全访问；仍受执行账户 OS 权限约束。",
         )
     if has_grant and (
         not action.destructive or grant_scope == PermissionGrantScope.ONCE
@@ -371,5 +449,6 @@ __all__ = [
     "ActionDescriptor",
     "apply_permission_mode",
     "describe_action",
+    "execution_profile_fingerprint",
     "trusted_workspace_allows",
 ]

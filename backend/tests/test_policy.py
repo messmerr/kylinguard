@@ -25,6 +25,8 @@ def test_非法kind与非法正则拒绝(store):
         store.add("unknown_kind", "x", "")
     with pytest.raises(ValueError):
         store.add("blacklist", "([未闭合", "")
+    with pytest.raises(ValueError, match="绝对路径"):
+        store.add("protected", "relative/path", "")
 
 
 def test_extra聚合(store):
@@ -45,7 +47,7 @@ def test_自定义黑名单参与判定(store):
 
 
 def test_自定义白名单参与判定(store):
-    assert check_command("lsattr /var/log").decision == RuleDecision.DENY
+    assert check_command("lsattr /var/log").decision == RuleDecision.REVIEW
     store.add("readonly", "lsattr", "")
     assert check_command("lsattr /var/log",
                          extra=store.extra()).decision == RuleDecision.REVIEW
@@ -79,3 +81,19 @@ def test_builtin_rules导出完整():
     assert "/etc/shadow" in b["protected_prefixes"]
     assert "ps" in b["safe_commands"]
     assert "status" in b["systemctl_ro_subcmds"]
+
+
+def test_策略快照修订号仅在真实变更时递增(tmp_path):
+    store = PolicyStore(str(tmp_path / "revision.db"))
+    revision0, extra0 = store.snapshot()
+    policy_id = store.add("protected", str(tmp_path / "protected"), "")
+    revision1, extra1 = store.snapshot()
+
+    assert revision1 == revision0 + 1
+    assert extra0.protected == ()
+    assert extra1.protected
+    assert store.remove(999999) is False
+    assert store.revision() == revision1
+    assert store.remove(policy_id) is True
+    assert store.revision() == revision1 + 1
+    store.close()

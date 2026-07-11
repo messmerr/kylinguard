@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -165,29 +166,86 @@ async def test_journal_search_priority枚举():
         await logs.journal_search(unit="", priority="verbose", lines=10)
 
 
-async def test_run_command_透传执行(monkeypatch):
+async def test_run_command通过shell执行并透传cwd与timeout(monkeypatch, tmp_path):
     import kylinguard.plugins.run_command as rc
+    captured = {}
 
     async def fake_run(cmd, **kwargs):
+        captured.update(command=cmd, **kwargs)
         return ExecResult(exit_code=0, stdout=f"ran:{cmd}", stderr="",
                           duration_ms=1)
 
-    monkeypatch.setattr(rc, "run_command_exec", fake_run)
-    out = await rc.run_command(command="uptime")
-    assert "ran:uptime" in out
-    assert "exit_code=0" in out
+    monkeypatch.setattr(rc, "run_shell_exec", fake_run)
+    monkeypatch.setenv("KG_COMMAND_SHELL", "/bin/test-shell")
+    out = await rc.run_command(
+        command="uptime | head -1", cwd=str(tmp_path), timeout=17)
+    payload = json.loads(out)
+
+    assert payload["stdout"] == "ran:uptime | head -1"
+    assert payload["exit_code"] == 0
+    assert captured == {
+        "command": "uptime | head -1",
+        "shell": "/bin/test-shell",
+        "cwd": str(tmp_path.resolve()),
+        "timeout": 17,
+        "max_output": 65536,
+        "run_as": "",
+    }
 
 
-async def test_run_command_非零退出显式失败(monkeypatch):
+async def test_run_command_非零退出作为正常结构化结果(monkeypatch, tmp_path):
     import kylinguard.plugins.run_command as rc
 
     async def fake_run(cmd, **kwargs):
         return ExecResult(exit_code=127, stdout="", stderr="not found",
                           duration_ms=1)
 
-    monkeypatch.setattr(rc, "run_command_exec", fake_run)
-    with pytest.raises(ToolError, match="exit_code=127"):
-        await rc.run_command(command="missing-command")
+    monkeypatch.setattr(rc, "run_shell_exec", fake_run)
+    out = await rc.run_command(command="missing-command", cwd=str(tmp_path))
+    payload = json.loads(out)
+
+    assert payload["exit_code"] == 127
+    assert payload["stderr"] == "not found"
+    assert payload["timed_out"] is False
+
+
+async def test_run_command_超时作为正常结构化结果(monkeypatch, tmp_path):
+    import kylinguard.plugins.run_command as rc
+
+    async def fake_run(cmd, **kwargs):
+        return ExecResult(
+            exit_code=-1, stdout="partial", stderr="执行超时",
+            duration_ms=1000, timed_out=True,
+        )
+
+    monkeypatch.setattr(rc, "run_shell_exec", fake_run)
+    payload = json.loads(await rc.run_command(
+        command="long-task", cwd=str(tmp_path), timeout=2))
+
+    assert payload["timed_out"] is True
+    assert payload["stdout"] == "partial"
+
+
+@pytest.mark.parametrize("command", ["", "   ", "echo ok\x00id"])
+async def test_run_command_仅参数非法返回ToolError(command, tmp_path):
+    import kylinguard.plugins.run_command as rc
+
+    with pytest.raises(ToolError):
+        await rc.run_command(command=command, cwd=str(tmp_path))
+
+
+async def test_run_command_校验cwd和timeout(monkeypatch, tmp_path):
+    import kylinguard.plugins.run_command as rc
+
+    monkeypatch.setenv("KG_COMMAND_MAX_TIMEOUT", "5")
+    with pytest.raises(ToolError, match="cwd 必须是绝对路径"):
+        await rc.run_command(command="pwd", cwd="relative")
+    with pytest.raises(ToolError, match="不是已存在目录"):
+        await rc.run_command(command="pwd", cwd=str(tmp_path / "missing"))
+    with pytest.raises(ToolError, match="1-5"):
+        await rc.run_command(command="pwd", cwd=str(tmp_path), timeout=6)
+    with pytest.raises(ToolError, match="1-5"):
+        await rc.run_command(command="pwd", cwd=str(tmp_path), timeout=0)
 
 
 async def test_run_batch_逐条argv执行且遇错停止(monkeypatch):
@@ -202,10 +260,15 @@ async def test_run_batch_逐条argv执行且遇错停止(monkeypatch):
         )
 
     monkeypatch.setattr(rc, "run_command_exec", fake_run)
-    with pytest.raises(ToolError, match="批量命令执行失败"):
-        await rc.run_batch(commands=[
-            ["ps", "aux"], ["false"], ["free", "-m"],
-        ])
+    output = await rc.run_batch(commands=[
+        ["ps", "aux"], ["false"], ["free", "-m"],
+    ])
+    payload = json.loads(output)
+    assert payload["ok"] is False
+    assert payload["commands_executed"] == 2
+    assert payload["commands_skipped"] == 1
+    assert payload["commands_omitted_after_stop"] == 1
+    assert payload["stopped_early"] is True
     assert captured == [["ps", "aux"], ["false"]]
 
 
@@ -222,21 +285,63 @@ async def test_run_batch_可选择执行完所有命令(monkeypatch):
         )
 
     monkeypatch.setattr(rc, "run_command_exec", fake_run)
-    with pytest.raises(ToolError, match='"commands_executed": 3'):
-        await rc.run_batch(
-            commands=[["uptime"], ["false"], ["free", "-m"]],
-            stop_on_error=False,
-        )
+    output = await rc.run_batch(
+        commands=[["uptime"], ["false"], ["free", "-m"]],
+        stop_on_error=False,
+    )
+    payload = json.loads(output)
+    assert payload["ok"] is False
+    assert payload["commands_executed"] == 3
     assert len(captured) == 3
 
 
+async def test_run_batch_透传cwd与逐调用timeout(monkeypatch, tmp_path):
+    import kylinguard.plugins.run_command as rc
+    captured = []
+
+    async def fake_run(argv, **kwargs):
+        captured.append((argv, kwargs))
+        return ExecResult(
+            exit_code=0, stdout="ok", stderr="", duration_ms=1,
+        )
+
+    monkeypatch.setattr(rc, "run_command_exec", fake_run)
+    output = await rc.run_batch(
+        commands=[["pwd"]], cwd=str(tmp_path), timeout=19)
+
+    assert json.loads(output)["commands_executed"] == 1
+    assert captured == [(["pwd"], {
+        "cwd": str(tmp_path.resolve()),
+        "timeout": 19,
+        "max_output": 65536,
+        "run_as": "",
+        "agent_environment": False,
+    })]
+
+
 @pytest.mark.parametrize("commands", [
-    [], [[]], [["ok", ""]], [["ok\x00bad"]],
+    [], [[]], [["", "arg"]], [["ok\x00bad"]],
 ])
 async def test_run_batch_拒绝非法argv(commands):
     import kylinguard.plugins.run_command as rc
     with pytest.raises(ToolError):
         await rc.run_batch(commands=commands)
+
+
+async def test_run_batch保留合法的空字符串参数(monkeypatch, tmp_path):
+    import kylinguard.plugins.run_command as rc
+    captured = []
+
+    async def fake_run(argv, **kwargs):
+        captured.append(argv)
+        return ExecResult(
+            exit_code=0, stdout="", stderr="", duration_ms=1,
+        )
+
+    monkeypatch.setattr(rc, "run_command_exec", fake_run)
+    await rc.run_batch(
+        commands=[["printf", "%s", ""]], cwd=str(tmp_path))
+    assert captured == [["printf", "%s", ""]]
 
 
 async def test_run_batch_operators按短路语义执行(monkeypatch):
@@ -260,6 +365,8 @@ async def test_run_batch_operators按短路语义执行(monkeypatch):
     assert captured == ["false", "fallback", "always"]
     assert result["commands_executed"] == 3
     assert result["commands_skipped"] == 1
+    assert result["commands_short_circuited"] == 1
+    assert result["commands_omitted_after_stop"] == 0
     assert result["results"][1]["skip_reason"] == "previous_failed"
 
 
@@ -274,11 +381,12 @@ async def test_run_batch_operators最终失败才令工具失败(monkeypatch):
 
     monkeypatch.setattr(rc, "run_command_exec", fake_run)
     # 中间失败被 || 恢复，整个 AND-OR 列表成功。
-    await rc.run_batch(
-        commands=[["false"], ["true"]], operators=["||"])
-    with pytest.raises(ToolError, match="批量命令执行失败"):
-        await rc.run_batch(
-            commands=[["true"], ["false"]], operators=["&&"])
+    recovered = json.loads(await rc.run_batch(
+        commands=[["false"], ["true"]], operators=["||"]))
+    failed = json.loads(await rc.run_batch(
+        commands=[["true"], ["false"]], operators=["&&"]))
+    assert recovered["ok"] is True
+    assert failed["ok"] is False
 
 
 @pytest.mark.parametrize(("commands", "operators"), [

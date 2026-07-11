@@ -1,5 +1,8 @@
+import sqlite3
+
 import pytest
 
+from kylinguard.permissions import PermissionError
 from kylinguard.sessions import SessionStore
 
 
@@ -46,3 +49,51 @@ def test_重复创建幂等(store):
     store.create("s1", "b")  # 已存在则只 touch，不改标题
     assert len(store.list()) == 1
     assert store.list()[0]["title"] == "a"
+
+
+def test_草稿严格创建且只由首条消息finalize(store):
+    store.create(
+        "draft", "新任务", draft=True, strict=True,
+        workspace_root="/srv/project",
+    )
+    summary = store.list()[0]
+    assert summary["draft"] is True
+    assert summary["title"] == "新任务"
+    assert summary["workspace_root"] == "/srv/project"
+    assert store.get_workspace_root("draft") == "/srv/project"
+
+    with pytest.raises(PermissionError) as error:
+        store.create("draft", "不能覆盖", draft=True, strict=True)
+    assert error.value.code == "session_already_exists"
+
+    store.touch("draft", first_message="第一条真实任务")
+    summary = store.list()[0]
+    assert summary["draft"] is False
+    assert summary["title"] == "第一条真实任务"
+
+    store.touch("draft", first_message="第二条消息不能重命名")
+    assert store.list()[0]["title"] == "第一条真实任务"
+
+
+def test_旧会话表自动补draft列且旧记录不是草稿(tmp_path):
+    db = tmp_path / "legacy.db"
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "CREATE TABLE sessions ("
+        "id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO sessions VALUES ('legacy', '旧会话', 1, 1)"
+    )
+    connection.commit()
+    connection.close()
+
+    migrated = SessionStore(str(db))
+    try:
+        summary = migrated.list()[0]
+        assert summary["id"] == "legacy"
+        assert summary["draft"] is False
+        assert summary["workspace_root"] == ""
+    finally:
+        migrated.close()

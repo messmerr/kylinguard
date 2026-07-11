@@ -29,8 +29,8 @@ if grep -q '^KG_LLM_API_KEY=sk-你的密钥$' .env 2>/dev/null; then
   exit 1
 fi
 
-if grep -q '^KG_ADMIN_PASSWORD=请设置强密码$' .env 2>/dev/null; then
-  echo "检测到 .env 仍在使用示例 KG_ADMIN_PASSWORD，请先改成你的登录密码。" >&2
+if grep -Eq '^KG_ADMIN_PASSWORD=(|请设置强密码|change-me|changeme|password)$' .env 2>/dev/null; then
+  echo "检测到 .env 尚未设置安全的 KG_ADMIN_PASSWORD，请先改成你的登录密码。" >&2
   exit 1
 fi
 

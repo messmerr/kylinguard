@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+const localStorageWrites = []
 globalThis.localStorage = {
   getItem: () => null,
-  setItem: () => {},
+  setItem: (key, value) => localStorageWrites.push([key, String(value)]),
   removeItem: () => {},
 }
 
@@ -12,10 +13,43 @@ const chatBodies = []
 let chatRequestCount = 0
 let sessionEventsFixture = null
 let permissionFixture = null
+let sessionListFixture = []
+let permissionCapabilitiesFixture
+let draftSessionStatus = 201
+const draftSessionBodies = []
 
 globalThis.fetch = async (url, options = {}) => {
   if (url === '/api/sessions') {
-    return Response.json({ sessions: [] })
+    if (options.method === 'POST') {
+      const body = JSON.parse(options.body)
+      draftSessionBodies.push(body)
+      if (draftSessionStatus !== 201) {
+        return Response.json({ detail: '旧后端不支持草稿会话' }, {
+          status: draftSessionStatus,
+        })
+      }
+      sessionListFixture = [{
+        id: body.session_id, title: '新任务', draft: true,
+        updated_at: Math.floor(Date.now() / 1000),
+      }]
+      return Response.json({
+        session_id: body.session_id,
+        draft: true,
+        permission: {
+          mode: 'full_access', version: 1,
+          expires_at: Math.floor(Date.now() / 1000) + body.ttl_seconds,
+          execution_identity: 'backend-user',
+          execution_identity_source: 'backend_process',
+          full_access_available: true,
+          grants_root: false,
+        },
+      }, { status: 201 })
+    }
+    return Response.json({
+      sessions: sessionListFixture,
+      ...(permissionCapabilitiesFixture
+        ? { permission_capabilities: permissionCapabilitiesFixture } : {}),
+    })
   }
   if (url === '/api/confirm') {
     return Response.json({ ok: true })
@@ -72,7 +106,14 @@ function reset() {
   chatBodies.length = 0
   sessionEventsFixture = null
   permissionFixture = null
+  sessionListFixture = []
+  permissionCapabilitiesFixture = undefined
+  draftSessionStatus = 201
+  draftSessionBodies.length = 0
+  localStorageWrites.length = 0
   chatResponses.length = 0
+  chat.sessions.value = []
+  permissions._resetPermissionStateForTests()
 }
 
 test('业务终态到 done 之间仍禁止开启新回合', async () => {
@@ -316,14 +357,22 @@ test('task_error 与失败 final_answer 只渲染一个错误项', async () => {
   assert.equal(answers.length, 0)
 })
 
-test('权限模式只随首轮 chat 创建会话，后续消息不重复更新', async () => {
+test('权限与服务器工作目录只随首轮 chat 创建会话，后续消息不重复更新', async () => {
   reset()
+  permissionCapabilitiesFixture = { workspace_root: '/srv/default' }
+  await chat.refreshSessions()
+  permissions.setDraftWorkspaceRoot('/srv/custom/../work')
   const first = controlledSse()
   chatResponses.push(first)
   const firstRequest = chat.sendMessage('CREATE-SESSION')
   await tick()
   assert.equal(chatBodies[0].permission_mode, 'ask')
   assert.deepEqual(chatBodies[0].trusted_roots, [])
+  assert.equal(chatBodies[0].workspace_root, '/srv/work')
+  assert.equal(
+    localStorageWrites.some(([, value]) => value.includes('/srv/work')),
+    false,
+  )
   first.event({ type: 'session_created', session_id: 'session-permission' })
   first.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
   first.event({ type: 'done' })
@@ -337,10 +386,125 @@ test('权限模式只随首轮 chat 创建会话，后续消息不重复更新',
   assert.equal(chatBodies[1].session_id, 'session-permission')
   assert.equal('permission_mode' in chatBodies[1], false)
   assert.equal('trusted_roots' in chatBodies[1], false)
+  assert.equal('workspace_root' in chatBodies[1], false)
   second.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
   second.event({ type: 'done' })
   second.close()
   await secondRequest
+})
+
+test('任务列表能力元数据可在首条消息前控制完全访问入口', async () => {
+  reset()
+  permissionCapabilitiesFixture = {
+    full_access_available: false,
+    full_access_unavailable_reason: '部署方已关闭',
+    full_access_max_ttl: 600,
+    execution_identity: 'ops',
+    execution_identity_source: 'configured_exec_user',
+    execution_account_separated: true,
+    grants_root: false,
+    workspace_root: '/srv/default-project',
+  }
+
+  await chat.refreshSessions()
+
+  assert.equal(permissions.permissionContext.fullAccessAvailable, false)
+  assert.equal(permissions.permissionContext.fullAccessUnavailableReason, '部署方已关闭')
+  assert.equal(permissions.permissionContext.fullAccessMaxTtl, 600)
+  assert.equal(permissions.permissionContext.executorIdentity, 'ops')
+  assert.equal(permissions.permissionContext.executionAccountSeparated, true)
+  assert.equal(permissions.permissionContext.defaultWorkspaceRoot, '/srv/default-project')
+  assert.equal(permissions.permissionContext.workspaceRoot, '/srv/default-project')
+})
+
+test('首条消息前原子创建完全访问草稿并复用同一会话', async () => {
+  reset()
+  permissionCapabilitiesFixture = {
+    full_access_available: true,
+    full_access_max_ttl: 900,
+    permission_default_ttl: 300,
+    execution_identity: 'backend-user',
+    execution_identity_source: 'backend_process',
+    workspace_root: '/srv/default-project',
+  }
+  await chat.refreshSessions()
+  permissions.setDraftWorkspaceRoot('/srv/custom/../project')
+  const password = 'draft-password-must-not-leak'
+
+  const result = await chat.setChatPermissionMode('full_access', {
+    password, durationMinutes: 30,
+  })
+
+  assert.equal(result.supported, true)
+  assert.match(chat.activeId.value, /^[a-f0-9]{32}$/)
+  assert.equal(permissions.permissionContext.sessionId, chat.activeId.value)
+  assert.equal(permissions.permissionMode.value, 'full_access')
+  assert.equal(permissions.permissionContext.synced, true)
+  assert.equal(permissions.permissionContext.workspaceRoot, '/srv/project')
+  assert.equal(chat.sessions.value[0].id, chat.activeId.value)
+  assert.deepEqual(draftSessionBodies[0], {
+    session_id: chat.activeId.value,
+    mode: 'full_access',
+    ttl_seconds: 900,
+    password,
+    workspace_root: '/srv/project',
+  })
+  assert.equal(JSON.stringify(permissions.permissionContext).includes(password), false)
+  assert.equal(JSON.stringify(chat.sessions.value).includes(password), false)
+  assert.equal(localStorageWrites.some(([, value]) => value.includes(password)), false)
+
+  const sse = controlledSse()
+  chatResponses.push(sse)
+  const request = chat.sendMessage('USE-DRAFT-SESSION')
+  await tick()
+  assert.equal(chatBodies[0].session_id, chat.activeId.value)
+  assert.equal('password' in chatBodies[0], false)
+  assert.equal('permission_mode' in chatBodies[0], false)
+  sse.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
+  sse.event({ type: 'done' })
+  sse.close()
+  await request
+})
+
+test('旧后端不支持草稿会话时给出明确降级提示且不绑定本地状态', async () => {
+  reset()
+  draftSessionStatus = 405
+  const password = 'legacy-password-must-not-leak'
+
+  await assert.rejects(
+    chat.setChatPermissionMode('full_access', { password, durationMinutes: 5 }),
+    /不支持在首条消息前开启完全访问.*先发送第一条消息/,
+  )
+
+  assert.equal(chat.activeId.value, '')
+  assert.equal(permissions.permissionContext.sessionId, '')
+  assert.equal(permissions.permissionMode.value, 'ask')
+  assert.equal(JSON.stringify(permissions.permissionContext).includes(password), false)
+  assert.equal(localStorageWrites.some(([, value]) => value.includes(password)), false)
+})
+
+test('已有任务采用会话工作目录并锁定，新任务恢复服务器默认目录', async () => {
+  reset()
+  permissionCapabilitiesFixture = { workspace_root: '/srv/default-project' }
+  sessionListFixture = [{
+    id: 'workspace-session', title: '已有任务',
+    workspace_root: '/srv/locked-project', updated_at: 1,
+  }]
+  sessionEventsFixture = { events: [] }
+  permissionFixture = { mode: 'ask', version: 1 }
+  await chat.refreshSessions()
+
+  await chat.loadSession('workspace-session')
+
+  assert.equal(permissions.permissionContext.workspaceRoot, '/srv/locked-project')
+  assert.throws(
+    () => permissions.setDraftWorkspaceRoot('/srv/another-project'),
+    /任务创建后工作目录不可更改/,
+  )
+
+  chat.newSession()
+  assert.equal(permissions.permissionContext.workspaceRoot, '/srv/default-project')
+  assert.equal(permissions.permissionContext.sessionId, '')
 })
 
 test('历史回放结束后以服务器当前权限覆盖过期的历史事件', async () => {

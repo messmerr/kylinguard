@@ -15,6 +15,7 @@ from kylinguard.models import (
 )
 from kylinguard.permissions import PermissionRequests
 from kylinguard.pipeline import Confirmations, Pipeline
+from kylinguard.policy import PolicyStore
 from kylinguard.sessions import SessionStore
 
 
@@ -70,9 +71,10 @@ async def snapshot():
 
 
 def make_pipeline(tmp_path, outputs, mode=PermissionMode.ASK, roots=None,
-                  reviewer=None):
+                  reviewer=None, settings=None, workspace_root=""):
     db = str(tmp_path / "kg.db")
-    settings = Settings(_env_file=None, db_path=db, confirm_timeout=2)
+    settings = settings or Settings(
+        _env_file=None, db_path=db, confirm_timeout=2)
     audit = AuditLog(db)
     sessions = SessionStore(db)
     expiry = (time.time() + 300
@@ -81,6 +83,7 @@ def make_pipeline(tmp_path, outputs, mode=PermissionMode.ASK, roots=None,
     sessions.create(
         "s1", "测试", permission_mode=mode,
         trusted_roots=roots or [], permission_expires_at=expiry,
+        workspace_root=workspace_root,
         updated_by="admin",
     )
     requests = PermissionRequests()
@@ -92,6 +95,26 @@ def make_pipeline(tmp_path, outputs, mode=PermissionMode.ASK, roots=None,
         session_store=sessions, permission_requests=requests,
     )
     return pipeline, tools, requests, sessions, audit
+
+
+def test_流水线kill_switch会把遗留完全访问视为确认模式(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        db_path=str(tmp_path / "kg.db"),
+        confirm_timeout=2,
+        allow_full_access=False,
+    )
+    pipeline, _, _, sessions, _ = make_pipeline(
+        tmp_path,
+        [FINAL],
+        mode=PermissionMode.FULL_ACCESS,
+        settings=settings,
+    )
+
+    effective = pipeline._effective_permission_context(
+        sessions.get_permissions("s1"))
+    assert effective.mode == PermissionMode.ASK
+    assert effective.expired is True
 
 
 async def collect(pipeline, on_event=None):
@@ -175,6 +198,49 @@ async def test_人工批准后若权限被收回_执行前复验会中止(tmp_pa
     }
 
 
+async def test_等待授权期间策略变化会在工具启动前中止(tmp_path):
+    command = "some-new-ops-tool --check"
+    pipeline, tools, requests, sessions, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_command", {
+            "command": command,
+        }, purpose="检查状态"), FINAL],
+    )
+    policies = PolicyStore(str(tmp_path / "kg.db"))
+    pipeline._policy_store = policies
+
+    async def change_policy_then_approve(event):
+        if event["type"] != "permission_request":
+            return
+        policies.add("blacklist", r"\bsome-new-ops-tool\b", "刚加入的策略")
+        grant = sessions.add_grant(
+            "s1",
+            scope=PermissionGrantScope.ONCE,
+            action_fingerprint=event["action"]["fingerprint"],
+            capability=event["capability"],
+            resource=event["resource"],
+            context_version=event["context_version"],
+            granted_by="admin",
+            expires_at=time.time() + 60,
+        )
+        requests.resolve(PermissionResolution(
+            request_id=event["request_id"],
+            decision=PermissionDecision.ALLOW_ONCE,
+            operator="admin",
+            context_version=event["context_version"],
+            grant_id=grant.id,
+        ))
+
+    events = await collect(pipeline, change_policy_then_approve)
+    failure = next(
+        event for event in events
+        if event["type"] == "execution_authorization_failed"
+    )
+    assert failure["code"] == "policy_changed_before_execution"
+    assert tools.calls == []
+    policies.close()
+
+
 async def test_一次授权消费与执行授权审计原子提交(tmp_path, monkeypatch):
     target = str(tmp_path / "notes.md")
     pipeline, tools, requests, sessions, audit = make_pipeline(
@@ -239,7 +305,7 @@ async def test_只读模式拒绝写入并告诉模型不要重试(tmp_path):
     assert verification["decision"]["action"] == "deny"
 
 
-async def test_完全访问跳过人工确认但reviewer与硬红线仍可拒绝(tmp_path):
+async def test_完全访问跳过人工确认与reviewer并保留真实shell能力(tmp_path):
     pipeline0, tools0, _, _, _ = make_pipeline(
         tmp_path / "safe", [plan("files.write_file", {
             "path": str(tmp_path / "safe" / "notes.md"), "content": "hello",
@@ -252,40 +318,190 @@ async def test_完全访问跳过人工确认但reviewer与硬红线仍可拒绝
         tmp_path, [plan("files.write_file", {
             "path": str(tmp_path / "notes.md"), "content": "hello",
         }), FINAL], mode=PermissionMode.FULL_ACCESS, reviewer=unsafe_reviewer)
-    await collect(pipeline)
-    assert tools.calls == []
+    events = await collect(pipeline)
+    assert tools.calls
+    assert "review_bypassed" in {event["type"] for event in events}
+    assert unsafe_reviewer.calls == 0
 
     pipeline2, tools2, _, _, _ = make_pipeline(
         tmp_path / "second", [plan("run_command.run_command", {
             "command": "rm -rf /",
         }, risk="high"), FINAL], mode=PermissionMode.FULL_ACCESS)
     await collect(pipeline2)
-    assert tools2.calls == []
+    # 完全访问不靠字符串规则伪装成 shell 沙箱；最终能力由 OS 身份决定。
+    assert tools2.calls == [("run_command", "run_command", {
+        "command": "rm -rf /",
+    })]
 
-
-async def test_只读分号命令自动改写为无shell批处理(tmp_path):
-    pipeline, tools, _, _, _ = make_pipeline(
-        tmp_path, [plan("run_command.run_command", {
-            "command": "ps aux; free -m",
-        }, risk="low", purpose="查看资源"), FINAL])
-    events = await collect(pipeline)
-    rewrite = next(e for e in events if e["type"] == "step_rewrite")
-    assert rewrite["outcome"] == "rewritten"
-    assert tools.calls == [("run_command", "run_batch", {
-        "commands": [["ps", "aux"], ["free", "-m"]],
-        "operators": [";"],
+    ordinary_target = tmp_path / "ordinary" / "generated"
+    pipeline3, tools3, _, _, _ = make_pipeline(
+        tmp_path / "third", [plan("run_command.run_command", {
+            "command": f"rm -rf {ordinary_target}",
+        }, risk="high"), FINAL], mode=PermissionMode.FULL_ACCESS)
+    await collect(pipeline3)
+    assert tools3.calls == [("run_command", "run_command", {
+        "command": f"rm -rf {ordinary_target}",
     })]
 
 
-async def test_重定向被归类为可改写而非危险并停止相同重试(tmp_path):
+async def test_完全访问把复合shell原样交给通用终端(tmp_path):
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path, [plan("run_command.run_command", {
+            "command": "ps aux; free -m",
+        }, risk="low", purpose="查看资源"), FINAL],
+        mode=PermissionMode.FULL_ACCESS)
+    events = await collect(pipeline)
+    assert "step_rewrite" not in {event["type"] for event in events}
+    assert tools.calls == [("run_command", "run_command", {
+        "command": "ps aux; free -m",
+    })]
+
+
+async def test_完全访问支持重定向且不同命令都可执行(tmp_path):
     first = plan("run_command.run_command", {
         "command": f"echo hello > {tmp_path / 'notes.md'}",
     })
     second = plan("run_command.run_command", {
         "command": f"printf hello > {tmp_path / 'notes.md'}",
     })
-    pipeline, tools, _, _, _ = make_pipeline(tmp_path, [first, second, FINAL])
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path, [first, second, FINAL], mode=PermissionMode.FULL_ACCESS)
     events = await collect(pipeline)
-    rewrites = [e for e in events if e["type"] == "step_rewrite"]
-    assert rewrites[0]["outcome"] == "rewrite_required"
+    assert "step_rewrite" not in {event["type"] for event in events}
+    assert tools.calls == [
+        ("run_command", "run_command", first.steps[0].arguments),
+        ("run_command", "run_command", second.steps[0].arguments),
+    ]
+
+
+async def test_完全访问用结构化工具访问控制面路径不会产生路线依赖(tmp_path):
+    db_path = str(tmp_path / "kg.db")
+    step = plan("files.write_file", {
+        "path": db_path,
+        "content": "authorized replacement",
+        "create_only": False,
+    }, risk="high", purpose="按管理员要求修改控制文件")
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path, [step, FINAL], mode=PermissionMode.FULL_ACCESS,
+    )
+
+    events = await collect(pipeline)
+    verification = next(
+        event for event in events if event["type"] == "verification"
+    )
+    assert verification["decision"]["action"] == "auto"
+    assert tools.calls == [
+        ("files", "write_file", step.steps[0].arguments),
+    ]
+
+
+async def test_只读白名单命令自动改走无shell的精确argv(tmp_path):
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_command", {
+            "command": "pwd", "cwd": str(tmp_path),
+        }, risk="low", purpose="查看目录"), FINAL],
+        mode=PermissionMode.READ_ONLY,
+    )
+
+    events = await collect(pipeline)
+    rewrite = next(event for event in events if event["type"] == "step_rewrite")
+    assert rewrite["outcome"] == "readonly_argv"
+    assert tools.calls == [("run_command", "run_batch", {
+        "commands": [["pwd"]], "cwd": str(tmp_path),
+    })]
+
+
+@pytest.mark.parametrize("command", [
+    "diff --output=/tmp/result a b",
+    "ss -K dst 192.0.2.1",
+    "journalctl --vacuum-time=1s",
+    "lastlog --clear --user demo",
+])
+async def test_只读模式不会自动执行白名单命令的写型参数(
+    tmp_path, command,
+):
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_command", {
+            "command": command,
+        }, risk="low", purpose="检查系统"), FINAL],
+        mode=PermissionMode.READ_ONLY,
+    )
+
+    events = await collect(pipeline)
+    verification = next(
+        event for event in events if event["type"] == "verification"
+    )
+    assert verification["decision"]["action"] == "deny"
+    assert tools.calls == []
+
+
+async def test_只读模式允许run_batch参数中的字面shell元字符(tmp_path):
+    arguments = {
+        "commands": [["grep", "a|b", "report(1).txt"]],
+    }
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_batch", arguments,
+              risk="low", purpose="搜索字面文本"), FINAL],
+        mode=PermissionMode.READ_ONLY,
+    )
+
+    events = await collect(pipeline)
+    verification = next(
+        event for event in events if event["type"] == "verification"
+    )
+    assert verification["decision"]["action"] == "auto"
+    assert tools.calls == [("run_command", "run_batch", arguments)]
+
+
+async def test_完全访问保留简单命令的原始bash语义(tmp_path):
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_command", {
+            "command": "pwd", "cwd": str(tmp_path),
+        }, risk="low", purpose="查看目录"), FINAL],
+        mode=PermissionMode.FULL_ACCESS,
+    )
+
+    events = await collect(pipeline)
+    assert "step_rewrite" not in {event["type"] for event in events}
+    assert tools.calls == [("run_command", "run_command", {
+        "command": "pwd", "cwd": str(tmp_path),
+    })]
+
+
+async def test_会话工作目录成为终端默认cwd但不是命令沙箱(tmp_path):
+    workspace = str(tmp_path / "opened-project")
+    (tmp_path / "opened-project").mkdir()
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_command", {
+            "command": "git status --short",
+        }, risk="low", purpose="查看项目状态"), FINAL],
+        mode=PermissionMode.FULL_ACCESS,
+        workspace_root=workspace,
+    )
+
+    events = await collect(pipeline)
+    user_query = next(event for event in events if event["type"] == "user_query")
+    assert user_query["workspace_root"] == workspace
+    assert tools.calls == [("run_command", "run_command", {
+        "command": "git status --short", "cwd": workspace,
+    })]
+
+
+async def test_只读模式不会让bash_ansi引用绕过资源确认(tmp_path):
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_command", {
+            "command": "cat $'.env'", "cwd": str(tmp_path),
+        }, risk="low", purpose="读取文件"), FINAL],
+        mode=PermissionMode.READ_ONLY,
+    )
+
+    events = await collect(pipeline)
+    verification = next(event for event in events if event["type"] == "verification")
+    assert verification["decision"]["action"] == "deny"
     assert tools.calls == []

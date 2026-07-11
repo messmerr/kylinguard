@@ -121,6 +121,24 @@
           <div class="composer-footer">
             <div class="composer-meta">
               <span>Enter 发送 · Shift+Enter 换行</span>
+              <span class="composer-separator shortcut-separator" aria-hidden="true"></span>
+              <button
+                type="button"
+                class="workspace-control"
+                :class="{ locked: Boolean(activeId) }"
+                :disabled="running || Boolean(activeId)"
+                :title="activeId
+                  ? `服务器工作目录已锁定：${workspaceDisplay}`
+                  : `设置服务器工作目录：${workspaceDisplay}`"
+                :aria-label="activeId
+                  ? `服务器工作目录已锁定：${workspaceDisplay}`
+                  : `设置服务器工作目录，当前为 ${workspaceDisplay}`"
+                @click="chooseWorkspaceRoot"
+              >
+                <KgIcon name="disk" :size="13" />
+                <span>{{ workspaceDisplay }}</span>
+                <KgIcon :name="activeId ? 'lock' : 'chevron'" :size="11" class="workspace-state" />
+              </button>
               <span class="composer-separator" aria-hidden="true"></span>
               <PermissionSelector
                 :disabled="running && currentTurn?.status !== 'waiting_user'"
@@ -139,6 +157,7 @@
 
 <script setup>
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import ConfirmCard from '../components/ConfirmCard.vue'
 import KgIcon from '../components/KgIcon.vue'
 import KgLogo from '../components/KgLogo.vue'
@@ -150,6 +169,10 @@ import {
   activeId, cancelCurrentTurn, currentTurn, generateReport, items,
   retryMessage, running, sendMessage,
 } from '../composables/useChat.js'
+import {
+  permissionContext,
+  setDraftWorkspaceRoot,
+} from '../composables/usePermissions.js'
 import {
   planningProgressCount,
   planningProgressText,
@@ -163,6 +186,9 @@ const WELCOME_HINTS = [
 
 const input = ref('')
 const chatRef = ref(null)
+const workspaceDisplay = computed(() => (
+  permissionContext.workspaceRoot || '服务器默认目录'
+))
 
 const ageText = (age) => (age < 3 ? '刚刚' : `${Math.round(age)} 秒前`)
 
@@ -284,6 +310,30 @@ async function submit() {
   if (!text) return
   input.value = ''
   await sendMessage(text, { onUpdate: scrollToBottom })
+}
+
+async function chooseWorkspaceRoot() {
+  if (activeId.value || running.value) return
+  try {
+    const { value } = await ElMessageBox.prompt(
+      '输入 Agent 所在服务器上的绝对目录。它不是浏览器本地文件夹，也不是安全沙箱；工作目录只决定命令默认从哪里开始。',
+      '设置服务器工作目录',
+      {
+        inputValue: permissionContext.workspaceRoot,
+        inputPlaceholder: '例如 /srv/project',
+        confirmButtonText: '使用此目录',
+        cancelButtonText: '取消',
+        inputValidator: (value) => (
+          String(value || '').trim().startsWith('/')
+          || '请输入以 / 开头的服务器绝对路径'
+        ),
+      },
+    )
+    setDraftWorkspaceRoot(String(value || '').trim())
+  } catch (error) {
+    if (error === 'cancel' || error === 'close' || error?.action === 'cancel') return
+    throw error
+  }
 }
 
 function stopTurn() {
@@ -638,6 +688,27 @@ function downloadReport(text) {
 .composer-meta > span:first-child { white-space: nowrap; }
 .composer-separator { width: 1px; height: 14px; background: var(--kg-border-subtle); }
 
+.workspace-control {
+  min-width: 0;
+  max-width: 260px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: var(--kg-radius-sm);
+  background: transparent;
+  color: var(--kg-text-secondary);
+  font: 11px/1.4 var(--kg-font-mono);
+  cursor: pointer;
+}
+.workspace-control > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-control:hover:not(:disabled) { border-color: var(--kg-border-default); background: var(--kg-bg-surface-2); }
+.workspace-control:disabled { color: var(--kg-text-tertiary); cursor: default; }
+.workspace-state { flex: none; }
+.workspace-control:not(.locked) .workspace-state { transform: rotate(90deg); }
+
 .inline-action {
   display: inline-flex;
   align-items: center;
@@ -659,6 +730,7 @@ function downloadReport(text) {
   .composer { padding-right: 20px; padding-left: 20px; }
   .record-meta { display: none; }
   .composer-meta > span:first-child,
-  .composer-separator { display: none; }
+  .shortcut-separator { display: none; }
+  .workspace-control { max-width: 170px; }
 }
 </style>

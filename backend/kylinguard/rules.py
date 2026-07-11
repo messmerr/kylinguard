@@ -1,16 +1,13 @@
-"""规则引擎（三道闸第一道）：对 run_command 自由命令做静态判定。
+"""run_command 的静态风险分类器。
 
-设计参照 Codex CLI execpolicy 与 Claude Code 权限模型的调研结论：
-- argv 级匹配（shlex 拆分）而非对 shell 字符串做正则前缀——不易被
-  引号/空格/选项前置等变体绕过；
-- 只读白名单是"命令+参数"级而非命令名级：白名单命令携带危险 flag
-  （tail -f、date -s、ip link set）即失去只读资格；
-- "执行其参数"的载荷执行器绝不凭前缀放行：提权/子 shell/解释器/远程下载
-  等载荷运行器直接拒绝；
-- 任何无法解析的输入 fail closed（拒绝），绝不猜测。
+执行能力和授权决策是两个正交维度：执行器提供完整 shell；本模块只证明
+简单只读命令可以自动执行，或把其余命令标成需要复核/确认。管道、重定向、
+解释器、网络工具、提权和未知命令都是真实能力，不能仅因命令类别被永久
+阉割。只有空输入、NUL、管理员显式黑名单等协议或组织边界才硬拒绝。
 
-执行器不经 shell（argv 直接 exec），元字符本无法生效，
-但出现元字符本身即是逃逸尝试信号，直接拒绝并留痕。
+对简单命令仍采用 argv 级匹配，避免只读白名单被危险 flag 绕过。无法可靠
+解析的完整 shell 程序交给 Reviewer 与权限模式，而不是假装静态分析能够理解
+任意 Bash 语义。
 """
 import re
 import shlex
@@ -26,7 +23,7 @@ class ExtraPolicies:
     readonly: frozenset = frozenset()               # 命令名集合
     protected: tuple = ()                           # 路径前缀
 
-# --- 黑名单（字符串级粗筛）：无条件拒绝 ---
+# --- 内置灾难性模式：提升为高风险，但可由显式权限模式授权 ---
 _BLACKLIST: list[tuple[str, str]] = [
     (r"\bdd\b.*\bof=/dev/", "直接写块设备"),
     (r"\bmkfs(\.\w+)?\b", "格式化文件系统"),
@@ -35,16 +32,18 @@ _BLACKLIST: list[tuple[str, str]] = [
     (r"\bhalt\b|\bpoweroff\b|\binit\s+0\b", "关闭主机"),
 ]
 
-# --- shell 元字符（命令注入/逃逸信号） ---
-_METACHARS = re.compile(r"[;&|`<>]|\$\(")
+# --- 需要完整 shell 解释的语法；它是能力信号，不是攻击判据 ---
+_METACHARS = re.compile(
+    r"[;&|`<>\r\n*?\[\]{}$~#()]"
+)
 
-# --- 提权/子 shell 执行器：模型自行提权或起子 shell 即为越权信号，直接拒绝 ---
+# --- 提权/子 shell：按高风险或需复核分类，不再永久禁用 ---
 _PRIVILEGE_ESCALATORS = {
     "sudo", "su", "pkexec", "runuser", "chroot", "nsenter", "setpriv",
     "sh", "bash", "zsh", "dash", "ksh", "csh", "fish",
 }
 
-# --- 载荷执行器：可把参数、远端内容或脚本解释成动作，run_command 中一律拒绝 ---
+# --- 载荷执行器：无法静态证明只读，交给后续风险与权限门控 ---
 _PAYLOAD_EXECUTORS = {
     "env", "xargs", "ssh", "scp", "sftp", "docker", "podman", "kubectl",
     "systemd-run", "crontab", "at", "nohup", "watch", "python", "python3",
@@ -82,16 +81,24 @@ _SYSTEMCTL_MUTATING_SUBCMDS = {
 #（单字符项按短选项字符匹配，"--xx" 项按长选项精确匹配）
 _SAFE_COMMANDS: dict[str, set[str]] = {
     "ps": set(), "free": set(), "df": set(), "du": set(), "uptime": set(),
-    "uname": set(), "whoami": set(), "id": set(), "hostname": set(),
+    "uname": set(), "whoami": set(), "id": set(),
     "pwd": set(), "ls": set(), "wc": set(), "which": set(), "stat": set(),
-    "nl": set(), "cut": set(), "diff": set(), "last": set(), "lastb": set(),
-    "lastlog": set(),
-    "lsblk": set(), "lscpu": set(), "lsmem": set(), "ss": set(),
+    "nl": set(), "cut": set(), "diff": {"--output"},
+    "last": set(), "lastb": set(),
+    "lastlog": {"C", "S", "--clear", "--set"},
+    "lsblk": set(), "lscpu": set(), "lsmem": set(),
+    "ss": {"K", "--kill"},
     "netstat": set(), "cat": set(), "head": set(), "grep": set(),
     "echo": set(),
     "tail": {"f", "F", "--follow"},
     "date": {"s", "--set"},
-    "journalctl": {"f", "--follow"},
+    # journalctl 的维护操作会轮转、删除或改写持久日志；即使当前账户
+    # 最终没有权限，也不能把它们证明成只读并在 READ_ONLY 下自动执行。
+    "journalctl": {
+        "f", "--follow", "--rotate", "--vacuum-size", "--vacuum-time",
+        "--vacuum-files", "--sync", "--flush", "--relinquish-var",
+        "--smart-relinquish-var", "--update-catalog", "--setup-keys",
+    },
 }
 
 _SYSTEMCTL_RO_SUBCMDS = {
@@ -142,7 +149,7 @@ def _basename(value: str) -> str:
 
 
 def _effective_argv(argv: list[str]) -> list[str]:
-    """展开常见 multicall/环境包装器，仅用于识别不可覆盖的硬红线。"""
+    """展开常见 multicall/环境包装器，用于识别灾难性风险信号。"""
     if not argv:
         return []
     values = [_basename(argv[0]), *argv[1:]]
@@ -185,6 +192,9 @@ def _effective_argv(argv: list[str]) -> list[str]:
 
 def _is_readonly_whitelisted(argv: list[str]) -> bool:
     cmd = argv[0]
+    # `hostname` 无参数只读；位置参数和 -F/--file 会修改主机名。
+    if cmd == "hostname":
+        return len(argv) == 1
     if cmd in _SAFE_COMMANDS:
         return not _has_forbidden_flag(argv, _SAFE_COMMANDS[cmd])
     if cmd == "systemctl":
@@ -208,50 +218,106 @@ def _is_systemctl_mutation(argv: list[str]) -> bool:
     return bool(words) and words[0] in _SYSTEMCTL_MUTATING_SUBCMDS
 
 
-def check_command(command: str,
-                  extra: ExtraPolicies | None = None) -> RuleVerdict:
+def _is_system_mutation(argv: list[str]) -> bool:
+    """识别白名单命令中确定会改变系统状态的参数形式。"""
+    command = argv[0]
+    if command == "ss":
+        return _has_forbidden_flag(argv, {"K", "--kill"})
+    if command == "journalctl":
+        return _has_forbidden_flag(argv, {
+            "--rotate", "--vacuum-size", "--vacuum-time", "--vacuum-files",
+            "--sync", "--flush", "--relinquish-var",
+            "--smart-relinquish-var", "--update-catalog", "--setup-keys",
+        })
+    if command == "lastlog":
+        return _has_forbidden_flag(argv, {"C", "S", "--clear", "--set"})
+    if command == "date":
+        return _has_forbidden_flag(argv, {"s", "--set"})
+    if command == "hostname":
+        return len(argv) > 1
+    if command == "ip":
+        words = [token for token in argv[1:] if not token.startswith("-")]
+        return any(word in _IP_MUTATING_VERBS for word in words)
+    return False
+
+
+def check_command(
+    command: str,
+    extra: ExtraPolicies | None = None,
+    *,
+    _scan_shell_syntax: bool = True,
+) -> RuleVerdict:
     text = command.strip()
     if not text:
         return _deny("空命令，拒绝执行", "empty")
+    if "\x00" in text:
+        return _deny("命令包含 NUL，无法交给操作系统执行", "nul")
 
-    # ① 黑名单粗筛（字符串级，覆盖 fork 炸弹等 argv 拆不出的模式）
-    #    自定义黑名单与内置合并（只收紧）
+    # ① 自定义/内置模式负责提升风险。完整 Bash 可以通过展开、变量与解释器
+    #    间接表达同一动作，因此字符串规则不能冒充不可绕过的组织级沙箱。
+    #    ASK 模式会要求显式授权，FULL_ACCESS 则按其真实语义直接执行。
     custom_blacklist = extra.blacklist if extra else []
-    for pattern, label in list(_BLACKLIST) + list(custom_blacklist):
+    for pattern, label in custom_blacklist:
         if re.search(pattern, text):
-            return _deny(f"命中危险命令黑名单：{label}", pattern)
+            return _deny(
+                f"命中管理员自定义高风险规则：{label}",
+                f"custom:{pattern}", hard=False,
+            )
+    for pattern, label in _BLACKLIST:
+        if re.search(pattern, text):
+            return _deny(
+                f"检测到灾难性命令：{label}；需要显式高权限授权",
+                "dangerous_command", hard=False,
+            )
 
-    # ② shell 元字符：执行器不经 shell 本就无效，出现即是逃逸尝试
-    m = _METACHARS.search(text)
-    if m:
-        return _deny(
-            f"包含 shell 元字符 {m.group()!r}（逃逸/注入信号）；"
-            "请改用单条简单命令或结构化插件工具", "metachar")
-
-    # ③ argv 拆分：解析失败 fail closed
+    # ② argv 拆分只用于风险分类。Bash 能合法接受的多行、替换和复杂引号
+    #    不必先被 Python shlex 完整理解。
     try:
         argv = shlex.split(text)
     except ValueError as e:
-        return _deny(f"命令无法安全解析（{e}），按安全原则拒绝", "unparseable")
+        return RuleVerdict(
+            decision=RuleDecision.REVIEW,
+            reason=f"完整 shell 语法无法由静态分类器展开（{e}），交由权限复核",
+            matched_rule="shell_expression",
+            hard=False,
+        )
     if not argv:
         return _deny("空命令，拒绝执行", "empty")
+    executable_has_path = "/" in argv[0] or "\\" in argv[0]
     argv[0] = _basename(argv[0])
 
-    # ④ argv 级黑名单：递归删根（字符串正则易被空格/选项顺序绕过）
+    # ③ argv 级识别递归删根（字符串正则易被选项顺序与包装器绕过）。
     if _is_rm_root(argv):
-        return _deny("命中危险命令黑名单：递归删除根目录", "rm_root")
+        return _deny(
+            "检测到递归删除根目录；需要显式高权限授权",
+            "dangerous_command", hard=False,
+        )
 
-    # ⑤ 提权/子 shell 执行器：一律拒绝（提权仅由受限执行器统一管理）
+    # ④ 完整 shell 程序不能靠首个 argv 证明只读。允许执行，但至少进入
+    #    Reviewer/权限层；这覆盖管道、重定向、变量、替换、串联和 heredoc。
+    m = _METACHARS.search(text) if _scan_shell_syntax else None
+    if m:
+        return _deny(
+            (f"命令使用完整 shell 语法 {m.group()!r}，"
+             "需要显式权限；该语法本身仍由终端完整支持"),
+            "shell_expression",
+            hard=False,
+        )
+
+    # ⑤ 提权/子 shell 是高风险能力，但不是永久禁用的能力。
     if argv[0] in _PRIVILEGE_ESCALATORS:
         return _deny(
-            f"禁止经 {argv[0]!r} 提权或启动子 shell；"
-            "提权由系统受限执行器统一管理", "privilege_escalator",
+            f"{argv[0]!r} 会提权或启动二级 shell，需要高权限授权",
+            "privilege_escalator",
             hard=False)
 
     if argv[0] in _PAYLOAD_EXECUTORS:
         return _deny(
-            f"禁止经 {argv[0]!r} 执行脚本、远端载荷或二级命令；"
-            "请改用受控 MCP 插件工具", "payload_executor", hard=False)
+            (f"{argv[0]!r} 可执行脚本、远端操作或二级命令，"
+             "需要显式权限"),
+            "payload_executor",
+            hard=False,
+        )
 
     # ⑤ 保护路径写操作：安全红线（自定义保护路径合并）
     protected = _PROTECTED_PREFIXES + (extra.protected if extra else ())
@@ -261,30 +327,44 @@ def check_command(command: str,
                 for t in argv[1:])
     )
     touches = any(arg.startswith(protected) for arg in argv[1:])
-    builtin_whitelisted = _is_readonly_whitelisted(argv)
+    # 只读自动通道只信任固定系统 PATH 中的裸命令名。显式 /tmp/ps、./cat
+    # 或同名 symlink 不能因为 basename 命中白名单就获得自动执行资格。
+    builtin_whitelisted = (
+        not executable_has_path and _is_readonly_whitelisted(argv)
+    )
     custom_declared_readonly = (
         extra is not None and argv[0] in extra.readonly
     )
     if writes and touches:
-        return _deny("疑似修改关键（保护）配置文件，安全红线禁止",
-                     "protected_path")
+        return _deny(
+            "疑似修改关键系统配置，需要显式高权限授权",
+            "protected_path", hard=False,
+        )
+
+    if argv[0] == "diff" and _has_forbidden_flag(argv, {"--output"}):
+        return _deny(
+            "diff --output 会创建或覆盖文件，需要显式权限",
+            "mutating_command", hard=False,
+        )
 
     if writes:
         return _deny(
-            f"自由命令禁止执行写操作 {argv[0]!r}；"
-            "请改用具备参数约束和白名单的结构化 MCP 插件", "mutating_command",
+            f"命令 {argv[0]!r} 可能修改文件，需要显式权限",
+            "mutating_command",
             hard=False)
 
-    if argv[0] in _CONTROL_COMMANDS or _is_systemctl_mutation(argv):
+    if (argv[0] in _CONTROL_COMMANDS
+            or _is_systemctl_mutation(argv)
+            or _is_system_mutation(argv)):
         return _deny(
-            f"自由命令禁止执行控制型操作 {argv[0]!r}；"
-            "服务启停等动作必须走结构化 MCP 插件和最小权限代理", "control_command",
+            f"命令 {argv[0]!r} 会控制系统或进程，需要高权限授权",
+            "control_command",
             hard=False)
 
     if argv[0] in _INPLACE_EDITORS and not builtin_whitelisted:
         return _deny(
-            f"自由命令禁止执行解释/编辑器类命令 {argv[0]!r}；"
-            "请改用只读工具或结构化插件", "editor_command", hard=False)
+            f"命令 {argv[0]!r} 可能解释或编辑内容，需要显式权限",
+            "editor_command", hard=False)
 
     # ⑥ 只读白名单（命令+参数级）；触及保护路径的读操作降级交后续闸门
     #    自定义白名单为命令名级（管理员显式放行决策）
@@ -307,12 +387,27 @@ def check_command(command: str,
             matched_rule=f"custom:{argv[0]}",
         )
 
-    # ⑦ 其余未知命令：不靠“确认”放行。需要扩展能力时应新增结构化插件或只读白名单。
+    # ⑦ 未知命令仍然是合法能力：不能证明只读，因此交由后续层确认。
     return RuleVerdict(
-        decision=RuleDecision.DENY,
-        reason="未知自由命令未进入只读白名单，需显式权限或结构化 MCP 插件",
+        decision=RuleDecision.REVIEW,
+        reason="静态层无法证明该命令只读，交由风险与权限复核",
         matched_rule="unknown_command",
         hard=False,
+    )
+
+
+def check_argv(
+    argv: list[str],
+    extra: ExtraPolicies | None = None,
+) -> RuleVerdict:
+    """分类已经结构化的精确 argv，不把字面元字符误当成 shell 语法。"""
+    if (not isinstance(argv, list) or not argv
+            or any(not isinstance(value, str) or "\x00" in value
+                   for value in argv)
+            or not argv[0]):
+        return _deny("结构化 argv 不合法", "invalid_argv")
+    return check_command(
+        shlex.join(argv), extra=extra, _scan_shell_syntax=False,
     )
 
 

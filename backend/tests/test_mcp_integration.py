@@ -1,3 +1,5 @@
+import json
+import os
 import sys
 from types import SimpleNamespace
 
@@ -20,7 +22,8 @@ def test_files_server在生产配置下整体降权且环境最小化(monkeypatc
     monkeypatch.setenv("HTTPS_PROXY", "http://user:pass@proxy")
     params = server_parameters(
         "files", "kylinguard.plugins.files", exec_user="kylinguard-exec",
-        command_timeout=17, output_max_bytes=12345,
+        workspace_root="/srv/project", command_shell="/bin/bash",
+        command_timeout=17, command_max_timeout=900, output_max_bytes=12345,
         privileged_helper="/usr/local/libexec/kylinguard/execctl",
     )
     assert params.command == "sudo"
@@ -31,7 +34,10 @@ def test_files_server在生产配置下整体降权且环境最小化(monkeypatc
     assert "KG_LLM_API_KEY" not in params.env
     assert "HTTPS_PROXY" not in params.env
     assert params.env["KG_EXEC_USER"] == "kylinguard-exec"
+    assert params.env["KG_WORKSPACE_ROOT"] == "/srv/project"
+    assert params.env["KG_COMMAND_SHELL"] == "/bin/bash"
     assert params.env["KG_COMMAND_TIMEOUT"] == "17"
+    assert params.env["KG_COMMAND_MAX_TIMEOUT"] == "900"
     assert params.env["KG_OUTPUT_MAX_BYTES"] == "12345"
     assert params.env["KG_PRIVILEGED_HELPER"].endswith("/execctl")
 
@@ -41,6 +47,23 @@ def test_其他MCP服务器不重复sudo():
         "sysinfo", "kylinguard.plugins.sysinfo", exec_user="kylinguard-exec")
     assert params.command == sys.executable
     assert params.args == ["-m", "kylinguard.plugins.sysinfo"]
+
+
+def test_通用终端保留用户工具链环境但不继承控制面(monkeypatch):
+    monkeypatch.setenv("KG_LLM_API_KEY", "control-secret")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/ssh-agent.sock")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.setenv("VIRTUAL_ENV", "/srv/project/.venv")
+
+    params = server_parameters(
+        "run_command", "kylinguard.plugins.run_command",
+        workspace_root="/srv/project",
+    )
+
+    assert "KG_LLM_API_KEY" not in params.env
+    assert params.env["SSH_AUTH_SOCK"] == "/tmp/ssh-agent.sock"
+    assert params.env["HTTPS_PROXY"] == "http://proxy.example"
+    assert params.env["VIRTUAL_ENV"] == "/srv/project/.venv"
 
 
 def test_工具参数schema紧凑呈现完整契约():
@@ -155,9 +178,28 @@ async def test_启动_列举_调用_关闭(tmp_path):
                            {"sort_by": "invalid", "limit": 3})
         with pytest.raises(ToolCallError, match="不在白名单"):
             await mgr.call("disk", "clean_file", {"path": "/etc/passwd"})
-        with pytest.raises(ToolCallError, match="exit_code=127"):
-            await mgr.call("run_command", "run_command",
-                           {"command": "kylinguard-no-such-command-xyz"})
+        failed = await mgr.call(
+            "run_command", "run_command",
+            {"command": "kylinguard-no-such-command-xyz"},
+        )
+        failed_payload = json.loads(failed)
+        assert failed_payload["exit_code"] == 127
+        assert failed_payload["timed_out"] is False
+        if os.name == "posix":
+            # 子命令 stdin 必须与 MCP stdio 隔离；cat 应立即读到 EOF，且不能
+            # 吞掉下一条 JSON-RPC 工具调用。
+            cat_result = await mgr.call(
+                "run_command", "run_command",
+                {"command": "cat", "cwd": str(tmp_path), "timeout": 2},
+            )
+            cat_payload = json.loads(cat_result)
+            assert cat_payload["exit_code"] == 0
+            assert cat_payload["stdout"] == ""
+            followup = await mgr.call(
+                "run_command", "run_command",
+                {"command": "printf ok", "cwd": str(tmp_path)},
+            )
+            assert json.loads(followup)["stdout"] == "ok"
         with pytest.raises(ToolCallError):
             await mgr.call("services", "service_status",
                            {"name": "kylinguard-no-such.service"})

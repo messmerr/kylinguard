@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shlex
 import signal
 import sys
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import kylinguard.executor as executor
-from kylinguard.executor import run_command
+from kylinguard.executor import run_command, run_shell
 
 PY = sys.executable
 
@@ -74,6 +75,68 @@ async def test_正常执行捕获stdout():
     assert r.exit_code == 0
     assert "麒盾" in r.stdout
     assert r.timed_out is False
+
+
+async def test_所有子进程stdin固定为DEVNULL(monkeypatch):
+    captured = []
+    original = executor.asyncio.create_subprocess_exec
+
+    async def capture(*args, **kwargs):
+        captured.append(kwargs)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(executor.asyncio, "create_subprocess_exec", capture)
+    result = await run_command([PY, "-c", "print('ok')"])
+
+    assert result.exit_code == 0
+    assert captured[0]["stdin"] == asyncio.subprocess.DEVNULL
+
+
+@pytest.mark.skipif(os.name != "posix", reason="完整 shell 能力仅在 Linux/WSL 提供")
+async def test_shell支持管道重定向变量和cd串联(tmp_path):
+    target = tmp_path / "shell-result.txt"
+    command = (
+        f"cd {shlex.quote(str(tmp_path))} && "
+        "VALUE='hello world'; export VALUE; "
+        "printf '%s\\n' \"$VALUE\" | tr '[:lower:]' '[:upper:]' "
+        "> shell-result.txt; printf '%s' \"$PWD:$VALUE\""
+    )
+
+    result = await run_shell(command, shell="/bin/bash", cwd="/")
+
+    assert result.exit_code == 0
+    assert result.stdout == f"{tmp_path}:hello world"
+    assert target.read_text(encoding="utf-8") == "HELLO WORLD\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="完整 shell 能力仅在 Linux/WSL 提供")
+async def test_shell使用显式cwd(tmp_path):
+    result = await run_shell("pwd", shell="/bin/bash", cwd=str(tmp_path))
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == str(tmp_path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="完整 shell 能力仅在 Linux/WSL 提供")
+async def test_shell的stdin与MCP输入隔离():
+    result = await run_shell("cat", shell="/bin/bash", timeout=2)
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="完整 shell 能力仅在 Linux/WSL 提供")
+async def test_shell超时保留已产生的stdout和stderr():
+    result = await run_shell(
+        "printf before; printf warning >&2; sleep 30",
+        shell="/bin/bash",
+        timeout=1,
+    )
+
+    assert result.timed_out is True
+    assert result.stdout == "before"
+    assert "warning" in result.stderr
+    assert "执行超时" in result.stderr
 
 
 async def test_非零退出码与stderr():
@@ -148,6 +211,43 @@ async def test_执行命令不继承控制面秘密(monkeypatch):
     r = await run_command([PY, "-c", code])
     assert r.exit_code == 0
     assert r.stdout.strip() == "None|None|None|None|None"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="完整 shell 能力仅在 Linux/WSL 提供")
+async def test_通用shell继承开发环境但不继承KylinGuard控制面(monkeypatch):
+    monkeypatch.setenv("KG_LLM_API_KEY", "llm-secret")
+    monkeypatch.setenv("KG_ADMIN_PASSWORD", "admin-secret")
+    monkeypatch.setenv("VIRTUAL_ENV", "/srv/project/.venv")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+
+    result = await run_shell(
+        "printf '%s|%s|%s|%s|%s' "
+        '"${KG_LLM_API_KEY-unset}" "${KG_ADMIN_PASSWORD-unset}" '
+        '"$VIRTUAL_ENV" "$SSH_AUTH_SOCK" "$HTTPS_PROXY"',
+        shell="/bin/bash",
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "unset|unset|/srv/project/.venv|/tmp/agent.sock|http://proxy.example"
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="固定系统 PATH 仅用于 Linux/WSL")
+async def test_结构化执行不受用户PATH中的同名程序劫持(tmp_path, monkeypatch):
+    executable = tmp_path / "kg-path-probe"
+    executable.write_text("#!/bin/sh\nprintf EVIL\n", encoding="utf-8")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+
+    restricted = await run_command(["kg-path-probe"])
+    agent = await run_command(["kg-path-probe"], agent_environment=True)
+
+    assert restricted.exit_code == 127
+    assert "EVIL" not in restricted.stdout
+    assert agent.exit_code == 0
+    assert agent.stdout == "EVIL"
 
 
 async def test_取消会终止并回收子进程(monkeypatch):

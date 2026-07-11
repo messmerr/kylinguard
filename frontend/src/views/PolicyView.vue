@@ -30,7 +30,7 @@
             class="mode-card"
             :class="[`is-${mode.tone}`, { active: permissionMode === mode.value }]"
             :disabled="permissionChanging || (mode.value === 'full_access'
-              && (!activeId || !permissionContext.fullAccessAvailable))"
+              && !permissionContext.fullAccessAvailable)"
             @click="choosePermissionMode(mode.value)"
           >
             <span class="mode-card-head">
@@ -38,18 +38,30 @@
               <strong>{{ mode.label }}</strong>
               <KgIcon v-if="permissionMode === mode.value" name="check" :size="14" class="mode-selected" />
             </span>
-            <span>{{ mode.value === 'full_access' && !activeId
-              ? '发送第一条消息后可开启'
-              : mode.value === 'full_access' && !permissionContext.fullAccessAvailable
+            <span>{{ mode.value === 'full_access' && !permissionContext.fullAccessAvailable
               ? (permissionContext.fullAccessUnavailableReason || '服务端未开放')
               : mode.short }}</span>
           </button>
         </div>
 
         <div class="effective-access" :class="{ danger: fullAccessActive }">
-          <div>
-            <span>当前执行身份</span>
-            <code>{{ permissionContext.executorIdentity }}</code>
+          <div class="execution-facts">
+            <div>
+              <span>{{ executionIdentitySourceLabel() }}</span>
+              <code>{{ permissionContext.executorIdentity }}</code>
+            </div>
+            <div>
+              <span>Agent 工作目录</span>
+              <code>{{ permissionContext.workspaceRoot || '由服务器配置' }}</code>
+            </div>
+            <div v-if="fullAccessActive">
+              <span>完整 Shell</span>
+              <code>{{ permissionContext.commandShell }}</code>
+            </div>
+            <div v-if="fullAccessActive">
+              <span>执行账户 UID</span>
+              <code>{{ permissionContext.executionAccountSeparated ? '与后端不同' : '与后端相同' }}</code>
+            </div>
           </div>
           <p>{{ permissionModeMeta.description }}</p>
           <el-button
@@ -61,13 +73,20 @@
             @click="choosePermissionMode('ask')"
           >收回完全访问</el-button>
         </div>
+        <div v-if="permissionContext.grantsRoot" class="root-access-warning" role="alert">
+          <KgIcon name="warning" :size="17" />
+          <div>
+            <strong>该执行身份拥有 root 权限</strong>
+            <span>开启完全访问后，Agent 可在不逐项确认的情况下以 root 执行完整 Shell、文件、网络和进程操作。</span>
+          </div>
+        </div>
       </section>
 
       <section class="policy-section grants-section">
         <div class="section-head">
           <div>
             <h2 class="kg-section-title">可信目录与有效授权</h2>
-            <p>这里填写的是服务器路径。可信目录内可创建和修改文件，删除操作仍会询问。</p>
+            <p>这里填写服务器路径。结构化文件工具可直接创建和修改；删除与终端命令仍会询问。</p>
           </div>
           <span class="section-count">{{ trustedRoots.length }} 个目录 · {{ activePermissionGrants.length }} 条授权</span>
         </div>
@@ -138,7 +157,7 @@
         <div class="section-head">
           <div>
             <h2 class="kg-section-title">自定义策略</h2>
-            <p>黑名单和保护路径会收紧限制；可信命令仍会经过权限和风险复核。</p>
+            <p>命令正则和保护路径会提升确认强度；完全访问可覆盖这些风险策略。</p>
           </div>
           <span class="section-count">{{ custom.length }} 条</span>
         </div>
@@ -170,7 +189,7 @@
         <div v-else class="kg-empty policy-empty">
           <KgIcon name="shield" :size="24" />
           <strong>还没有自定义策略</strong>
-          <span>需要额外限制命令或路径时，可以在这里添加。</span>
+          <span>需要让某类命令或路径获得更醒目的风险确认时，可以在这里添加。</span>
           <el-button @click="openAddDialog">添加策略</el-button>
         </div>
       </section>
@@ -182,7 +201,7 @@
               <h2 class="kg-section-title">内置策略</h2>
               <span class="readonly-mark"><KgIcon name="lock" :size="12" />只读</span>
             </div>
-            <p>这些规则随系统提供，在此页面中不可编辑。</p>
+            <p>这些规则用于风险分类与权限决策，不是 Agent 能力清单。</p>
           </div>
         </div>
 
@@ -191,10 +210,11 @@
             <template #title>
               <div class="baseline-title">
                 <KgIcon name="warning" :size="15" />
-                <span>危险命令黑名单</span>
+                <span>高风险命令模式</span>
                 <span class="baseline-count">{{ builtin.blacklist.length }} 条</span>
               </div>
             </template>
+            <p class="baseline-note">命中后标记为高风险并要求显式授权；完全访问模式下不会仅因类别而禁用能力。</p>
             <div class="rule-list">
               <div v-for="([pattern, label]) in builtin.blacklist" :key="pattern" class="rule-row">
                 <code>{{ pattern }}</code>
@@ -211,7 +231,7 @@
                 <span class="baseline-count">{{ builtin.privilege_escalators.length }} 个</span>
               </div>
             </template>
-            <p class="baseline-note">以下执行器会被直接拒绝。</p>
+            <p class="baseline-note">以下执行器会提升风险并进入权限判断，不会仅因提权或启动子 Shell 而直接拒绝。</p>
             <code class="code-line">{{ builtin.privilege_escalators.join('  ') }}</code>
           </el-collapse-item>
 
@@ -223,7 +243,7 @@
                 <span class="baseline-count">{{ builtin.protected_prefixes.length }} 个</span>
               </div>
             </template>
-            <p class="baseline-note">对这些路径的写操作会被拒绝。</p>
+            <p class="baseline-note">普通模式会拦截或复核显式控制面路径；管理员复验后的完全访问可覆盖产品层路径限制。不同 UID 只说明执行账户分离，是否真正隔离仍取决于文件权限与 ACL。</p>
             <code class="code-line">{{ builtin.protected_prefixes.join('  ') }}</code>
           </el-collapse-item>
 
@@ -250,12 +270,12 @@
             <template #title>
               <div class="baseline-title">
                 <KgIcon name="terminal" :size="15" />
-                <span>Shell 元字符与 sudoers</span>
+                <span>完整 Shell 语法与执行身份</span>
               </div>
             </template>
             <div class="baseline-copy">
-              <p>元字符模式 <code>{{ builtin.metachars }}</code>：出现即拒绝。</p>
-              <p>sudoers 精确白名单由部署脚本写入 <code>/etc/sudoers.d/kylinguard</code>，此处不可编辑。</p>
+              <p>元字符模式 <code>{{ builtin.metachars }}</code> 是完整 Shell 风险信号，会进入风险与权限判断，不代表出现即拒绝。</p>
+              <p>配置专用执行账户时，sudoers 可由部署脚本写入 <code>/etc/sudoers.d/kylinguard</code>；留空则使用页面显示的后端当前 OS 身份。</p>
             </div>
           </el-collapse-item>
         </el-collapse>
@@ -271,7 +291,7 @@
       <el-form label-position="top" @submit.prevent="add">
         <el-form-item label="策略类型">
           <el-select v-model="form.kind" style="width: 100%">
-            <el-option value="blacklist" label="黑名单（正则）" />
+            <el-option value="blacklist" label="命令风险规则（正则）" />
               <el-option value="readonly" label="可信命令（仍需复核）" />
             <el-option value="protected" label="保护路径（前缀）" />
           </el-select>
@@ -305,12 +325,13 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useAuth.js'
-import { activeId } from '../composables/useChat.js'
+import { activeId, setChatPermissionMode } from '../composables/useChat.js'
 import {
   PERMISSION_MODES,
   addTrustedRoot,
   fullAccessActive,
   fullAccessDurationMinutes,
+  executionIdentitySourceLabel,
   loadPermissionContext,
   permissionContext,
   permissionGrants,
@@ -318,7 +339,6 @@ import {
   permissionModeMeta,
   revokePermissionGrant,
   revokeTrustedRoot,
-  setPermissionMode,
   trustedRoots,
 } from '../composables/usePermissions.js'
 
@@ -354,7 +374,7 @@ const trustedRootExpiryText = computed(() => {
 })
 
 const kindLabel = (kind) => ({
-  blacklist: '黑名单', readonly: '可信命令', protected: '保护路径',
+  blacklist: '命令风险', readonly: '可信命令', protected: '保护路径',
 }[kind] || kind)
 
 const patternPlaceholder = computed(() => ({
@@ -364,9 +384,9 @@ const patternPlaceholder = computed(() => ({
 }[form.kind]))
 
 const kindHelp = computed(() => ({
-  blacklist: '输入用于匹配危险命令的正则表达式。',
+  blacklist: '匹配后要求显式权限；它不是完整 Shell 的不可绕过沙箱。',
   readonly: '允许该命令进入后续权限和风险复核，不会自动执行。',
-  protected: '输入禁止写入的路径前缀。',
+  protected: '结构化文件写入或命令路径命中后升级为高风险确认；完全访问可覆盖。',
 }[form.kind]))
 
 const ACTION_LABELS = {
@@ -386,8 +406,14 @@ function lifetimeLabel(lifetime) {
 }
 
 async function requestFullAccessPassword() {
+  const identitySource = executionIdentitySourceLabel()
+  const separationNotice = permissionContext.executionAccountSeparated
+    ? '执行账户 UID 与后端 UID 不同'
+    : '执行账户与后端使用相同 UID；工具子进程仍不会继承 LLM 密钥和管理员口令'
+  const rootNotice = permissionContext.grantsRoot
+    ? '警告：该执行身份拥有 root 权限。' : ''
   const { value } = await ElMessageBox.prompt(
-    `完全访问会跳过逐项确认，并以“${permissionContext.executorIdentity}”的系统权限运行。硬红线与独立安全复核仍然生效，所有操作仍会记录。`,
+    `Agent 将获得完整 shell、文件、网络和进程能力，不再逐项确认，并以“${permissionContext.executorIdentity}”（${identitySource}）运行。${separationNotice}。${rootNotice}管理员复验、限时自动收回与审计仍然生效。`,
     '开启完全访问',
     {
       inputType: 'password',
@@ -402,10 +428,6 @@ async function requestFullAccessPassword() {
 
 async function choosePermissionMode(mode) {
   if (permissionChanging.value || mode === permissionMode.value) return
-  if (mode === 'full_access' && !activeId.value) {
-    ElMessage.info('发送第一条消息创建任务后，才能开启完全访问')
-    return
-  }
   if (mode === 'full_access' && !permissionContext.fullAccessAvailable) {
     ElMessage.info(permissionContext.fullAccessUnavailableReason || '服务端未开放完全访问')
     return
@@ -417,7 +439,7 @@ async function choosePermissionMode(mode) {
   permissionChanging.value = true
   try {
     const password = mode === 'full_access' ? await requestFullAccessPassword() : ''
-    const result = await setPermissionMode(mode, mode === 'full_access'
+    const result = await setChatPermissionMode(mode, mode === 'full_access'
       ? { password, durationMinutes: fullAccessDurationMinutes.value }
       : mode === 'trusted_workspace'
         ? {
@@ -428,7 +450,7 @@ async function choosePermissionMode(mode) {
     if (!result.supported && activeId.value) {
       ElMessage.warning('当前后端尚未保存该设置')
     } else {
-      ElMessage.success(mode === 'full_access' ? '完全访问已开启' : '权限已更新')
+      ElMessage.success(mode === 'full_access' ? '完整执行能力已开启' : '权限已更新')
     }
   } catch (reason) {
     if (reason === 'cancel' || reason === 'close' || reason?.action === 'cancel') return
@@ -626,10 +648,25 @@ onMounted(() => {
   background: var(--kg-bg-code);
 }
 .effective-access.danger { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); }
-.effective-access > div { display: grid; flex: none; gap: 2px; }
-.effective-access > div span { color: var(--kg-text-tertiary); font-size: 10px; }
+.execution-facts { display: flex; flex: none; gap: var(--kg-space-4); }
+.execution-facts > div { display: grid; min-width: 0; gap: 2px; }
+.execution-facts span { color: var(--kg-text-tertiary); font-size: 10px; }
 .effective-access code { color: var(--kg-text-primary); font: 11px/1.5 var(--kg-font-mono); }
 .effective-access p { min-width: 0; flex: 1; margin: 0; color: var(--kg-text-secondary); font-size: 11px; line-height: 1.5; }
+.root-access-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: var(--kg-space-2);
+  padding: 10px 12px;
+  border: 1px solid var(--kg-danger-border);
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-danger-soft);
+  color: var(--kg-danger);
+}
+.root-access-warning > div { display: grid; gap: 2px; }
+.root-access-warning strong { font-size: 12px; font-weight: 650; }
+.root-access-warning span { color: var(--kg-text-secondary); font-size: 11px; line-height: 1.5; }
 
 .root-entry { display: grid; grid-template-columns: minmax(0, 1fr) 118px auto; gap: var(--kg-space-2); }
 .server-path-note {
@@ -839,6 +876,8 @@ onMounted(() => {
 
 @media (max-width: 1080px) {
   .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .effective-access { align-items: flex-start; flex-wrap: wrap; }
+  .execution-facts { width: 100%; flex-wrap: wrap; }
   .root-entry { grid-template-columns: minmax(0, 1fr) 118px; }
   .root-entry > :deep(.el-button) { grid-column: 1 / -1; justify-self: end; }
   .rule-row { grid-template-columns: minmax(150px, .9fr) minmax(190px, 1.2fr); }

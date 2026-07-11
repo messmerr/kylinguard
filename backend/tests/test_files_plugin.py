@@ -503,7 +503,7 @@ def test_final_symlink_is_rejected_for_move_and_delete(tmp_path: Path):
 
 def test_subprocess_environment_uses_allowlist():
     source = {
-        "PATH": "/usr/bin",
+        "PATH": "/tmp/evil:/home/runner/.local/bin:/usr/bin",
         "HOME": "/home/runner",
         "LANG": "zh_CN.UTF-8",
         "TMPDIR": "/tmp",
@@ -515,7 +515,8 @@ def test_subprocess_environment_uses_allowlist():
         "AWS_SECRET_ACCESS_KEY": "cloud-secret",
     }
     env = safe_subprocess_env(source)
-    assert env["PATH"] == "/usr/bin"
+    assert env["PATH"] == "/usr/sbin:/usr/bin:/sbin:/bin"
+    assert "/tmp/evil" not in env["PATH"]
     assert env["HOME"] == "/home/runner"
     assert env["LANG"] == "zh_CN.UTF-8"
     assert env["TMPDIR"] == "/tmp"

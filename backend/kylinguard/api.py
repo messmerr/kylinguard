@@ -4,10 +4,13 @@
 管理员身份写入审计链。SSE 断开时任务安全取消并补写可回放终态。
 """
 import asyncio
+import getpass
 import json
 import logging
 import os
 import pwd
+import shutil
+import subprocess
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -19,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from kylinguard.audit import AuditError, AuditLog
+from kylinguard.authorization import execution_profile_fingerprint
 from kylinguard.auth import AuthStore, TokenManager
 from kylinguard.config import Settings, get_settings
 from kylinguard.llm import LLMError, build_clients, internal_error
@@ -46,6 +50,7 @@ from kylinguard.alert_pusher import push_channel
 from kylinguard.sessions import SessionStore
 from kylinguard.snapshot import SnapshotCache
 from kylinguard.storage_security import secure_database_path
+from kylinguard.subprocess_env import safe_subprocess_env
 
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 logger = logging.getLogger(__name__)
@@ -61,6 +66,7 @@ class ChatRequest(BaseModel):
     permission_mode: PermissionMode | None = None
     trusted_roots: list[str] = Field(default_factory=list, max_length=32)
     permission_ttl_seconds: int | None = Field(default=None, ge=1)
+    workspace_root: str = Field(default="", max_length=4096)
 
     @model_validator(mode="after")
     def validate_initial_permissions(self):
@@ -86,6 +92,26 @@ class ConfirmRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class SessionCreateRequest(BaseModel):
+    """在首条消息前原子创建完全访问草稿会话。"""
+
+    session_id: str = Field(
+        min_length=32,
+        max_length=32,
+        pattern=r"^[a-f0-9]{32}$",
+    )
+    mode: PermissionMode
+    ttl_seconds: int = Field(ge=1)
+    password: str = Field(min_length=1, max_length=1024)
+    workspace_root: str = Field(default="", max_length=4096)
+
+    @model_validator(mode="after")
+    def require_full_access(self):
+        if self.mode != PermissionMode.FULL_ACCESS:
+            raise ValueError("预创建会话接口仅接受 full_access 模式")
+        return self
 
 
 class PermissionUpdateRequest(BaseModel):
@@ -138,9 +164,55 @@ class AlertChannelRequest(BaseModel):
 def create_app(settings: Settings | None = None,
                *, with_tools: bool = True) -> FastAPI:
     settings = settings or get_settings()
+    if settings.admin_password.strip() in {
+        "请设置强密码", "change-me", "changeme", "password",
+    }:
+        raise ValueError("KG_ADMIN_PASSWORD 仍是公开示例值，请设置真实管理员密码。")
     secure_database_path(settings.db_path)
     audit = AuditLog(settings.db_path)
     sessions = SessionStore(settings.db_path)
+    current_execution_profile = execution_profile_fingerprint(settings)
+    # FULL_ACCESS 从不跨后端进程重启继承。sudoers、附加组、capabilities 或
+    # 服务沙箱都可能在配置指纹未变化时扩大同一 UID 的权限；重启后重新复验
+    # 一次比尝试穷举所有 OS 授权状态更可靠。kill switch 使用更具体的原因。
+    for summary in sessions.list():
+        context = sessions.get_permissions(summary["id"])
+        if context is None or context.mode != PermissionMode.FULL_ACCESS:
+            continue
+        revoke_reason = (
+            "full_access_disabled"
+            if not settings.allow_full_access
+            else "service_restarted"
+        )
+        with audit.serialized():
+            with sessions.transaction() as connection:
+                fresh = sessions.get_permissions(summary["id"])
+                if fresh is None or fresh.mode != PermissionMode.FULL_ACCESS:
+                    continue
+                changed = sessions.set_permissions(
+                    summary["id"],
+                    mode=PermissionMode.ASK,
+                    trusted_roots=[],
+                    expires_at=None,
+                    expected_version=fresh.version,
+                    updated_by="(server policy)",
+                    execution_profile="",
+                    commit=False,
+                )
+                audit.append(
+                    summary["id"],
+                    "permission_changed",
+                    {
+                        "operator": "(server policy)",
+                        "source": "startup",
+                        "from_mode": PermissionMode.FULL_ACCESS.value,
+                        "to_mode": changed.mode.value,
+                        "reason": revoke_reason,
+                    },
+                    connection=connection,
+                    commit=False,
+                    lock_held=True,
+                )
     auth_store = AuthStore(settings.db_path)
     auth_store.ensure_admin(settings.admin_user, settings.admin_password)
     tokens = TokenManager(settings.token_ttl)
@@ -225,30 +297,134 @@ def create_app(settings: Settings | None = None,
                 )
                 return result
 
+    def execution_identity() -> tuple[str, str]:
+        """返回工具实际使用的 OS 身份及其来源，供权限界面明确展示。"""
+        if settings.exec_user:
+            return settings.exec_user, "configured_exec_user"
+        try:
+            username = pwd.getpwuid(os.geteuid()).pw_name
+        except (KeyError, OSError):
+            username = getpass.getuser()
+        return username or "unknown", "backend_process"
+
+    def execution_account_separated() -> bool:
+        """只陈述执行账户是否为不同 UID，不把它误称为 ACL 隔离证明。"""
+        if not settings.exec_user:
+            return False
+        try:
+            uid = pwd.getpwnam(settings.exec_user).pw_uid
+            return uid != os.geteuid()
+        except KeyError:
+            return False
+
+    def execution_grants_root() -> bool:
+        if settings.exec_user:
+            try:
+                return pwd.getpwnam(settings.exec_user).pw_uid == 0
+            except KeyError:
+                return False
+        return os.geteuid() == 0
+
     def full_access_status() -> tuple[bool, str]:
         if not settings.allow_full_access:
-            return False, "服务端未启用完全访问模式。"
-        if not settings.exec_user:
-            return False, "完全访问需要配置独立执行账号。"
-        try:
-            account = pwd.getpwnam(settings.exec_user)
-        except KeyError:
-            return False, "配置的独立执行账号不存在。"
-        if account.pw_uid == 0 or account.pw_uid == os.geteuid():
-            return False, "完全访问的执行账号必须是不同于后端服务的非 root 账号。"
+            return False, "服务端已通过 KG_ALLOW_FULL_ACCESS=false 关闭完全访问模式。"
+        workspace = Path(settings.workspace_root).expanduser()
+        if not workspace.is_absolute() or not workspace.is_dir():
+            return False, f"Agent 工作目录不可用：{settings.workspace_root}"
+        shell = settings.command_shell
+        shell_path = shell if os.path.isabs(shell) else shutil.which(shell)
+        if (not shell_path or not Path(shell_path).is_file()
+                or not os.access(shell_path, os.X_OK)):
+            return False, f"配置的命令 Shell 不可执行：{shell}"
+        if settings.exec_user:
+            try:
+                pwd.getpwnam(settings.exec_user)
+            except KeyError:
+                return False, f"配置的执行账户不存在：{settings.exec_user}"
+            sudo = shutil.which("sudo")
+            if sudo is None:
+                return False, "配置独立执行账户需要系统安装 sudo。"
+            try:
+                readiness = subprocess.run(
+                    [
+                        sudo, "-n", "-H", "-u", settings.exec_user, "--",
+                        str(shell_path), "-lc", 'cd -- "$1"',
+                        "kylinguard-readiness", str(workspace.resolve()),
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=safe_subprocess_env(),
+                    timeout=3,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return False, "无法验证独立执行账户的非交互 sudo 与工作目录访问。"
+            if readiness.returncode != 0:
+                return False, (
+                    "独立执行账户无法通过 sudo -n 启动配置的 Shell，"
+                    "或无权进入 Agent 工作目录。"
+                )
         return True, ""
 
-    def permission_payload(context) -> dict:
+    def permission_capabilities_payload() -> dict:
+        """返回与具体会话无关的权限能力事实，供新任务创建前展示。"""
         enabled, reason = full_access_status()
+        identity, identity_source = execution_identity()
         return {
-            **context.model_dump(mode="json"),
             "full_access_available": enabled,
             "full_access_unavailable_reason": reason,
             "full_access_max_ttl": settings.full_access_max_ttl,
+            "permission_default_ttl": settings.permission_default_ttl,
             "permission_max_ttl": settings.permission_max_ttl,
-            "execution_identity": settings.exec_user or "未配置独立执行账号",
-            "grants_root": False,
+            "execution_identity": identity,
+            "execution_identity_source": identity_source,
+            "workspace_root": settings.workspace_root,
+            "command_shell": settings.command_shell,
+            "command_max_timeout": settings.command_max_timeout,
+            "full_access_capabilities": [
+                "shell", "files", "network", "processes",
+            ],
+            "execution_account_separated": execution_account_separated(),
+            # 兼容旧前端；不同 UID 并不能证明 DrvFS/组权限/ACL 已隔离控制面。
+            "control_plane_isolated": False,
+            "grants_root": execution_grants_root(),
         }
+
+    def resolve_session_workspace(value: str = "") -> str:
+        """校验后端/WSL 可见的会话工作目录；它是上下文而非沙箱边界。"""
+        raw = (value or settings.workspace_root).strip()
+        if not raw or "\x00" in raw:
+            raise SessionPermissionError(
+                "invalid_workspace_root", "工作目录必须是非空绝对路径。"
+            )
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            raise SessionPermissionError(
+                "invalid_workspace_root", "工作目录必须是服务器绝对路径。"
+            )
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (FileNotFoundError, OSError, RuntimeError) as exc:
+            raise SessionPermissionError(
+                "workspace_root_unavailable", f"工作目录不存在或无法访问：{raw}"
+            ) from exc
+        if not resolved.is_dir():
+            raise SessionPermissionError(
+                "workspace_root_unavailable", f"工作目录不是目录：{raw}"
+            )
+        return str(resolved)
+
+    def permission_payload(context) -> dict:
+        payload = {
+            **context.model_dump(mode="json"),
+            **permission_capabilities_payload(),
+        }
+        payload["workspace_root"] = (
+            app.state.sessions.get_workspace_root(context.session_id)
+            or settings.workspace_root
+        )
+        return payload
 
     def permission_expiry(mode: PermissionMode, ttl_seconds: int | None) -> float | None:
         if mode not in {
@@ -295,10 +471,13 @@ def create_app(settings: Settings | None = None,
             session_id = uuid.uuid4().hex
             initial_mode = req.permission_mode or PermissionMode.ASK
             try:
+                workspace_root = resolve_session_workspace(req.workspace_root)
                 initial_expiry = permission_expiry(
                     initial_mode, req.permission_ttl_seconds)
                 if req.permission_mode is None:
-                    app.state.sessions.create(session_id, req.message)
+                    app.state.sessions.create(
+                        session_id, req.message, workspace_root=workspace_root,
+                    )
                 else:
                     def create_session_with_permissions():
                         app.state.sessions.create(
@@ -308,6 +487,7 @@ def create_app(settings: Settings | None = None,
                             trusted_roots=req.trusted_roots,
                             permission_expires_at=initial_expiry,
                             updated_by=user,
+                            workspace_root=workspace_root,
                             commit=False,
                         )
                         context = app.state.sessions.get_permissions(session_id)
@@ -333,7 +513,8 @@ def create_app(settings: Settings | None = None,
             if not app.state.sessions.exists(session_id):
                 raise HTTPException(404, "会话不存在")
             if (req.permission_mode is not None or req.trusted_roots
-                    or req.permission_ttl_seconds is not None):
+                    or req.permission_ttl_seconds is not None
+                    or req.workspace_root):
                 raise HTTPException(
                     400,
                     detail={
@@ -341,7 +522,7 @@ def create_app(settings: Settings | None = None,
                         "message": "已有会话请通过权限接口更新权限。",
                     },
                 )
-            app.state.sessions.touch(session_id)
+            app.state.sessions.touch(session_id, first_message=req.message)
         queue: asyncio.Queue = asyncio.Queue()
         last_progress: dict = {}
         pending_confirm: dict | None = None
@@ -487,9 +668,72 @@ def create_app(settings: Settings | None = None,
         return {"ok": app.state.confirmations.resolve(
             req.confirm_id, req.approved, operator=user)}
 
+    @app.post("/api/sessions", status_code=201)
+    async def create_draft_session(
+        req: SessionCreateRequest,
+        user: str = Depends(require_auth),
+    ):
+        """经密码复验后，原子创建首条消息前的完全访问会话。"""
+        available, reason = full_access_status()
+        if not available:
+            raise HTTPException(403, detail={
+                "code": "full_access_disabled", "message": reason,
+            })
+        if not app.state.auth.verify(user, req.password):
+            raise HTTPException(403, detail={
+                "code": "full_access_reauthentication_failed",
+                "message": "管理员密码复验失败，完全访问会话未创建。",
+            })
+        try:
+            workspace_root = resolve_session_workspace(req.workspace_root)
+            expiry = permission_expiry(req.mode, req.ttl_seconds)
+
+            def create_with_full_access():
+                app.state.sessions.create(
+                    req.session_id,
+                    "新任务",
+                    permission_mode=PermissionMode.FULL_ACCESS,
+                    permission_expires_at=expiry,
+                    permission_execution_profile=current_execution_profile,
+                    updated_by=user,
+                    draft=True,
+                    workspace_root=workspace_root,
+                    strict=True,
+                    commit=False,
+                )
+                context = app.state.sessions.get_permissions(req.session_id)
+                assert context is not None
+                return context, {
+                    "operator": user,
+                    "source": "pre_message",
+                    "from_mode": None,
+                    "to_mode": PermissionMode.FULL_ACCESS.value,
+                    "trusted_roots": [],
+                    "expires_at": context.expires_at,
+                    "version": context.version,
+                    "draft": True,
+                }
+
+            context = audited_permission_mutation(
+                req.session_id,
+                "permission_changed",
+                create_with_full_access,
+            )
+        except SessionPermissionError as exc:
+            status = 409 if exc.code == "session_already_exists" else 400
+            raise permission_http_error(exc, status) from exc
+        return {
+            "session_id": req.session_id,
+            "draft": True,
+            "permission": permission_payload(context),
+        }
+
     @app.get("/api/sessions")
     async def list_sessions(_user: str = Depends(require_auth)):
-        return {"sessions": app.state.sessions.list()}
+        return {
+            "sessions": app.state.sessions.list(),
+            "permission_capabilities": permission_capabilities_payload(),
+        }
 
     @app.get("/api/sessions/{session_id}/permissions")
     async def get_session_permissions(
@@ -512,10 +756,10 @@ def create_app(settings: Settings | None = None,
         if req.mode == PermissionMode.FULL_ACCESS:
             available, reason = full_access_status()
             if not available:
-                code = ("full_access_disabled" if not settings.allow_full_access
-                        else "full_access_requires_isolated_executor")
                 raise HTTPException(
-                    403, detail={"code": code, "message": reason})
+                    403, detail={
+                        "code": "full_access_disabled", "message": reason,
+                    })
             if not req.password or not app.state.auth.verify(user, req.password):
                 app.state.audit.append(session_id, "permission_reauthentication_failed", {
                     "operator": user,
@@ -536,6 +780,10 @@ def create_app(settings: Settings | None = None,
                     expires_at=expiry,
                     expected_version=req.version,
                     updated_by=user,
+                    execution_profile=(
+                        current_execution_profile
+                        if req.mode == PermissionMode.FULL_ACCESS else ""
+                    ),
                     commit=False,
                 )
                 return context, {
@@ -938,18 +1186,54 @@ def create_app(settings: Settings | None = None,
 
     @app.post("/api/policies")
     async def add_policy(req: PolicyRequest,
-                         _user: str = Depends(require_auth)):
+                         user: str = Depends(require_auth)):
         try:
-            pid = app.state.policies.add(req.kind, req.pattern, req.note)
+            with app.state.audit.serialized():
+                with app.state.policies.transaction() as connection:
+                    pid = app.state.policies.add(
+                        req.kind, req.pattern, req.note, commit=False,
+                    )
+                    app.state.audit.append(
+                        "__policies__",
+                        "policy_added",
+                        {
+                            "operator": user,
+                            "policy_id": pid,
+                            "kind": req.kind,
+                            "pattern": req.pattern,
+                            "note": req.note,
+                        },
+                        connection=connection,
+                        commit=False,
+                        lock_held=True,
+                    )
         except ValueError as e:
             raise HTTPException(400, str(e))
         return {"id": pid}
 
     @app.delete("/api/policies/{policy_id}")
     async def delete_policy(policy_id: int,
-                            _user: str = Depends(require_auth)):
-        if not app.state.policies.remove(policy_id):
-            raise HTTPException(404, "策略不存在")
+                            user: str = Depends(require_auth)):
+        with app.state.audit.serialized():
+            with app.state.policies.transaction() as connection:
+                policy = app.state.policies.get(policy_id)
+                if policy is None:
+                    raise HTTPException(404, "策略不存在")
+                app.state.policies.remove(policy_id, commit=False)
+                app.state.audit.append(
+                    "__policies__",
+                    "policy_removed",
+                    {
+                        "operator": user,
+                        "policy_id": policy_id,
+                        "kind": policy["kind"],
+                        "pattern": policy["pattern"],
+                        "note": policy["note"],
+                    },
+                    connection=connection,
+                    commit=False,
+                    lock_held=True,
+                )
         return {"ok": True}
 
     if _FRONTEND_DIST.is_dir():

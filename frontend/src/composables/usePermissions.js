@@ -21,15 +21,15 @@ export const PERMISSION_MODES = Object.freeze([
   {
     value: 'trusted_workspace',
     label: '信任目录',
-    short: '指定目录内可直接读写',
-    description: '可信目录内可以创建和修改文件；删除和目录外操作仍会询问。',
+    short: '文件工具可直接写指定目录',
+    description: '结构化文件工具可在可信目录内直接创建和修改；删除、终端命令和目录外操作仍会询问。',
     tone: 'warning',
   },
   {
     value: 'full_access',
     label: '完全访问',
-    short: '不再逐项询问',
-    description: '通过硬红线与独立安全复核后，不再逐项询问；所有操作仍会写入审计记录。',
+    short: '完整能力，不逐项确认',
+    description: '可使用完整 shell、文件、网络和进程能力，不再逐项确认；仍受当前 OS 身份约束，工具子进程不会继承控制面密钥。',
     tone: 'danger',
   },
 ])
@@ -47,13 +47,22 @@ const DEFAULT_CONTEXT = Object.freeze({
   sessionId: '',
   mode: 'ask',
   version: 0,
-  executorIdentity: '未配置独立执行账号',
+  executorIdentity: '等待服务器返回',
+  executorIdentitySource: 'unknown',
+  workspaceRoot: '',
+  defaultWorkspaceRoot: '',
+  commandShell: '/bin/bash',
+  commandMaxTimeout: 900,
+  fullAccessCapabilities: ['shell', 'files', 'network', 'processes'],
+  executionAccountSeparated: false,
+  grantsRoot: false,
   expiresAt: null,
   trustedRoots: [],
   draftTtlSeconds: null,
   fullAccessAvailable: true,
   fullAccessUnavailableReason: '',
   fullAccessMaxTtl: 30 * 60,
+  permissionDefaultTtl: 30 * 60,
   permissionMaxTtl: 12 * 3600,
   synced: false,
 })
@@ -70,12 +79,27 @@ export const permissionModeMeta = computed(() => (
 ))
 export const fullAccessActive = computed(() => permissionContext.mode === 'full_access')
 export const fullAccessDurationMinutes = computed(() => Math.max(
-  1, Math.floor(permissionContext.fullAccessMaxTtl / 60),
+  1,
+  Math.floor(Math.min(
+    permissionContext.permissionDefaultTtl,
+    permissionContext.fullAccessMaxTtl,
+  ) / 60),
 ))
 // 可信目录只来自 SessionPermissionContext.trusted_roots。
 // PermissionGrant.resource 是一次/会话动作的匹配资源，即使长得像路径，
 // 也绝不能被提升为工作区根目录。
 export const trustedRoots = computed(() => [...permissionContext.trustedRoots])
+
+export function executionIdentitySourceLabel(
+  source = permissionContext.executorIdentitySource,
+) {
+  return {
+    backend_process: '后端当前 OS 身份',
+    configured_exec_user: '配置的 OS 执行身份',
+    legacy: '旧版 API（身份来源未说明）',
+    unknown: '身份来源未知',
+  }[source] || '服务端未识别的身份来源'
+}
 
 function normalizeMode(mode) {
   const normalized = MODE_ALIASES[mode] || mode
@@ -156,8 +180,31 @@ function removeGrantLocal(id) {
 function applyContext(raw = {}, { synced = true } = {}) {
   permissionContext.mode = normalizeMode(raw.mode || raw.permission_mode || permissionContext.mode)
   permissionContext.version = Number(raw.version ?? raw.context_version ?? permissionContext.version) || 0
-  permissionContext.executorIdentity = raw.executor_identity || raw.executor_user
-    || raw.execution_identity || raw.executor || permissionContext.executorIdentity
+  const rawIdentity = raw.executor_identity || raw.executor_user
+    || raw.execution_identity || raw.executor
+  const rawIdentitySource = raw.execution_identity_source || raw.executor_identity_source
+  if (rawIdentity) {
+    permissionContext.executorIdentity = rawIdentity
+    permissionContext.executorIdentitySource = rawIdentitySource || 'legacy'
+  } else if (rawIdentitySource) {
+    permissionContext.executorIdentitySource = rawIdentitySource
+  }
+  permissionContext.workspaceRoot = raw.workspace_root ?? permissionContext.workspaceRoot
+  permissionContext.commandShell = raw.command_shell ?? permissionContext.commandShell
+  permissionContext.commandMaxTimeout = Number(
+    raw.command_max_timeout ?? permissionContext.commandMaxTimeout,
+  ) || DEFAULT_CONTEXT.commandMaxTimeout
+  if (Array.isArray(raw.full_access_capabilities)) {
+    permissionContext.fullAccessCapabilities = [...raw.full_access_capabilities]
+  }
+  permissionContext.executionAccountSeparated = Boolean(
+    raw.execution_account_separated
+    ?? raw.control_plane_isolated
+    ?? permissionContext.executionAccountSeparated,
+  )
+  permissionContext.grantsRoot = Boolean(
+    raw.grants_root ?? permissionContext.grantsRoot,
+  )
   if (Object.hasOwn(raw, 'expires_at') || Object.hasOwn(raw, 'full_access_expires_at')) {
     permissionContext.expiresAt = normalizeTimestamp(
       raw.expires_at ?? raw.full_access_expires_at,
@@ -170,6 +217,9 @@ function applyContext(raw = {}, { synced = true } = {}) {
   permissionContext.fullAccessMaxTtl = Number(
     raw.full_access_max_ttl ?? permissionContext.fullAccessMaxTtl,
   ) || DEFAULT_CONTEXT.fullAccessMaxTtl
+  permissionContext.permissionDefaultTtl = Number(
+    raw.permission_default_ttl ?? permissionContext.permissionDefaultTtl,
+  ) || DEFAULT_CONTEXT.permissionDefaultTtl
   permissionContext.permissionMaxTtl = Number(
     raw.permission_max_ttl ?? permissionContext.permissionMaxTtl,
   ) || DEFAULT_CONTEXT.permissionMaxTtl
@@ -191,6 +241,44 @@ function applyContext(raw = {}, { synced = true } = {}) {
   } else if (permissionContext.mode !== 'trusted_workspace') {
     permissionContext.draftTtlSeconds = null
   }
+}
+
+export function applyPermissionCapabilities(raw = {}) {
+  if (!raw || typeof raw !== 'object') return
+  if (Object.hasOwn(raw, 'workspace_root') && raw.workspace_root) {
+    try {
+      const defaultRoot = normalizePath(raw.workspace_root)
+      permissionContext.defaultWorkspaceRoot = defaultRoot
+      if (!permissionContext.sessionId) permissionContext.workspaceRoot = defaultRoot
+    } catch {
+      // 能力元数据损坏时沿用上次有效目录；真正创建会话仍由后端校验。
+    }
+  }
+  const fullAccess = raw.full_access
+  const metadata = {}
+  const keys = [
+    'full_access_available', 'full_access_unavailable_reason',
+    'full_access_max_ttl', 'permission_default_ttl', 'permission_max_ttl',
+    'execution_identity', 'execution_identity_source', 'executor_identity',
+    'executor_identity_source', 'command_shell',
+    'command_max_timeout', 'full_access_capabilities',
+    'execution_account_separated', 'control_plane_isolated', 'grants_root',
+  ]
+  for (const key of keys) {
+    if (Object.hasOwn(raw, key)) metadata[key] = raw[key]
+  }
+  if (typeof fullAccess === 'boolean'
+      && !Object.hasOwn(metadata, 'full_access_available')) {
+    metadata.full_access_available = fullAccess
+  } else if (fullAccess && typeof fullAccess === 'object') {
+    metadata.full_access_available = fullAccess.available
+      ?? metadata.full_access_available
+    metadata.full_access_unavailable_reason = fullAccess.unavailable_reason
+      ?? fullAccess.reason ?? metadata.full_access_unavailable_reason
+    metadata.full_access_max_ttl = fullAccess.max_ttl
+      ?? metadata.full_access_max_ttl
+  }
+  applyContext(metadata, { synced: permissionContext.synced })
 }
 
 async function readJson(response, fallback = {}) {
@@ -218,14 +306,26 @@ export function beginNewPermissionSession() {
   permissionContext.expiresAt = null
   permissionContext.trustedRoots = []
   permissionContext.draftTtlSeconds = null
+  permissionContext.workspaceRoot = permissionContext.defaultWorkspaceRoot
   permissionContext.synced = false
   permissionError.value = ''
   // 授权属于会话；新任务从干净的 ask 模式开始。
   permissionGrants.value = []
 }
 
-export function bindPermissionSession(sessionId) {
+export function bindPermissionSession(sessionId, { workspaceRoot = '' } = {}) {
   permissionContext.sessionId = String(sessionId || '')
+  if (workspaceRoot) permissionContext.workspaceRoot = normalizePath(workspaceRoot)
+}
+
+export function setDraftWorkspaceRoot(path) {
+  if (permissionContext.sessionId) {
+    throw new Error('任务创建后工作目录不可更改；请新建任务后重新选择')
+  }
+  const normalized = normalizePath(path)
+  if (!normalized) throw new Error('请输入服务器绝对路径')
+  permissionContext.workspaceRoot = normalized
+  return permissionContext.workspaceRoot
 }
 
 export function permissionRequestPayload() {
@@ -236,6 +336,8 @@ export function permissionRequestPayload() {
     ...(permissionContext.mode === 'trusted_workspace'
       && permissionContext.draftTtlSeconds
       ? { permission_ttl_seconds: permissionContext.draftTtlSeconds } : {}),
+    ...(permissionContext.workspaceRoot
+      ? { workspace_root: permissionContext.workspaceRoot } : {}),
   }
 }
 
@@ -291,6 +393,59 @@ export async function loadPermissionContext(sessionId = permissionContext.sessio
     throw error
   } finally {
     permissionLoading.value = false
+  }
+}
+
+export async function createFullAccessDraftSession(sessionId, {
+  password = '', durationMinutes = 30, ttlSeconds = null,
+  workspaceRoot = permissionContext.workspaceRoot,
+} = {}) {
+  const requestedSessionId = String(sessionId || '')
+  if (!/^[a-f0-9]{32}$/.test(requestedSessionId)) {
+    throw new Error('无法生成安全的任务标识，请刷新页面后重试')
+  }
+  if (!permissionContext.fullAccessAvailable) {
+    throw new Error(permissionContext.fullAccessUnavailableReason || '当前服务未开放完全访问')
+  }
+  if (!password) throw new Error('开启完全访问需要重新验证密码')
+  const requestedTtl = ttlSeconds ?? durationMinutes * 60
+  const effectiveTtl = Math.max(
+    1, Math.min(requestedTtl, permissionContext.fullAccessMaxTtl),
+  )
+  const selectedWorkspaceRoot = normalizePath(
+    workspaceRoot || permissionContext.defaultWorkspaceRoot,
+  )
+  const response = await apiFetch('/api/sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: requestedSessionId,
+      mode: 'full_access',
+      ttl_seconds: effectiveTtl,
+      password,
+      ...(selectedWorkspaceRoot ? { workspace_root: selectedWorkspaceRoot } : {}),
+    }),
+  })
+  if (isCompatibilityMiss(response)) {
+    return { supported: false, reason: 'legacy_backend' }
+  }
+  const body = await readJson(response)
+  if (!response.ok) {
+    throw new Error(detailMessage(
+      body, `完全访问草稿创建失败（HTTP ${response.status}）`,
+    ))
+  }
+  const returnedSessionId = String(body.session_id || '')
+  const permission = body.permission || body.context
+  if (response.status !== 201 || returnedSessionId !== requestedSessionId
+      || body.draft !== true || !permission || typeof permission !== 'object') {
+    throw new Error('服务端返回的完全访问草稿不完整，未绑定该任务')
+  }
+  return {
+    supported: true,
+    sessionId: returnedSessionId,
+    permission,
+    body,
   }
 }
 

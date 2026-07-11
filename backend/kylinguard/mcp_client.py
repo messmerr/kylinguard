@@ -11,7 +11,7 @@ from mcp.client.stdio import stdio_client
 
 from kylinguard.config import get_settings
 from kylinguard.registry import get_meta
-from kylinguard.subprocess_env import safe_subprocess_env
+from kylinguard.subprocess_env import agent_subprocess_env, safe_subprocess_env
 
 SERVERS: dict[str, str] = {
     "sysinfo": "kylinguard.plugins.sysinfo",
@@ -146,25 +146,33 @@ def server_parameters(
     module: str,
     *,
     exec_user: str = "",
+    workspace_root: str = "",
+    command_shell: str = "/bin/bash",
     command_timeout: int = 30,
+    command_max_timeout: int = 900,
     output_max_bytes: int = 65536,
     privileged_helper: str = "",
 ) -> StdioServerParameters:
-    """构造最小环境的 MCP 进程参数。
+    """构造与插件能力匹配的 MCP 进程环境。
 
     files 插件直接进行 Python 文件 IO，必须整体降权运行；其他插件内部的
-    executor 已按每条命令应用 exec_user，不在这里重复 sudo。
+    executor 已按每条命令应用 exec_user，不在这里重复 sudo。通用终端需要
+    Git/SSH/代理/虚拟环境等用户工具链，因此保留普通环境但剥离 KG_* 控制面；
+    其余插件继续使用最小允许列表。
     """
     command = sys.executable
     args = ["-m", module]
     if name == "files" and exec_user:
         command = "sudo"
         args = ["-n", "-H", "-u", exec_user, "--", sys.executable, *args]
-    env = safe_subprocess_env()
-    # 插件只接收执行所需的非秘密配置。不能传整个 os.environ，否则 LLM
-    # Key、管理员口令和代理凭据会重新进入工具进程。
+    env = (agent_subprocess_env()
+           if name == "run_command" else safe_subprocess_env())
+    # 任何环境构造器都会剥离 KG_*；这里只把插件运行所需的非秘密配置逐项补回。
     env.update({
+        "KG_WORKSPACE_ROOT": workspace_root,
+        "KG_COMMAND_SHELL": command_shell,
         "KG_COMMAND_TIMEOUT": str(command_timeout),
+        "KG_COMMAND_MAX_TIMEOUT": str(command_max_timeout),
         "KG_OUTPUT_MAX_BYTES": str(output_max_bytes),
         "KG_EXEC_USER": exec_user,
         "KG_PRIVILEGED_HELPER": privileged_helper,
@@ -194,7 +202,10 @@ class ToolManager:
                 name,
                 module,
                 exec_user=exec_user,
+                workspace_root=settings.workspace_root,
+                command_shell=settings.command_shell,
                 command_timeout=settings.command_timeout,
+                command_max_timeout=settings.command_max_timeout,
                 output_max_bytes=settings.output_max_bytes,
                 privileged_helper=settings.privileged_helper,
             )

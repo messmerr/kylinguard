@@ -21,14 +21,42 @@ def test_规则拒绝一票否决():
     assert d.action == GateAction.DENY
 
 
-def test_审查员不安全一票否决():
+def test_审查员不安全升级为高风险告警而非拒绝():
     d = decide(_meta(), _rule(), _review(safe=False), RiskLevel.LOW)
-    assert d.action == GateAction.DENY
+    assert d.action == GateAction.DOUBLE_CONFIRM
+    assert d.risk == RiskLevel.HIGH
+    assert "高风险告警" in d.reason
+    assert "安全性存疑" in d.reason
 
 
-def test_审查员判不符意图一票否决():
+def test_审查员判不符意图升级为高风险告警而非拒绝():
     d = decide(_meta(), _rule(), _review(intent=False), RiskLevel.LOW)
-    assert d.action == GateAction.DENY
+    assert d.action == GateAction.DOUBLE_CONFIRM
+    assert d.risk == RiskLevel.HIGH
+    assert "偏离管理员原始意图" in d.reason
+
+
+def test_审查员同时告警仍只要求二次确认():
+    d = decide(
+        _meta(RiskLevel.MEDIUM), _rule(),
+        _review(safe=False, intent=False), RiskLevel.MEDIUM,
+    )
+    assert d.action == GateAction.DOUBLE_CONFIRM
+    assert d.risk == RiskLevel.HIGH
+    assert "安全性存疑" in d.reason
+    assert "偏离管理员原始意图" in d.reason
+
+
+def test_只读白名单命令遇到reviewer告警也升级且文案不矛盾():
+    d = decide(
+        _meta(RiskLevel.MEDIUM, dynamic=True),
+        _rule(RuleDecision.ALLOW),
+        _review(safe=False),
+        RiskLevel.LOW,
+    )
+    assert d.action == GateAction.DOUBLE_CONFIRM
+    assert "静态规则判定为只读" in d.reason
+    assert "无异议" not in d.reason
 
 
 def test_只读自动放行():

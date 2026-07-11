@@ -44,6 +44,7 @@ class SessionPermissionContext(BaseModel):
     updated_at: float
     updated_by: str = ""
     expired: bool = False
+    execution_profile: str = ""
 
 
 class PermissionGrant(BaseModel):
@@ -114,7 +115,7 @@ class PlannerOutput(BaseModel):
 
 
 class RuleDecision(str, Enum):
-    DENY = "deny"      # 命中黑名单/保护路径/元字符，直接拒绝
+    DENY = "deny"      # hard=True 永久拒绝；hard=False 表示必须显式授权
     ALLOW = "allow"    # 命中只读白名单，规则层放行
     REVIEW = "review"  # 规则层不表态，交后续闸门
 

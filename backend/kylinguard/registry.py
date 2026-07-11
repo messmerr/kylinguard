@@ -53,11 +53,11 @@ TOOL_REGISTRY: dict[str, ToolMeta] = dict([
     _meta("files", "replace_text", RiskLevel.MEDIUM, description="精确替换文本文件内容"),
     _meta("files", "move", RiskLevel.MEDIUM, description="移动文件或目录"),
     _meta("files", "delete", RiskLevel.HIGH, description="删除文件或目录"),
-    # 通用命令：风险随命令内容动态判定；未命中只读白名单时至少 MEDIUM
+    # 通用终端：完整 shell 能力与权限决策分离；未证明只读时至少 MEDIUM。
     _meta("run_command", "run_command", RiskLevel.MEDIUM, dynamic=True,
-          description="执行自由 shell 命令（经三道闸校验）"),
+          description="在指定工作目录执行完整 shell 命令"),
     _meta("run_command", "run_batch", RiskLevel.MEDIUM, dynamic=True,
-          description="按结构化 argv 顺序执行多条命令（不经 shell）"),
+          description="用固定系统 PATH 按 argv 执行批处理（无 shell/用户工具链环境）"),
 ])
 
 

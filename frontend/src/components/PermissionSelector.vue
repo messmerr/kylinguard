@@ -16,6 +16,7 @@
       <span v-if="changing" class="kg-spinner" aria-hidden="true"></span>
       <KgIcon v-else :name="fullAccessActive ? 'warning' : 'shield'" :size="13" />
       <span>权限：{{ permissionModeMeta.label }}</span>
+      <span v-if="fullAccessActive && permissionContext.grantsRoot" class="root-badge">ROOT</span>
       <KgIcon name="chevron" :size="11" class="select-chevron" />
     </button>
 
@@ -26,7 +27,7 @@
           :key="mode.value"
           :command="mode.value"
           :disabled="mode.value === 'full_access'
-            && (!permissionContext.fullAccessAvailable || !permissionContext.sessionId)"
+            && !permissionContext.fullAccessAvailable"
           :class="{ selected: mode.value === permissionMode }"
         >
           <span class="mode-check">
@@ -37,8 +38,8 @@
             <small>
               {{ mode.value === 'full_access' && !permissionContext.fullAccessAvailable
                 ? (permissionContext.fullAccessUnavailableReason || '服务端未开放')
-                : mode.value === 'full_access' && !permissionContext.sessionId
-                ? '发送第一条消息后可开启'
+                : mode.value === 'full_access' && permissionContext.grantsRoot
+                ? '完整能力 · 将获得 root 权限'
                 : mode.value === 'trusted_workspace' && trustedRoots.length
                 ? `已信任 ${trustedRoots.length} 个目录`
                 : mode.short }}
@@ -54,15 +55,16 @@
 import { ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import KgIcon from './KgIcon.vue'
+import { setChatPermissionMode } from '../composables/useChat.js'
 import {
   PERMISSION_MODES,
   addTrustedRoot,
   fullAccessActive,
   fullAccessDurationMinutes,
+  executionIdentitySourceLabel,
   permissionContext,
   permissionMode,
   permissionModeMeta,
-  setPermissionMode,
   trustedRoots,
 } from '../composables/usePermissions.js'
 
@@ -71,7 +73,7 @@ const changing = ref(false)
 
 async function requestTrustedRoot() {
   const { value } = await ElMessageBox.prompt(
-    '输入 Agent 可以直接创建和修改文件的服务器目录。删除操作仍会询问。',
+    '输入结构化文件工具可以直接创建和修改内容的服务器目录。删除与终端命令仍会询问。',
     '添加可信目录',
     {
       inputPlaceholder: '例如 /srv/project/docs',
@@ -86,8 +88,14 @@ async function requestTrustedRoot() {
 }
 
 async function requestFullAccessPassword() {
+  const identitySource = executionIdentitySourceLabel()
+  const separationNotice = permissionContext.executionAccountSeparated
+    ? '执行账户 UID 与后端 UID 不同'
+    : '执行账户与后端使用相同 UID；工具子进程仍不会继承 LLM 密钥和管理员口令'
+  const rootNotice = permissionContext.grantsRoot
+    ? '警告：该执行身份拥有 root 权限。' : ''
   const { value } = await ElMessageBox.prompt(
-    `完全访问将跳过逐项确认，并以“${permissionContext.executorIdentity}”的系统权限运行。硬红线与独立安全复核仍然生效，所有操作仍会记录。`,
+    `Agent 将获得完整 shell、文件、网络和进程能力，不再逐项确认，并以“${permissionContext.executorIdentity}”（${identitySource}）运行。${separationNotice}。${rootNotice}访问会限时自动收回并写入审计。`,
     '开启完全访问',
     {
       inputType: 'password',
@@ -113,7 +121,7 @@ async function chooseMode(mode) {
     }
     if (mode === 'full_access') password = await requestFullAccessPassword()
     if (permissionMode.value !== mode) {
-      result = await setPermissionMode(mode, {
+      result = await setChatPermissionMode(mode, {
         password, durationMinutes: fullAccessDurationMinutes.value,
       })
     }
@@ -121,7 +129,7 @@ async function chooseMode(mode) {
       ElMessage.warning('当前后端尚未保存该设置；新协议接入后会自动同步')
     } else {
       ElMessage.success(mode === 'full_access'
-        ? `完全访问已开启，将在 ${fullAccessDurationMinutes.value} 分钟后收回`
+        ? `完整执行能力已开启，将在 ${fullAccessDurationMinutes.value} 分钟后收回`
         : '权限已更新')
     }
   } catch (error) {
@@ -167,6 +175,13 @@ async function chooseMode(mode) {
 }
 .permission-trigger:disabled { color: var(--kg-text-disabled); cursor: not-allowed; }
 .permission-trigger .kg-spinner { width: 12px; height: 12px; border-width: 1px; }
+.root-badge {
+  padding: 1px 4px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font: 700 9px/1.2 var(--kg-font-mono);
+  letter-spacing: .04em;
+}
 .select-chevron { transform: rotate(90deg); }
 
 .mode-check {

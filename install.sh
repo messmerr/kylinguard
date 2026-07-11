@@ -7,6 +7,7 @@ INSTALL_DIR="${KG_INSTALL_DIR:-/opt/kylinguard}"
 STATE_DIR="${KG_STATE_DIR:-/var/lib/kylinguard}"
 CONFIG_DIR="${KG_CONFIG_DIR:-/etc/kylinguard}"
 HELPER_DIR="/usr/local/libexec/kylinguard"
+WORKSPACE_DIR="${KG_WORKSPACE_DIR:-/srv/kylinguard-workspaces/default}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "请使用 root 运行：sudo ./install.sh" >&2
@@ -30,6 +31,7 @@ id -u "$EXEC_USER" >/dev/null 2>&1 || \
 install -d -m 0755 "$INSTALL_DIR" "$HELPER_DIR"
 install -d -m 0750 -o "$APP_USER" -g "$APP_USER" "$STATE_DIR"
 install -d -m 0750 -o root -g "$APP_USER" "$CONFIG_DIR"
+install -d -m 0750 -o "$EXEC_USER" -g "$EXEC_USER" "$WORKSPACE_DIR"
 
 rsync -a --delete \
   --exclude .git \
@@ -50,6 +52,10 @@ KG_EXEC_USER=$EXEC_USER
 KG_PRIVILEGED_HELPER=$HELPER_DIR/execctl
 EOF
   echo "已创建 $CONFIG_DIR/kylinguard.env，请填入真实 KG_LLM_API_KEY 与 KG_ADMIN_PASSWORD。"
+fi
+
+if ! grep -q '^KG_WORKSPACE_ROOT=' "$CONFIG_DIR/kylinguard.env"; then
+  echo "KG_WORKSPACE_ROOT=$WORKSPACE_DIR" >> "$CONFIG_DIR/kylinguard.env"
 fi
 
 python3 -m venv "$INSTALL_DIR/.venv"

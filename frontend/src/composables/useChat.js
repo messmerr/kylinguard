@@ -4,13 +4,16 @@
 import { computed, reactive, ref } from 'vue'
 import { apiFetch } from './useAuth.js'
 import {
+  applyPermissionCapabilities,
   applyPermissionEvent,
   beginNewPermissionSession,
   bindPermissionSession,
+  createFullAccessDraftSession,
   loadPermissionContext,
   permissionContext,
   permissionRequestPayload,
   resolvePermissionRequest,
+  setPermissionMode,
 } from './usePermissions.js'
 
 export const sessions = ref([])
@@ -33,6 +36,7 @@ let streamingItem = null // 当前正在流式累积的 assistant 文本项
 let activeController = null
 let _nextIsReport = false // 下一条 final_answer 标记为报告
 let _loadRequest = 0
+let fullAccessDraftPromise = null
 
 const PLANNING_ACTIVITIES = new Set([
   'constructing_tool_call',
@@ -368,7 +372,60 @@ export function handleEvent(ev) {
 
 export async function refreshSessions() {
   const r = await apiFetch('/api/sessions')
-  sessions.value = (await r.json()).sessions
+  if (!r.ok) throw new Error(`任务列表读取失败（HTTP ${r.status}）`)
+  const body = await r.json()
+  sessions.value = body.sessions || []
+  applyPermissionCapabilities(body.permission_capabilities)
+  return body
+}
+
+function secureDraftSessionId() {
+  const cryptoApi = globalThis.crypto
+  if (typeof cryptoApi?.randomUUID === 'function') {
+    return cryptoApi.randomUUID().replaceAll('-', '').toLowerCase()
+  }
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    const bytes = cryptoApi.getRandomValues(new Uint8Array(16))
+    return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('')
+  }
+  throw new Error('当前浏览器无法生成安全的任务标识，请升级浏览器后重试')
+}
+
+export async function setChatPermissionMode(mode, options = {}) {
+  if (mode !== 'full_access' || activeId.value) {
+    return setPermissionMode(mode, options)
+  }
+  if (fullAccessDraftPromise) return fullAccessDraftPromise
+
+  fullAccessDraftPromise = (async () => {
+    const requestedSessionId = secureDraftSessionId()
+    const result = await createFullAccessDraftSession(
+      requestedSessionId,
+      options,
+    )
+    if (!result.supported) {
+      throw new Error(
+        '当前后端不支持在首条消息前开启完全访问；请先发送第一条消息创建任务，再开启。',
+      )
+    }
+
+    // 只有服务端原子创建草稿成功后，才在同一个同步片段绑定聊天与权限状态。
+    activeId.value = result.sessionId
+    bindPermissionSession(result.sessionId)
+    applyPermissionEvent({ type: 'permission_context', permission: result.permission })
+    try {
+      await refreshSessions()
+    } catch {
+      // 草稿及权限已经由服务端提交；列表刷新失败不能伪装成权限开启失败。
+    }
+    return result
+  })()
+
+  try {
+    return await fullAccessDraftPromise
+  } finally {
+    fullAccessDraftPromise = null
+  }
 }
 
 export function newSession() {
@@ -574,7 +631,8 @@ export async function loadSession(id) {
   resetSessionState()
   beginNewPermissionSession()
   activeId.value = id
-  bindPermissionSession(id)
+  const summary = sessions.value.find((session) => session.id === id)
+  bindPermissionSession(id, { workspaceRoot: summary?.workspace_root || '' })
   try {
     const r = await apiFetch(`/api/sessions/${id}/events`)
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
