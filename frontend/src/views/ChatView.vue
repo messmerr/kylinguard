@@ -119,7 +119,13 @@
             </button>
           </div>
           <div class="composer-footer">
-            <span>Enter 发送 · Shift+Enter 换行</span>
+            <div class="composer-meta">
+              <span>Enter 发送 · Shift+Enter 换行</span>
+              <span class="composer-separator" aria-hidden="true"></span>
+              <PermissionSelector
+                :disabled="running && currentTurn?.status !== 'waiting_user'"
+              />
+            </div>
             <button v-if="activeId && items.length" type="button" class="inline-action"
                     :disabled="running" @click="genReport">
               <KgIcon name="task" :size="13" />生成运维报告
@@ -137,6 +143,7 @@ import ConfirmCard from '../components/ConfirmCard.vue'
 import KgIcon from '../components/KgIcon.vue'
 import KgLogo from '../components/KgLogo.vue'
 import MarkdownText from '../components/MarkdownText.vue'
+import PermissionSelector from '../components/PermissionSelector.vue'
 import TaskError from '../components/TaskError.vue'
 import TraceStep from '../components/TraceStep.vue'
 import {
@@ -604,6 +611,16 @@ function downloadReport(text) {
   font-size: 12px;
 }
 
+.composer-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.composer-meta > span:first-child { white-space: nowrap; }
+.composer-separator { width: 1px; height: 14px; background: var(--kg-border-subtle); }
+
 .inline-action {
   display: inline-flex;
   align-items: center;
@@ -624,5 +641,7 @@ function downloadReport(text) {
   .chat-inner { padding: 22px 20px 32px; }
   .composer { padding-right: 20px; padding-left: 20px; }
   .record-meta { display: none; }
+  .composer-meta > span:first-child,
+  .composer-separator { display: none; }
 }
 </style>

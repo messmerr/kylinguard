@@ -4,7 +4,7 @@
     <div class="error-content">
       <h3>{{ title }}</h3>
       <p>{{ error.message }}</p>
-      <p v-if="item.answer" class="error-answer">{{ item.answer }}</p>
+      <p v-if="answerDetail" class="error-answer">{{ answerDetail }}</p>
       <div v-if="meta.length" class="error-meta">
         <code v-for="entry in meta" :key="entry">{{ entry }}</code>
       </div>
@@ -31,6 +31,17 @@ defineEmits(['retry'])
 
 const copied = ref(false)
 const error = computed(() => props.item.error || {})
+const answerDetail = computed(() => {
+  const answer = String(props.item.answer || '').trim()
+  const message = String(error.value.message || '').trim()
+  if (!answer) return ''
+  if (!message || !answer.startsWith(message)) return answer
+  const remainder = answer.slice(message.length).trim()
+  // 后端失败终态通常只重复“任务已中止 + incident”；这些信息已经由标题
+  // 与下方 meta 完整表达，重复展示会让错误卡显得啰嗦。
+  if (!remainder || /^任务已中止。?\s*错误编号[:：]/.test(remainder)) return ''
+  return remainder
+})
 const title = computed(() => ({
   planning: '规划未能完成',
   reviewing: '安全检查未能完成',

@@ -73,7 +73,7 @@ const sidebar = ref(null)
 const VIEWS = [
   { key: 'chat', icon: 'task', label: '任务' },
   { key: 'audit', icon: 'audit', label: '审计记录' },
-  { key: 'policy', icon: 'shield', label: '安全策略' },
+  { key: 'policy', icon: 'shield', label: '权限与安全' },
   { key: 'dashboard', icon: 'dashboard', label: '总览' },
   { key: 'alerts', icon: 'bell', label: '告警' },
 ]

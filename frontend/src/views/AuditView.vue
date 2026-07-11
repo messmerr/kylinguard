@@ -149,11 +149,24 @@ let selectRequest = 0
 const TYPE_LABELS = {
   user_query: '管理员指令',
   intent_filter: '意图检查',
+  intent_signal: '高风险意图信号',
   snapshot: '系统状态',
   plan: '执行计划',
   verification: '安全检查',
   confirm_request: '请求确认',
   confirm_result: '确认结果',
+  permission_changed: '权限模式变更',
+  permission_request: '权限请求',
+  permission_result: '授权结果',
+  permission_resolved: '授权已处理',
+  permission_grants_revoked: '授权已收回',
+  permission_reauthentication_failed: '身份复验失败',
+  permission_request_stale: '权限请求已失效',
+  step_rewrite: '命令已改写',
+  capability_error: '能力调用受阻',
+  execution_authorized: '执行前授权',
+  execution_authorization_failed: '执行前权限失效',
+  task_error: '任务错误',
   execution: '执行结果',
   final_answer: '最终回复',
 }
@@ -192,8 +205,15 @@ const riskLabel = (risk) => RISK_LABELS[risk] || risk || '—'
 
 function eventIcon(type) {
   return {
-    user_query: 'task', intent_filter: 'shield', snapshot: 'server', plan: 'task', verification: 'shield',
+    user_query: 'task', intent_filter: 'shield', intent_signal: 'warning',
+    snapshot: 'server', plan: 'task', verification: 'shield',
     confirm_request: 'warning', confirm_result: 'check', execution: 'terminal',
+    permission_changed: 'shield', permission_request: 'lock', permission_result: 'check',
+    permission_resolved: 'check', permission_grants_revoked: 'lock',
+    permission_reauthentication_failed: 'warning', permission_request_stale: 'warning',
+    step_rewrite: 'terminal', capability_error: 'warning',
+    execution_authorized: 'shield', execution_authorization_failed: 'warning',
+    task_error: 'warning',
     final_answer: 'info',
   }[type] || 'audit'
 }
@@ -201,16 +221,24 @@ function eventIcon(type) {
 function eventTone(ev) {
   const action = ev.payload?.decision?.action
   if (ev.event_type === 'intent_filter'
+      || ev.event_type === 'permission_reauthentication_failed'
+      || ev.event_type === 'execution_authorization_failed'
+      || ev.event_type === 'task_error'
       || (ev.event_type === 'final_answer' && ev.payload?.aborted)
       || action === 'deny'
       || (ev.event_type === 'confirm_result' && !ev.payload?.approved)) {
     return 'is-danger'
   }
-  if (ev.event_type === 'confirm_request' || action === 'confirm' || action === 'double_confirm') {
+  if (ev.event_type === 'confirm_request' || ev.event_type === 'permission_request'
+      || ev.event_type === 'intent_signal'
+      || action === 'confirm' || action === 'double_confirm') {
     return 'is-warning'
   }
   if (ev.event_type === 'execution') return 'is-info'
-  if (ev.event_type === 'final_answer' || ev.event_type === 'confirm_result') return 'is-success'
+  if (ev.event_type === 'final_answer' || ev.event_type === 'confirm_result'
+      || ev.event_type === 'permission_result'
+      || ev.event_type === 'permission_resolved'
+      || ev.event_type === 'execution_authorized') return 'is-success'
   return ''
 }
 
@@ -219,6 +247,7 @@ function brief(ev) {
   switch (ev.event_type) {
     case 'user_query': return p.query || '—'
     case 'intent_filter': return compactText(p.decision?.reason || '请求未通过意图检查', 72)
+    case 'intent_signal': return compactText(p.decision?.reason || '进入高风险校验', 72)
     case 'snapshot': return `已读取 ${Object.keys(p.snapshot || {}).length} 项指标`
     case 'plan': return p.steps?.length ? `${p.steps.length} 个步骤` : '直接给出结论'
     case 'verification': {
@@ -227,6 +256,18 @@ function brief(ev) {
     }
     case 'confirm_request': return `${p.step?.purpose || p.step?.tool || '操作'} · ${riskLabel(p.decision?.risk)}`
     case 'confirm_result': return `${p.approved ? '已批准' : '已拒绝'} · 操作人 ${p.operator || '—'}`
+    case 'permission_changed': return `${p.from_mode || '新任务'} → ${p.to_mode || '—'} · 操作人 ${p.operator || '—'}`
+    case 'permission_request': return `${p.step?.purpose || p.capability || '操作'} · ${riskLabel(p.decision?.risk)}`
+    case 'permission_result': return `${p.approved ? '已授权' : '已拒绝'} · ${p.decision || '—'} · ${p.operator || '—'}`
+    case 'permission_resolved': return `${p.decision || '—'} · ${p.capability || '—'} · ${p.operator || '—'}`
+    case 'permission_grants_revoked': return `收回 ${p.revoked_grants ?? 0} 条授权 · ${p.operator || '—'}`
+    case 'permission_reauthentication_failed': return `管理员身份复验未通过 · ${p.operator || '—'}`
+    case 'permission_request_stale': return `请求版本 ${p.request_version ?? '—'}，当前版本 ${p.current_version ?? '—'}`
+    case 'step_rewrite': return compactText(p.reason || p.outcome || '已改写为安全调用', 72)
+    case 'capability_error': return `${p.capability || '未知能力'} · ${p.code || '调用受阻'}`
+    case 'execution_authorized': return `${p.mode || '—'} · ${p.grant_id ? '使用动作授权' : '由当前模式授权'}`
+    case 'execution_authorization_failed': return compactText(p.message || p.reason || p.code || '执行前权限失效', 72)
+    case 'task_error': return compactText(p.error?.message || '任务未能完成', 72)
     case 'execution': return `${p.step?.tool || '执行操作'} · ${durationText(p.duration_ms)}`
     case 'final_answer': return compactText(p.answer || '', 72) || '已生成回复'
     default: return '—'
@@ -243,6 +284,11 @@ function detailRows(ev) {
         { label: '结果', value: RULE_LABELS[p.decision?.decision] || p.decision?.decision || '未通过' },
         { label: '原因', value: p.decision?.reason || '—' },
         { label: '命中规则', value: p.decision?.matched_rule || '—', mono: true },
+      ]
+    case 'intent_signal':
+      return [
+        { label: '信号', value: p.decision?.reason || '—' },
+        { label: '处理', value: '继续进入参数、Reviewer 与权限校验' },
       ]
     case 'snapshot':
       return [{ label: '采集项', value: Object.keys(p.snapshot || {}).join('、') || '—' }]
@@ -270,6 +316,68 @@ function detailRows(ev) {
       return [
         { label: '结果', value: p.approved ? '批准执行' : '拒绝执行' },
         { label: '操作人', value: p.operator || '—' },
+      ]
+    case 'permission_changed':
+      return [
+        { label: '模式', value: `${p.from_mode || '新任务'} → ${p.to_mode || '—'}` },
+        { label: '操作人', value: p.operator || '—' },
+        { label: '可信目录', value: (p.trusted_roots || []).join('、') || '无', mono: true },
+        { label: '权限版本', value: String(p.version ?? '—'), mono: true },
+      ]
+    case 'permission_request':
+      return [
+        { label: '工具', value: p.step?.tool || '—', mono: true },
+        { label: '能力', value: p.capability || p.action?.capability || '—', mono: true },
+        { label: '范围', value: p.resource || p.action?.resource || '—', mono: true },
+        { label: '原因', value: p.decision?.reason || '—' },
+      ]
+    case 'permission_result':
+    case 'permission_resolved':
+      return [
+        { label: '结果', value: p.decision || (p.approved ? '已授权' : '已拒绝') },
+        { label: '操作人', value: p.operator || '—' },
+        { label: '能力', value: p.capability || '—', mono: true },
+        { label: '范围', value: p.resource || p.trusted_path || '—', mono: true },
+        { label: '授权编号', value: p.grant_id || '无', mono: true },
+      ]
+    case 'permission_grants_revoked':
+      return [
+        { label: '收回数量', value: String(p.revoked_grants ?? 0) },
+        { label: '操作人', value: p.operator || '—' },
+        { label: '范围', value: p.scope || '—' },
+      ]
+    case 'permission_reauthentication_failed':
+    case 'permission_request_stale':
+      return [
+        { label: '操作人', value: p.operator || '—' },
+        { label: '请求编号', value: p.request_id || '—', mono: true },
+        { label: '能力', value: p.capability || '—', mono: true },
+      ]
+    case 'step_rewrite':
+      return [
+        { label: '结果', value: p.outcome || '—' },
+        { label: '原因', value: p.reason || '—' },
+        { label: '建议工具', value: (p.suggested_tools || []).join('、') || '—', mono: true },
+      ]
+    case 'capability_error':
+      return [
+        { label: '能力', value: p.capability || '—', mono: true },
+        { label: '范围', value: p.resource || '—', mono: true },
+        { label: '代码', value: p.code || '—', mono: true },
+      ]
+    case 'execution_authorized':
+    case 'execution_authorization_failed':
+      return [
+        { label: '权限模式', value: p.mode || '—' },
+        { label: '权限版本', value: String(p.context_version ?? p.current_context_version ?? '—'), mono: true },
+        { label: '授权编号', value: p.grant_id || '无', mono: true },
+        ...(p.message ? [{ label: '原因', value: p.message }] : []),
+      ]
+    case 'task_error':
+      return [
+        { label: '阶段', value: p.stage || '—' },
+        { label: '错误', value: p.error?.message || '—' },
+        { label: '诊断编号', value: p.error?.incident_id || '—', mono: true },
       ]
     case 'execution':
       return [

@@ -8,7 +8,10 @@ globalThis.localStorage = {
 }
 
 const chatResponses = []
+const chatBodies = []
 let chatRequestCount = 0
+let sessionEventsFixture = null
+let permissionFixture = null
 
 globalThis.fetch = async (url, options = {}) => {
   if (url === '/api/sessions') {
@@ -17,14 +20,25 @@ globalThis.fetch = async (url, options = {}) => {
   if (url === '/api/confirm') {
     return Response.json({ ok: true })
   }
+  if (url.endsWith('/events') && sessionEventsFixture) {
+    return Response.json(sessionEventsFixture)
+  }
+  if (url.endsWith('/permissions') && permissionFixture) {
+    return Response.json(permissionFixture)
+  }
+  if (url.endsWith('/grants') && permissionFixture) {
+    return Response.json({ grants: [] })
+  }
   if (url !== '/api/chat') throw new Error(`unexpected fetch: ${url}`)
   chatRequestCount++
+  chatBodies.push(JSON.parse(options.body))
   const next = chatResponses.shift()
   if (!next) throw new Error('missing controlled SSE response')
   return next.connect(options.signal)
 }
 
 const chat = await import('../src/composables/useChat.js')
+const permissions = await import('../src/composables/usePermissions.js')
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 function controlledSse() {
@@ -55,6 +69,9 @@ function reset() {
   assert.equal(chat.running.value, false)
   chat.newSession()
   chatRequestCount = 0
+  chatBodies.length = 0
+  sessionEventsFixture = null
+  permissionFixture = null
   chatResponses.length = 0
 }
 
@@ -186,4 +203,88 @@ test('task_error 与失败 final_answer 只渲染一个错误项', async () => {
   assert.equal(errors.length, 1)
   assert.equal(errors[0].answer, '请检查 API Key。')
   assert.equal(answers.length, 0)
+})
+
+test('权限模式只随首轮 chat 创建会话，后续消息不重复更新', async () => {
+  reset()
+  const first = controlledSse()
+  chatResponses.push(first)
+  const firstRequest = chat.sendMessage('CREATE-SESSION')
+  await tick()
+  assert.equal(chatBodies[0].permission_mode, 'ask')
+  assert.deepEqual(chatBodies[0].trusted_roots, [])
+  first.event({ type: 'session_created', session_id: 'session-permission' })
+  first.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
+  first.event({ type: 'done' })
+  first.close()
+  await firstRequest
+
+  const second = controlledSse()
+  chatResponses.push(second)
+  const secondRequest = chat.sendMessage('FOLLOW-UP')
+  await tick()
+  assert.equal(chatBodies[1].session_id, 'session-permission')
+  assert.equal('permission_mode' in chatBodies[1], false)
+  assert.equal('trusted_roots' in chatBodies[1], false)
+  second.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
+  second.event({ type: 'done' })
+  second.close()
+  await secondRequest
+})
+
+test('历史回放结束后以服务器当前权限覆盖过期的历史事件', async () => {
+  reset()
+  sessionEventsFixture = { events: [{
+    event_type: 'permission_changed',
+    payload: {
+      to_mode: 'full_access', version: 2,
+      expires_at: Date.now() - 60_000,
+    },
+  }] }
+  permissionFixture = {
+    mode: 'full_access', version: 2, expired: true,
+    expires_at: Date.now() - 60_000, trusted_roots: ['/srv/expired'],
+  }
+
+  await chat.loadSession('history-permission')
+
+  assert.equal(permissions.permissionMode.value, 'ask')
+  assert.deepEqual(permissions.trustedRoots.value, [])
+})
+
+test('后端 permission_request/result 契约可生成并收起授权卡', () => {
+  reset()
+  chat.handleEvent({ type: 'plan', thought: '准备写入', steps: [{
+    step_id: 'permission-step', tool: 'files.write_file',
+    arguments: { path: '/srv/docs/note.md', content: 'hello' },
+    purpose: '记录排查结论', risk: 'high',
+  }] })
+  chat.handleEvent({
+    type: 'permission_request', request_id: 'request-contract',
+    step_id: 'permission-step', context_version: 3,
+    step: {
+      tool: 'files.write_file',
+      arguments: { path: '/srv/docs/note.md', content: 'hello' },
+      purpose: '记录排查结论', risk: 'high',
+    },
+    decision: { action: 'double_confirm', risk: 'high', reason: '需要复验' },
+    capability: 'files.write', resource: '/srv/docs/note.md',
+    suggested_path: '/srv/docs', requires_reauthentication: true,
+    choices: ['deny', 'allow_once', 'allow_session', 'trust_path'],
+    timeout_seconds: 300,
+  })
+
+  const card = chat.items.value.find((item) => item.kind === 'confirm')
+  assert.equal(card.permissionRequestId, 'request-contract')
+  assert.equal(card.contextVersion, 3)
+  assert.equal(card.requiresReauthentication, true)
+  assert.deepEqual(card.choices, ['deny', 'allow_once', 'allow_session', 'trust_path'])
+  assert.equal(card.operation.suggested_scope.path, '/srv/docs')
+
+  chat.handleEvent({
+    type: 'permission_result', request_id: 'request-contract',
+    step_id: 'permission-step', decision: 'allow_once', approved: true,
+  })
+  assert.equal(card.hidden, true)
+  assert.equal(chat.items.value.find((item) => item.kind === 'step').status, 'ready')
 })

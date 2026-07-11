@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test tests/useChat.test.js"
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
     "element-plus": "^2.7.0",

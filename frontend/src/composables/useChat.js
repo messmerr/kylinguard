@@ -3,6 +3,15 @@
 // 用 plan.thought / final_answer.answer 整段渲染）。
 import { computed, reactive, ref } from 'vue'
 import { apiFetch } from './useAuth.js'
+import {
+  applyPermissionEvent,
+  beginNewPermissionSession,
+  bindPermissionSession,
+  loadPermissionContext,
+  permissionContext,
+  permissionRequestPayload,
+  resolvePermissionRequest,
+} from './usePermissions.js'
 
 export const sessions = ref([])
 export const activeId = ref('')
@@ -64,7 +73,19 @@ export function handleEvent(ev) {
   switch (ev.type) {
     case 'session_created':
       activeId.value = ev.session_id
+      bindPermissionSession(ev.session_id)
+      if (ev.permission || ev.permission_mode) {
+        applyPermissionEvent({ ...ev, type: 'permission_context' })
+      }
+      loadPermissionContext(ev.session_id).catch(() => {})
       refreshSessions()
+      break
+    case 'permission_context':
+    case 'permission_changed':
+    case 'permission_grant_created':
+    case 'permission_revoked':
+    case 'permission_grants_revoked':
+      applyPermissionEvent(ev)
       break
     case 'phase':
       // 兼容旧后端事件；新后端统一发送 progress。
@@ -127,7 +148,8 @@ export function handleEvent(ev) {
     case 'confirm_request':
       confirmsById[ev.confirm_id] = push({
         kind: 'confirm', confirmId: ev.confirm_id, stepId: ev.step_id,
-        step: ev.step, decision: ev.decision, hidden: false,
+        step: ev.step, decision: ev.decision, operation: ev.operation || null,
+        choices: ev.choices || null, hidden: false,
         timeoutSeconds: ev.timeout_seconds ?? null,
       })
       if (currentTurn.value) {
@@ -139,6 +161,75 @@ export function handleEvent(ev) {
         }
       }
       break
+    case 'permission_request': {
+      const request = ev.request || ev.permission_request || ev
+      const requestId = request.id || ev.permission_request_id || ev.request_id || ev.confirm_id
+      const operation = ev.operation || {
+        summary: ev.summary || ev.step?.purpose || request.capability || '执行这一步操作',
+        tool: ev.step?.tool || request.capability || '',
+        arguments: ev.step?.arguments || {},
+        effects: ev.effects || [],
+        resources: request.resource
+          ? [{ kind: request.resource.startsWith?.('/') ? 'path' : 'resource',
+            value: request.resource, path: request.resource.startsWith?.('/') ? request.resource : undefined }]
+          : [],
+        suggested_scope: request.suggested_path ? { path: request.suggested_path } : null,
+      }
+      confirmsById[requestId] = push({
+        kind: 'confirm', confirmId: ev.confirm_id || '',
+        permissionRequestId: requestId, stepId: ev.step_id,
+        contextVersion: request.context_version || ev.context_version || permissionContext.version,
+        step: ev.step || {
+          tool: operation.tool || '',
+          arguments: operation.arguments || {},
+          purpose: operation.summary || ev.reason || '执行这一步操作',
+          risk: ev.risk || 'medium',
+        },
+        decision: ev.decision || {
+          action: 'confirm', risk: ev.risk || 'medium', reason: ev.reason || '',
+        },
+        operation,
+        choices: ev.choices || null,
+        requiresReauthentication: Boolean(
+          request.requires_reauthentication || ev.requires_reauthentication),
+        hidden: false,
+        timeoutSeconds: ev.timeout_seconds ?? null,
+      })
+      if (currentTurn.value) {
+        currentTurn.value.status = 'waiting_user'
+        const activity = upsertActivity({
+          stage: 'confirmation', state: 'waiting',
+          operation_id: `permission:${requestId}`, step_id: ev.step_id,
+        })
+        if (activity && ev.timeout_seconds != null) {
+          activity.deadlineAt = Date.now() + ev.timeout_seconds * 1000
+        }
+      }
+      break
+    }
+    case 'permission_result': {
+      applyPermissionEvent(ev)
+      const requestId = ev.request?.id || ev.resolution?.request_id
+        || ev.permission_request_id || ev.request_id || ev.confirm_id
+      const card = confirmsById[requestId]
+      if (card) card.hidden = true
+      const step = stepsById[ev.step_id]
+      const permissionDecision = ev.decision || ev.resolution?.decision
+      const allowed = ev.allowed ?? ev.approved
+        ?? !['deny', 'denied'].includes(permissionDecision)
+      const timedOut = ev.timed_out || ev.status === 'expired'
+      if (step) step.status = allowed ? 'ready' : timedOut ? 'timed_out' : 'skipped'
+      if (currentTurn.value?.status === 'waiting_user') currentTurn.value.status = 'running'
+      const activity = activitiesById[`permission:${requestId}`]
+      if (activity) {
+        activity.state = allowed ? 'completed' : timedOut ? 'timed_out' : 'cancelled'
+        activity.updatedAt = Date.now()
+      }
+      if (currentTurn.value && activeId.value) {
+        loadPermissionContext(activeId.value).catch(() => {})
+      }
+      break
+    }
     case 'confirm_result': {
       const card = confirmsById[ev.confirm_id]
       if (card) card.hidden = true
@@ -260,6 +351,7 @@ export function newSession() {
   if (running.value) return
   _loadRequest++
   resetSessionState()
+  beginNewPermissionSession()
 }
 
 function turnId() {
@@ -421,7 +513,9 @@ export async function loadSession(id) {
   if (running.value) return
   const requestId = ++_loadRequest
   resetSessionState()
+  beginNewPermissionSession()
   activeId.value = id
+  bindPermissionSession(id)
   try {
     const r = await apiFetch(`/api/sessions/${id}/events`)
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
@@ -430,6 +524,9 @@ export async function loadSession(id) {
     for (const ev of body.events || []) {
       handleEvent({ type: ev.event_type, ...ev.payload })
     }
+    // 历史 permission_changed 事件只用于回放；最后以服务器当前上下文校准，
+    // 避免过期的 full_access 被历史事件重新点亮。
+    await loadPermissionContext(id).catch(() => {})
   } catch (error) {
     if (requestId === _loadRequest && activeId.value === id) {
       push({ kind: 'fatal', error: `任务记录读取失败：${error.message}` })
@@ -454,12 +551,16 @@ export async function sendMessage(text, { onUpdate } = {}) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: prompt, session_id: activeId.value,
-                             request_id: turn.id }),
+                             request_id: turn.id,
+                             ...(!activeId.value ? permissionRequestPayload() : {}) }),
       signal: controller.signal,
     })
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}))
-      const error = new Error(body.detail || `请求失败（HTTP ${resp.status}）`)
+      const detail = typeof body.detail === 'string' ? body.detail
+        : body.detail?.message
+          || (Array.isArray(body.detail) ? body.detail[0]?.msg : '')
+      const error = new Error(detail || `请求失败（HTTP ${resp.status}）`)
       error.httpStatus = resp.status
       throw error
     }
@@ -554,18 +655,8 @@ export async function retryMessage(text, options = {}) {
   return sendMessage(text, options)
 }
 
-export async function resolveConfirm(card, approved) {
-  const response = await apiFetch('/api/confirm', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ confirm_id: card.confirmId, approved }),
-  })
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}))
-    throw new Error(body.detail || `确认失败（HTTP ${response.status}）`)
-  }
-  const body = await response.json()
-  if (!body.ok) throw new Error('该确认请求已失效或已经处理。')
+export async function resolveConfirm(card, decision = 'allow_once', scope = null) {
+  return resolvePermissionRequest(card, decision, scope)
 }
 
 function _buildReportPrompt() {

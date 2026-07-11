@@ -8,12 +8,22 @@
           <h1>{{ currentView.label }}</h1>
           <span v-if="currentContext" class="page-context">{{ currentContext }}</span>
         </div>
-        <button ref="statusTrigger" class="status-trigger" :class="{ active: showPanel }"
-                type="button" aria-controls="system-status-panel"
-                :aria-expanded="showPanel" @click="toggleStatusPanel">
-          <KgIcon name="server" :size="16" />
-          <span>系统状态</span>
-        </button>
+        <div class="page-actions">
+          <div v-if="fullAccessActive" class="full-access-status" role="status">
+            <KgIcon name="warning" :size="14" />
+            <strong>完全访问</strong>
+            <span>{{ fullAccessStatusText }}</span>
+            <button type="button" :disabled="revokingAccess" @click="stopFullAccess">
+              {{ revokingAccess ? '正在收回' : '收回' }}
+            </button>
+          </div>
+          <button ref="statusTrigger" class="status-trigger" :class="{ active: showPanel }"
+                  type="button" aria-controls="system-status-panel"
+                  :aria-expanded="showPanel" @click="toggleStatusPanel">
+            <KgIcon name="server" :size="16" />
+            <span>系统状态</span>
+          </button>
+        </div>
       </header>
 
       <div class="content-area" :inert="showPanel">
@@ -34,9 +44,17 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { authed } from './composables/useAuth.js'
 import { activeId, refreshSessions, sessions } from './composables/useChat.js'
+import {
+  fullAccessActive,
+  fullAccessRemainingMs,
+  expirePermissionContext,
+  permissionContext,
+  revokeFullAccess,
+} from './composables/usePermissions.js'
 import AuditView from './views/AuditView.vue'
 import ChatView from './views/ChatView.vue'
 import DashboardView from './views/DashboardView.vue'
@@ -54,7 +72,7 @@ const statusTrigger = ref(null)
 const VIEWS = {
   chat: { label: '任务' },
   audit: { label: '审计记录' },
-  policy: { label: '安全策略' },
+  policy: { label: '权限与安全' },
   dashboard: { label: '总览' },
   alerts: { label: '告警' },
 }
@@ -64,6 +82,50 @@ const currentContext = computed(() => {
   if (view.value !== 'chat' || !activeId.value) return ''
   return sessions.value.find((item) => item.id === activeId.value)?.title || ''
 })
+
+const permissionNow = ref(Date.now())
+const revokingAccess = ref(false)
+let permissionTimer = null
+
+watch(() => [permissionContext.mode, permissionContext.expiresAt], ([mode, expiresAt]) => {
+  if (permissionTimer) clearInterval(permissionTimer)
+  permissionTimer = null
+  if (['full_access', 'trusted_workspace'].includes(mode) && expiresAt) {
+    permissionNow.value = Date.now()
+    permissionTimer = setInterval(() => {
+      permissionNow.value = Date.now()
+      const expiringMode = permissionContext.mode
+      if (expirePermissionContext(permissionNow.value)) {
+        ElMessage.info(expiringMode === 'full_access'
+          ? '完全访问已到期，权限已恢复为“确认后执行”'
+          : '可信目录授权已到期，后续修改会再次询问')
+      }
+    }, 1000)
+  }
+}, { immediate: true })
+onUnmounted(() => permissionTimer && clearInterval(permissionTimer))
+
+const fullAccessStatusText = computed(() => {
+  const identity = permissionContext.executorIdentity || '未配置独立执行账号'
+  const remaining = fullAccessRemainingMs(permissionNow.value)
+  if (remaining == null) return `${identity} · 本次会话`
+  if (remaining <= 0) return `${identity} · 即将到期`
+  if (remaining >= 60_000) return `${identity} · 还剩 ${Math.ceil(remaining / 60_000)} 分钟`
+  return `${identity} · 还剩 ${Math.ceil(remaining / 1000)} 秒`
+})
+
+async function stopFullAccess() {
+  if (revokingAccess.value) return
+  revokingAccess.value = true
+  try {
+    await revokeFullAccess()
+    ElMessage.success('完全访问已收回，后续修改会再次询问')
+  } catch (error) {
+    ElMessage.error(error.message || '完全访问收回失败')
+  } finally {
+    revokingAccess.value = false
+  }
+}
 
 function changeView(next) {
   view.value = next
@@ -141,6 +203,36 @@ watch(authed, (v) => {
   white-space: nowrap;
 }
 
+.page-actions { display: flex; align-items: center; gap: var(--kg-space-2); }
+
+.full-access-status {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px 0 9px;
+  border: 1px solid var(--kg-danger-border);
+  border-radius: var(--kg-radius-sm);
+  background: var(--kg-danger-soft);
+  color: var(--kg-danger);
+  font-size: 11px;
+}
+
+.full-access-status strong { color: var(--kg-danger); font-size: 12px; font-weight: 650; }
+.full-access-status > span { color: #dba09d; }
+.full-access-status button {
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--kg-danger-border);
+  border-radius: var(--kg-radius-xs);
+  background: rgb(0 0 0 / 14%);
+  color: var(--kg-text-primary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.full-access-status button:hover:not(:disabled) { background: rgb(0 0 0 / 28%); }
+.full-access-status button:disabled { color: var(--kg-text-disabled); cursor: wait; }
+
 .status-trigger {
   height: 32px;
   flex: none;
@@ -195,5 +287,6 @@ watch(authed, (v) => {
 @media (max-width: 1080px) {
   .page-bar { padding: 0 var(--kg-space-5); }
   .page-context { display: none; }
+  .full-access-status > span { display: none; }
 }
 </style>

@@ -3,7 +3,7 @@
     <div class="kg-page-inner policy-inner">
       <header class="page-head">
         <div>
-          <p class="page-description">管理额外限制，并查看系统内置的只读基线。</p>
+          <p class="page-description">决定 Agent 什么时候可以直接执行，并管理额外的固定限制。</p>
         </div>
         <el-button type="primary" @click="openAddDialog">
           <KgIcon name="plus" :size="15" />
@@ -11,11 +11,134 @@
         </el-button>
       </header>
 
+      <section class="policy-section permission-section">
+        <div class="section-head permission-heading">
+          <div>
+            <h2 class="kg-section-title">Agent 权限</h2>
+            <p>降低权限会立即阻止尚未通过执行前检查的操作；已经开始的系统调用无法回滚。</p>
+          </div>
+          <span class="sync-state" :class="{ synced: permissionContext.synced }">
+            {{ permissionContext.synced ? '已与服务器同步' : activeId ? '等待服务器支持' : '新任务默认设置' }}
+          </span>
+        </div>
+
+        <div class="mode-grid">
+          <button
+            v-for="mode in PERMISSION_MODES"
+            :key="mode.value"
+            type="button"
+            class="mode-card"
+            :class="[`is-${mode.tone}`, { active: permissionMode === mode.value }]"
+            :disabled="permissionChanging || (mode.value === 'full_access'
+              && (!activeId || !permissionContext.fullAccessAvailable))"
+            @click="choosePermissionMode(mode.value)"
+          >
+            <span class="mode-card-head">
+              <KgIcon :name="mode.value === 'full_access' ? 'warning' : 'shield'" :size="15" />
+              <strong>{{ mode.label }}</strong>
+              <KgIcon v-if="permissionMode === mode.value" name="check" :size="14" class="mode-selected" />
+            </span>
+            <span>{{ mode.value === 'full_access' && !activeId
+              ? '发送第一条消息后可开启'
+              : mode.value === 'full_access' && !permissionContext.fullAccessAvailable
+              ? (permissionContext.fullAccessUnavailableReason || '服务端未开放')
+              : mode.short }}</span>
+          </button>
+        </div>
+
+        <div class="effective-access" :class="{ danger: fullAccessActive }">
+          <div>
+            <span>当前执行身份</span>
+            <code>{{ permissionContext.executorIdentity }}</code>
+          </div>
+          <p>{{ permissionModeMeta.description }}</p>
+          <el-button
+            v-if="fullAccessActive"
+            size="small"
+            type="danger"
+            plain
+            :loading="permissionChanging"
+            @click="choosePermissionMode('ask')"
+          >收回完全访问</el-button>
+        </div>
+      </section>
+
+      <section class="policy-section grants-section">
+        <div class="section-head">
+          <div>
+            <h2 class="kg-section-title">可信目录与有效授权</h2>
+            <p>这里填写的是服务器路径。可信目录内可创建和修改文件，删除操作仍会询问。</p>
+          </div>
+          <span class="section-count">{{ trustedRoots.length }} 个目录 · {{ activePermissionGrants.length }} 条授权</span>
+        </div>
+
+        <div class="root-entry">
+          <el-input
+            v-model="trustedRootInput"
+            placeholder="服务器绝对路径，例如 /srv/project/docs"
+            :disabled="grantSaving"
+            @keyup.enter="addRoot"
+          />
+          <el-select v-model="trustedRootLifetime" :disabled="grantSaving" aria-label="授权有效期">
+            <el-option value="session" label="30 分钟" />
+            <el-option value="extended" label="12 小时" />
+          </el-select>
+          <el-button :loading="grantSaving" @click="addRoot">添加可信目录</el-button>
+        </div>
+        <p class="server-path-note">
+          <KgIcon name="server" :size="13" />
+          浏览器本地文件夹不会出现在这里；请输入 Agent 所在服务器上的路径。
+        </p>
+
+        <div v-if="trustedRoots.length" class="trusted-root-list">
+          <article v-for="path in trustedRoots" :key="path" class="grant-row trusted-root-row">
+            <span class="grant-icon"><KgIcon name="disk" :size="15" /></span>
+            <div class="grant-copy">
+              <code>{{ path }}</code>
+              <span>可创建和修改文件 · 包含子目录</span>
+            </div>
+            <span class="grant-lifetime">{{ trustedRootExpiryText }}</span>
+            <el-button
+              text
+              type="danger"
+              :loading="removingRootPath === path"
+              @click="removeRoot(path)"
+            >移除目录</el-button>
+          </article>
+        </div>
+
+        <div class="grant-subhead">
+          <strong>操作授权</strong>
+          <span>“允许一次”与“本次会话允许”产生的授权，不会成为可信目录。</span>
+        </div>
+
+        <div v-if="activePermissionGrants.length" class="grant-list">
+          <article v-for="grant in activePermissionGrants" :key="grant.id" class="grant-row">
+            <span class="grant-icon"><KgIcon :name="grant.resourceKind === 'path' ? 'disk' : 'terminal'" :size="15" /></span>
+            <div class="grant-copy">
+              <code>{{ grant.path || grant.label || grant.resourceKind }}</code>
+              <span>{{ grantDescription(grant) }}</span>
+            </div>
+            <span class="grant-lifetime">{{ lifetimeLabel(grant.lifetime) }}</span>
+            <el-button
+              text
+              type="danger"
+              :loading="removingGrantId === grant.id"
+              @click="removeGrant(grant)"
+            >收回</el-button>
+          </article>
+        </div>
+        <div v-else class="grant-empty">
+          <KgIcon name="lock" :size="17" />
+          <span>还没有操作授权。普通修改会按当前模式询问。</span>
+        </div>
+      </section>
+
       <section class="policy-section custom-section">
         <div class="section-head">
           <div>
             <h2 class="kg-section-title">自定义策略</h2>
-            <p>黑名单和保护路径会收紧限制；添加只读白名单前，请确认命令没有副作用。</p>
+            <p>黑名单和保护路径会收紧限制；可信命令仍会经过权限和风险复核。</p>
           </div>
           <span class="section-count">{{ custom.length }} 条</span>
         </div>
@@ -149,7 +272,7 @@
         <el-form-item label="策略类型">
           <el-select v-model="form.kind" style="width: 100%">
             <el-option value="blacklist" label="黑名单（正则）" />
-            <el-option value="readonly" label="只读白名单（命令名）" />
+              <el-option value="readonly" label="可信命令（仍需复核）" />
             <el-option value="protected" label="保护路径（前缀）" />
           </el-select>
         </el-form-item>
@@ -179,8 +302,25 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useAuth.js'
+import { activeId } from '../composables/useChat.js'
+import {
+  PERMISSION_MODES,
+  addTrustedRoot,
+  fullAccessActive,
+  fullAccessDurationMinutes,
+  loadPermissionContext,
+  permissionContext,
+  permissionGrants,
+  permissionMode,
+  permissionModeMeta,
+  revokePermissionGrant,
+  revokeTrustedRoot,
+  setPermissionMode,
+  trustedRoots,
+} from '../composables/usePermissions.js'
 
 const custom = ref([])
 const builtin = ref(null)
@@ -189,9 +329,32 @@ const addDialog = ref(false)
 const saving = ref(false)
 const removingId = ref(null)
 const form = reactive({ kind: 'blacklist', pattern: '', note: '' })
+const permissionChanging = ref(false)
+const grantSaving = ref(false)
+const removingGrantId = ref('')
+const removingRootPath = ref('')
+const trustedRootInput = ref('')
+const trustedRootLifetime = ref('session')
+
+const activePermissionGrants = computed(() => permissionGrants.value.filter(
+  (grant) => !grant.revoked,
+))
+const trustedRootExpiryText = computed(() => {
+  if (permissionContext.expiresAt) {
+    return `有效至 ${new Date(permissionContext.expiresAt).toLocaleTimeString('zh-CN', {
+      hour: '2-digit', minute: '2-digit',
+    })}`
+  }
+  if (permissionContext.draftTtlSeconds) {
+    return permissionContext.draftTtlSeconds >= 3600
+      ? `${Math.round(permissionContext.draftTtlSeconds / 3600)} 小时`
+      : `${Math.round(permissionContext.draftTtlSeconds / 60)} 分钟`
+  }
+  return '当前会话'
+})
 
 const kindLabel = (kind) => ({
-  blacklist: '黑名单', readonly: '只读白名单', protected: '保护路径',
+  blacklist: '黑名单', readonly: '可信命令', protected: '保护路径',
 }[kind] || kind)
 
 const patternPlaceholder = computed(() => ({
@@ -202,9 +365,123 @@ const patternPlaceholder = computed(() => ({
 
 const kindHelp = computed(() => ({
   blacklist: '输入用于匹配危险命令的正则表达式。',
-  readonly: '输入确认没有副作用的命令名。',
+  readonly: '允许该命令进入后续权限和风险复核，不会自动执行。',
   protected: '输入禁止写入的路径前缀。',
 }[form.kind]))
+
+const ACTION_LABELS = {
+  read: '读取', create: '创建', write: '写入', modify: '修改',
+  delete: '删除', execute: '执行', control: '控制服务', elevate: '提权',
+}
+
+function grantDescription(grant) {
+  const actions = (grant.actions || []).map((action) => ACTION_LABELS[action] || action)
+  return actions.length ? `允许${actions.join('、')}${grant.recursive ? ' · 包含子目录' : ''}` : '授权范围由服务器决定'
+}
+
+function lifetimeLabel(lifetime) {
+  return {
+    once: '仅一次', session: '本次会话', extended: '12 小时',
+  }[lifetime] || lifetime || '本次会话'
+}
+
+async function requestFullAccessPassword() {
+  const { value } = await ElMessageBox.prompt(
+    `完全访问会跳过逐项确认，并以“${permissionContext.executorIdentity}”的系统权限运行。硬红线与独立安全复核仍然生效，所有操作仍会记录。`,
+    '开启完全访问',
+    {
+      inputType: 'password',
+      inputPlaceholder: '输入当前登录密码',
+      confirmButtonText: `开启 ${fullAccessDurationMinutes.value} 分钟`,
+      cancelButtonText: '取消',
+      inputValidator: (value) => Boolean(String(value || '').trim()) || '请输入密码',
+    },
+  )
+  return String(value || '')
+}
+
+async function choosePermissionMode(mode) {
+  if (permissionChanging.value || mode === permissionMode.value) return
+  if (mode === 'full_access' && !activeId.value) {
+    ElMessage.info('发送第一条消息创建任务后，才能开启完全访问')
+    return
+  }
+  if (mode === 'full_access' && !permissionContext.fullAccessAvailable) {
+    ElMessage.info(permissionContext.fullAccessUnavailableReason || '服务端未开放完全访问')
+    return
+  }
+  if (mode === 'trusted_workspace' && !trustedRoots.value.length) {
+    ElMessage.info('请先在下方添加一个可信目录')
+    return
+  }
+  permissionChanging.value = true
+  try {
+    const password = mode === 'full_access' ? await requestFullAccessPassword() : ''
+    const result = await setPermissionMode(mode, mode === 'full_access'
+      ? { password, durationMinutes: fullAccessDurationMinutes.value }
+      : mode === 'trusted_workspace'
+        ? {
+          trustedRoots: trustedRoots.value,
+          ttlSeconds: permissionContext.draftTtlSeconds || 30 * 60,
+        }
+        : {})
+    if (!result.supported && activeId.value) {
+      ElMessage.warning('当前后端尚未保存该设置')
+    } else {
+      ElMessage.success(mode === 'full_access' ? '完全访问已开启' : '权限已更新')
+    }
+  } catch (reason) {
+    if (reason === 'cancel' || reason === 'close' || reason?.action === 'cancel') return
+    ElMessage.error(reason.message || '权限修改失败')
+  } finally {
+    permissionChanging.value = false
+  }
+}
+
+async function addRoot() {
+  if (grantSaving.value) return
+  const path = trustedRootInput.value.trim()
+  if (!path) {
+    ElMessage.warning('请输入服务器目录')
+    return
+  }
+  grantSaving.value = true
+  try {
+    const result = await addTrustedRoot(path, { lifetime: trustedRootLifetime.value })
+    trustedRootInput.value = ''
+    ElMessage.success(result.supported ? '可信目录已添加' : '目录已加入当前页面，等待后端同步')
+  } catch (reason) {
+    ElMessage.error(reason.message || '可信目录添加失败')
+  } finally {
+    grantSaving.value = false
+  }
+}
+
+async function removeGrant(grant) {
+  if (removingGrantId.value) return
+  removingGrantId.value = grant.id
+  try {
+    await revokePermissionGrant(grant)
+    ElMessage.success('授权已收回，后续操作会再次询问')
+  } catch (reason) {
+    ElMessage.error(reason.message || '授权收回失败')
+  } finally {
+    removingGrantId.value = ''
+  }
+}
+
+async function removeRoot(path) {
+  if (removingRootPath.value) return
+  removingRootPath.value = path
+  try {
+    await revokeTrustedRoot(path)
+    ElMessage.success('可信目录已移除')
+  } catch (reason) {
+    ElMessage.error(reason.message || '可信目录移除失败')
+  } finally {
+    removingRootPath.value = ''
+  }
+}
 
 function openAddDialog() {
   error.value = ''
@@ -257,7 +534,10 @@ async function remove(id) {
   }
 }
 
-onMounted(refresh)
+onMounted(() => {
+  refresh()
+  if (activeId.value) loadPermissionContext(activeId.value).catch(() => {})
+})
 </script>
 
 <style scoped>
@@ -279,6 +559,135 @@ onMounted(refresh)
 }
 
 .policy-section { margin-top: var(--kg-space-8); }
+
+.permission-section,
+.grants-section {
+  padding-bottom: var(--kg-space-2);
+  border-bottom: 1px solid var(--kg-border-subtle);
+}
+
+.permission-heading { align-items: center; }
+.sync-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-pill);
+  color: var(--kg-text-tertiary);
+  font-size: 10px;
+}
+.sync-state.synced { border-color: var(--kg-success-border); color: var(--kg-success); }
+
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--kg-space-2);
+}
+
+.mode-card {
+  min-width: 0;
+  min-height: 82px;
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-bg-surface-1);
+  color: var(--kg-text-tertiary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--kg-motion-fast), background var(--kg-motion-fast),
+    color var(--kg-motion-fast);
+}
+
+.mode-card:hover:not(:disabled) { border-color: var(--kg-border-default); background: var(--kg-bg-surface-2); }
+.mode-card.active { border-color: var(--kg-accent-active); background: var(--kg-accent-soft); }
+.mode-card.is-warning.active { border-color: var(--kg-warning-border); background: var(--kg-warning-soft); }
+.mode-card.is-danger.active { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); }
+.mode-card:disabled { opacity: .55; cursor: not-allowed; }
+
+.mode-card-head { display: flex; align-items: center; gap: 7px; }
+.mode-card-head strong { color: var(--kg-text-primary); font-size: 12px; font-weight: 600; }
+.mode-card > span:last-child { font-size: 11px; line-height: 1.45; }
+.mode-selected { margin-left: auto; color: var(--kg-accent); }
+.mode-card.is-danger .mode-card-head :deep(.kg-icon) { color: var(--kg-danger); }
+
+.effective-access {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: var(--kg-space-4);
+  margin-top: var(--kg-space-3);
+  padding: 10px 12px;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-bg-code);
+}
+.effective-access.danger { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); }
+.effective-access > div { display: grid; flex: none; gap: 2px; }
+.effective-access > div span { color: var(--kg-text-tertiary); font-size: 10px; }
+.effective-access code { color: var(--kg-text-primary); font: 11px/1.5 var(--kg-font-mono); }
+.effective-access p { min-width: 0; flex: 1; margin: 0; color: var(--kg-text-secondary); font-size: 11px; line-height: 1.5; }
+
+.root-entry { display: grid; grid-template-columns: minmax(0, 1fr) 118px auto; gap: var(--kg-space-2); }
+.server-path-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 7px 0 0;
+  color: var(--kg-text-tertiary);
+  font-size: 10px;
+}
+
+.grant-list { display: grid; gap: 1px; margin-top: var(--kg-space-3); }
+.trusted-root-list { display: grid; gap: 1px; margin-top: var(--kg-space-3); }
+.trusted-root-row { border-color: var(--kg-success-border); }
+.grant-subhead {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-top: var(--kg-space-5);
+  color: var(--kg-text-tertiary);
+  font-size: 10px;
+}
+.grant-subhead strong { color: var(--kg-text-secondary); font-size: 11px; font-weight: 600; }
+.grant-row {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-top: 1px solid var(--kg-border-subtle);
+}
+.grant-row:last-child { border-bottom: 1px solid var(--kg-border-subtle); }
+.grant-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border-radius: var(--kg-radius-sm);
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-accent);
+}
+.grant-copy { min-width: 0; flex: 1; display: grid; gap: 3px; }
+.grant-copy code { overflow: hidden; color: var(--kg-text-primary); font: 11px/1.4 var(--kg-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.grant-copy span { color: var(--kg-text-tertiary); font-size: 10px; }
+.grant-lifetime { flex: none; color: var(--kg-text-tertiary); font-size: 10px; }
+.grant-empty {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: var(--kg-space-3);
+  border-top: 1px solid var(--kg-border-subtle);
+  border-bottom: 1px solid var(--kg-border-subtle);
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+}
 
 .section-head {
   display: flex;
@@ -429,6 +838,9 @@ onMounted(refresh)
 }
 
 @media (max-width: 1080px) {
+  .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .root-entry { grid-template-columns: minmax(0, 1fr) 118px; }
+  .root-entry > :deep(.el-button) { grid-column: 1 / -1; justify-self: end; }
   .rule-row { grid-template-columns: minmax(150px, .9fr) minmax(190px, 1.2fr); }
 }
 </style>
