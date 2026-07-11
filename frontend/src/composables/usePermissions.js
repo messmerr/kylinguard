@@ -1,7 +1,7 @@
 // Agent 权限上下文：前端只负责展示和提交选择，最终授权始终由后端判定。
 // 所有接口都集中在本文件，后端协议调整时不需要改动组件。
 import { computed, reactive, ref } from 'vue'
-import { apiFetch } from './useAuth.js'
+import { apiFetch } from './useApi.js'
 
 export const PERMISSION_MODES = Object.freeze([
   {
@@ -397,7 +397,7 @@ export async function loadPermissionContext(sessionId = permissionContext.sessio
 }
 
 export async function createFullAccessDraftSession(sessionId, {
-  password = '', durationMinutes = 30, ttlSeconds = null,
+  durationMinutes = 30, ttlSeconds = null,
   workspaceRoot = permissionContext.workspaceRoot,
   providerId = '', modelId = '', reasoningEffort = 'auto',
 } = {}) {
@@ -408,7 +408,6 @@ export async function createFullAccessDraftSession(sessionId, {
   if (!permissionContext.fullAccessAvailable) {
     throw new Error(permissionContext.fullAccessUnavailableReason || '当前服务未开放完全访问')
   }
-  if (!password) throw new Error('开启完全访问需要重新验证密码')
   const requestedTtl = ttlSeconds ?? durationMinutes * 60
   const effectiveTtl = Math.max(
     1, Math.min(requestedTtl, permissionContext.fullAccessMaxTtl),
@@ -423,7 +422,6 @@ export async function createFullAccessDraftSession(sessionId, {
       session_id: requestedSessionId,
       mode: 'full_access',
       ttl_seconds: effectiveTtl,
-      password,
       ...(selectedWorkspaceRoot ? { workspace_root: selectedWorkspaceRoot } : {}),
       ...(providerId && modelId ? {
         provider_id: providerId,
@@ -458,7 +456,7 @@ export async function createFullAccessDraftSession(sessionId, {
 // full_access 的后端升级协议集中在这里。若后端改为专门的 /full-access，
 // 只需替换本函数，不影响 PermissionSelector、App 或 PolicyView。
 async function persistPermissionMode(mode, {
-  password = '', durationMinutes = 30, ttlSeconds = null, trustedRoots: roots = null,
+  durationMinutes = 30, ttlSeconds = null, trustedRoots: roots = null,
 } = {}) {
   if (!permissionContext.sessionId) return { supported: false, reason: 'draft' }
   const requestedTtl = ttlSeconds ?? durationMinutes * 60
@@ -477,7 +475,6 @@ async function persistPermissionMode(mode, {
           ? (roots || trustedRoots.value) : [],
         ...(['trusted_workspace', 'full_access'].includes(mode)
           ? { ttl_seconds: effectiveTtl } : {}),
-        ...(mode === 'full_access' ? { password } : {}),
       }),
     },
   )
@@ -500,7 +497,6 @@ export async function setPermissionMode(mode, options = {}) {
     if (!permissionContext.fullAccessAvailable) {
       throw new Error(permissionContext.fullAccessUnavailableReason || '当前服务未开放完全访问')
     }
-    if (!options.password) throw new Error('开启完全访问需要重新验证密码')
   }
   const previous = {
     mode: permissionContext.mode,
@@ -624,7 +620,6 @@ export async function resolvePermissionRequest(card, decision, scope = null) {
           trusted_path: decision === 'trust_path' ? (scope?.path || '') : '',
           ...(decision === 'trust_path' && scope?.ttlSeconds
             ? { ttl_seconds: scope.ttlSeconds } : {}),
-          ...(scope?.password ? { password: scope.password } : {}),
         }),
       },
     )

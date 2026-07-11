@@ -134,7 +134,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import KgIcon from '../components/KgIcon.vue'
-import { apiFetch } from '../composables/useAuth.js'
+import { apiFetch } from '../composables/useApi.js'
 import { refreshSessions, sessions } from '../composables/useChat.js'
 
 const selectedId = ref('')
@@ -160,7 +160,6 @@ const TYPE_LABELS = {
   permission_result: '授权结果',
   permission_resolved: '授权已处理',
   permission_grants_revoked: '授权已收回',
-  permission_reauthentication_failed: '身份复验失败',
   permission_request_stale: '权限请求已失效',
   step_rewrite: '命令已改写',
   capability_error: '能力调用受阻',
@@ -210,7 +209,7 @@ function eventIcon(type) {
     confirm_request: 'warning', confirm_result: 'check', execution: 'terminal',
     permission_changed: 'shield', permission_request: 'lock', permission_result: 'check',
     permission_resolved: 'check', permission_grants_revoked: 'lock',
-    permission_reauthentication_failed: 'warning', permission_request_stale: 'warning',
+    permission_request_stale: 'warning',
     step_rewrite: 'terminal', capability_error: 'warning',
     execution_authorized: 'shield', execution_authorization_failed: 'warning',
     task_error: 'warning',
@@ -221,7 +220,6 @@ function eventIcon(type) {
 function eventTone(ev) {
   const action = ev.payload?.decision?.action
   if (ev.event_type === 'intent_filter'
-      || ev.event_type === 'permission_reauthentication_failed'
       || ev.event_type === 'execution_authorization_failed'
       || ev.event_type === 'task_error'
       || (ev.event_type === 'final_answer' && ev.payload?.aborted)
@@ -261,7 +259,6 @@ function brief(ev) {
     case 'permission_result': return `${p.approved ? '已授权' : '已拒绝'} · ${p.decision || '—'} · ${p.operator || '—'}`
     case 'permission_resolved': return `${p.decision || '—'} · ${p.capability || '—'} · ${p.operator || '—'}`
     case 'permission_grants_revoked': return `收回 ${p.revoked_grants ?? 0} 条授权 · ${p.operator || '—'}`
-    case 'permission_reauthentication_failed': return `管理员身份复验未通过 · ${p.operator || '—'}`
     case 'permission_request_stale': return `请求版本 ${p.request_version ?? '—'}，当前版本 ${p.current_version ?? '—'}`
     case 'step_rewrite': return compactText(p.reason || p.outcome || '已改写为安全调用', 72)
     case 'capability_error': return `${p.capability || '未知能力'} · ${p.code || '调用受阻'}`
@@ -346,7 +343,6 @@ function detailRows(ev) {
         { label: '操作人', value: p.operator || '—' },
         { label: '范围', value: p.scope || '—' },
       ]
-    case 'permission_reauthentication_failed':
     case 'permission_request_stale':
       return [
         { label: '操作人', value: p.operator || '—' },

@@ -2,7 +2,7 @@
 // 同一状态机同时服务实时流（含 assistant_delta）与历史回放（无 delta，
 // 用 plan.thought / final_answer.answer 整段渲染）。
 import { computed, reactive, ref } from 'vue'
-import { apiFetch } from './useAuth.js'
+import { apiFetch } from './useApi.js'
 import {
   applySessionModel,
   beginNewModelSession,
@@ -251,8 +251,6 @@ export function handleEvent(ev) {
         },
         operation,
         choices: ev.choices || null,
-        requiresReauthentication: Boolean(
-          request.requires_reauthentication || ev.requires_reauthentication),
         hidden: false,
         timeoutSeconds: ev.timeout_seconds ?? null,
       })

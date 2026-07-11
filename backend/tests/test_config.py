@@ -35,10 +35,9 @@ def test_环境变量覆盖(monkeypatch):
 
 def test_执行子进程配置不读取当前目录dotenv(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text(
-        "KG_LLM_API_KEY=should-not-load\n"
-        "KG_ADMIN_PASSWORD=should-not-load\n",
+        "KG_LLM_API_KEY=should-not-load\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
     settings = get_execution_settings()
-    assert settings.admin_password == ""
+    assert not hasattr(settings, "llm_api_key")

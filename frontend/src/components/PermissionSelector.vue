@@ -61,7 +61,6 @@ import {
   addTrustedRoot,
   fullAccessActive,
   fullAccessDurationMinutes,
-  executionIdentitySourceLabel,
   permissionContext,
   permissionMode,
   permissionModeMeta,
@@ -87,42 +86,18 @@ async function requestTrustedRoot() {
   return String(value || '').trim()
 }
 
-async function requestFullAccessPassword() {
-  const identitySource = executionIdentitySourceLabel()
-  const separationNotice = permissionContext.executionAccountSeparated
-    ? '执行账户 UID 与后端 UID 不同'
-    : '执行账户与后端使用相同 UID；工具子进程仍不会继承 LLM 密钥和管理员口令'
-  const rootNotice = permissionContext.grantsRoot
-    ? '警告：该执行身份拥有 root 权限。' : ''
-  const { value } = await ElMessageBox.prompt(
-    `Agent 将获得完整 shell、文件、网络和进程能力，不再逐项确认，并以“${permissionContext.executorIdentity}”（${identitySource}）运行。${separationNotice}。${rootNotice}访问会限时自动收回并写入审计。`,
-    '开启完全访问',
-    {
-      inputType: 'password',
-      inputPlaceholder: '输入当前登录密码',
-      confirmButtonText: `开启 ${fullAccessDurationMinutes.value} 分钟`,
-      cancelButtonText: '取消',
-      confirmButtonClass: 'el-button--danger',
-      inputValidator: (value) => Boolean(String(value || '').trim()) || '请输入密码',
-    },
-  )
-  return String(value || '')
-}
-
 async function chooseMode(mode) {
   if (changing.value || mode === permissionMode.value) return
   changing.value = true
   try {
-    let password = ''
     let result = null
     if (mode === 'trusted_workspace' && !trustedRoots.value.length) {
       const path = await requestTrustedRoot()
       result = await addTrustedRoot(path)
     }
-    if (mode === 'full_access') password = await requestFullAccessPassword()
     if (permissionMode.value !== mode) {
       result = await setChatPermissionMode(mode, {
-        password, durationMinutes: fullAccessDurationMinutes.value,
+        durationMinutes: fullAccessDurationMinutes.value,
       })
     }
     if (!result.supported && permissionContext.sessionId) {

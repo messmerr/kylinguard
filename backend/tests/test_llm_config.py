@@ -23,7 +23,6 @@ def _settings(tmp_path, **overrides):
         _env_file=None,
         db_path=str(tmp_path / "kg.db"),
         llm_secrets_dir=str(tmp_path / "control-secrets"),
-        admin_password="test-password",
         **overrides,
     )
 
@@ -258,11 +257,8 @@ class _FakePipeline:
         await emit({"type": "final_answer", "answer": "ok", "aborted": False})
 
 
-async def _login(client):
-    response = await client.post("/api/login", json={
-        "username": "admin", "password": "test-password",
-    })
-    return {"Authorization": f"Bearer {response.json()['token']}"}
+async def _request_headers(_client):
+    return {}
 
 
 def _sse(text):
@@ -277,15 +273,7 @@ async def test图形化配置API与会话切换且响应不泄漏key(tmp_path):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test",
     ) as client:
-        unauthenticated = await client.post("/api/llm/providers", json={
-            "name": "未登录不能配置",
-            "adapter": "openai_compatible",
-            "base_url": "https://gateway.example.test/v1",
-            "api_key": "sk-unauthenticated",
-            "models": [_model("m1")],
-        })
-        assert unauthenticated.status_code == 401
-        headers = await _login(client)
+        headers = await _request_headers(client)
         initial = (await client.get("/api/llm/config", headers=headers)).json()
         assert initial["providers"] == []
         assert initial["defaults"] == {
@@ -357,7 +345,7 @@ async def test未配置图形化模型时拒绝创建任务且不留下会话(tm
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test",
     ) as client:
-        headers = await _login(client)
+        headers = await _request_headers(client)
         response = await client.post(
             "/api/chat", headers=headers, json={"message": "hello"},
         )
@@ -381,7 +369,7 @@ async def test模型配置变更与审计同事务失败会完整回滚(tmp_path
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test",
     ) as client:
-        headers = await _login(client)
+        headers = await _request_headers(client)
         monkeypatch.setattr(app.state.audit, "append", fail_created)
         with pytest.raises(AuditError):
             await client.post("/api/llm/providers", headers=headers, json={
@@ -446,7 +434,7 @@ async def test会话模型绑定失败不会留下普通或完全访问幽灵会
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test",
     ) as client:
-        headers = await _login(client)
+        headers = await _request_headers(client)
         ordinary = await client.post(
             "/api/chat", headers=headers, json={"message": "不能留下幽灵会话"})
         assert ordinary.status_code == 400
@@ -457,7 +445,6 @@ async def test会话模型绑定失败不会留下普通或完全访问幽灵会
             "session_id": draft_id,
             "mode": "full_access",
             "ttl_seconds": 60,
-            "password": "test-password",
         })
         assert full_access.status_code == 400
         assert app.state.sessions.exists(draft_id) is False

@@ -508,7 +508,6 @@ def test_subprocess_environment_uses_allowlist():
         "LANG": "zh_CN.UTF-8",
         "TMPDIR": "/tmp",
         "KG_LLM_API_KEY": "llm-secret",
-        "KG_ADMIN_PASSWORD": "admin-secret",
         "OPENAI_API_KEY": "openai-secret",
         "HTTPS_PROXY": "http://user:password@proxy",
         "SSH_AUTH_SOCK": "/tmp/agent.sock",

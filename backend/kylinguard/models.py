@@ -71,7 +71,7 @@ class PermissionRequest(BaseModel):
     capability: str
     resource: str = ""
     suggested_path: str = ""
-    requires_reauthentication: bool = False
+    single_action_only: bool = False
     created_at: float
 
 

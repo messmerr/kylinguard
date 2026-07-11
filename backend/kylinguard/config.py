@@ -36,16 +36,11 @@ class Settings(BaseSettings):
     privileged_helper: str = ""  # 生产环境设为 root-owned 受限 helper；空 = 不启用
 
     # 会话权限。full_access 默认可用；显式设为 false 才关闭。它以配置的
-    # exec_user 或后端当前 OS 身份执行，仍需管理员密码复验并受 TTL 限制。
+    # exec_user 或后端当前 OS 身份执行，并受 TTL 限制。
     allow_full_access: bool = True
     permission_default_ttl: int = 30 * 60
     permission_max_ttl: int = 12 * 3600
     full_access_max_ttl: int = 30 * 60
-
-    # 鉴权（管理员账户在首次启动时创建；密码留空则不创建、无法登录）
-    admin_user: str = "admin"
-    admin_password: str = ""
-    token_ttl: int = 12 * 3600  # 登录 token 有效期（秒）
 
     # 感知
     snapshot_interval: int = 30  # 快照后台轮询间隔（秒）

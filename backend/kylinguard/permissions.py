@@ -66,7 +66,7 @@ def normalize_trusted_root(value: str) -> str:
         resolved = path.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
         raise PermissionError("invalid_trusted_root", "可信目录路径无法解析。") from exc
-    # 信任文件系统根目录等价于放开全部文件写入，应使用 full_access 并复验。
+    # 信任文件系统根目录等价于放开全部文件写入，应使用 full_access。
     if resolved.parent == resolved:
         raise PermissionError(
             "trusted_root_too_broad", "不能把文件系统根目录设为可信目录。"
@@ -114,7 +114,7 @@ class PermissionRequests:
         capability: str,
         resource: str = "",
         suggested_path: str = "",
-        requires_reauthentication: bool = False,
+        single_action_only: bool = False,
     ) -> tuple[str, asyncio.Future]:
         if not action_fingerprint or not capability:
             raise PermissionError(
@@ -129,7 +129,7 @@ class PermissionRequests:
             capability=capability,
             resource=resource,
             suggested_path=suggested_path,
-            requires_reauthentication=requires_reauthentication,
+            single_action_only=single_action_only,
             created_at=time.time(),
         )
         future = asyncio.get_running_loop().create_future()

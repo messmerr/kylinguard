@@ -47,21 +47,12 @@
       </div>
     </section>
 
-    <div class="user-bar">
-      <span class="user-avatar" aria-hidden="true">{{ userInitial }}</span>
-      <span class="username" :title="username">{{ username }}</span>
-      <button class="logout-btn" type="button" title="退出登录"
-              aria-label="退出登录" @click="logout">
-        <KgIcon name="logout" :size="16" />
-      </button>
-    </div>
   </aside>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { activeId, loadSession, newSession, running, sessions } from '../composables/useChat.js'
-import { logout, username } from '../composables/useAuth.js'
 import KgIcon from './KgIcon.vue'
 import KgLogo from './KgLogo.vue'
 
@@ -78,8 +69,6 @@ const VIEWS = [
   { key: 'dashboard', icon: 'dashboard', label: '总览' },
   { key: 'alerts', icon: 'bell', label: '告警' },
 ]
-
-const userInitial = computed(() => (username.value || 'U').trim().slice(0, 1).toUpperCase())
 
 function startTask() {
   historyOpen.value = false
@@ -344,59 +333,6 @@ function timeText(ts) {
   line-height: 18px;
 }
 
-.user-bar {
-  min-height: 52px;
-  padding: var(--kg-space-2) var(--kg-space-3);
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: var(--kg-space-2);
-  border-top: 1px solid var(--kg-border-subtle);
-}
-
-.user-avatar {
-  width: 26px;
-  height: 26px;
-  display: grid;
-  flex: none;
-  place-items: center;
-  border: 1px solid var(--kg-border-subtle);
-  border-radius: var(--kg-radius-sm);
-  background: var(--kg-bg-surface-2);
-  color: var(--kg-text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.username {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  color: var(--kg-text-secondary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.logout-btn {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  flex: none;
-  place-items: center;
-  border: 0;
-  border-radius: var(--kg-radius-sm);
-  background: transparent;
-  color: var(--kg-text-tertiary);
-  cursor: pointer;
-  transition: color var(--kg-motion-fast), background var(--kg-motion-fast);
-}
-
-.logout-btn:hover {
-  background: var(--kg-bg-surface-2);
-  color: var(--kg-text-primary);
-}
-
 @media (max-width: 720px) {
   .sidebar {
     position: relative;
@@ -413,8 +349,7 @@ function timeText(ts) {
 
   .brand-copy,
   .new-label,
-  .nav-label,
-  .username {
+  .nav-label {
     display: none;
   }
 

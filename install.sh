@@ -52,7 +52,7 @@ KG_LLM_SECRETS_DIR=$STATE_DIR/provider-secrets
 KG_EXEC_USER=$EXEC_USER
 KG_PRIVILEGED_HELPER=$HELPER_DIR/execctl
 EOF
-  echo "已创建 $CONFIG_DIR/kylinguard.env，请至少设置真实 KG_ADMIN_PASSWORD。"
+  echo "已创建 $CONFIG_DIR/kylinguard.env。"
 fi
 
 if ! grep -q '^KG_WORKSPACE_ROOT=' "$CONFIG_DIR/kylinguard.env"; then

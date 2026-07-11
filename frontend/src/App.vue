@@ -1,6 +1,5 @@
 <template>
-  <LoginView v-if="!authed" />
-  <div v-else class="app-shell">
+  <div class="app-shell">
     <Sidebar :view="view" :inert="showPanel" @change-view="changeView" />
     <section class="workspace">
       <header class="page-bar" :inert="showPanel">
@@ -47,7 +46,6 @@
 <script setup>
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { authed } from './composables/useAuth.js'
 import { activeId, refreshSessions, sessions } from './composables/useChat.js'
 import { loadModelConfig } from './composables/useModels.js'
 import {
@@ -60,7 +58,6 @@ import {
 import AuditView from './views/AuditView.vue'
 import ChatView from './views/ChatView.vue'
 import DashboardView from './views/DashboardView.vue'
-import LoginView from './views/LoginView.vue'
 import AlertsView from './views/AlertsView.vue'
 import ModelSettingsView from './views/ModelSettingsView.vue'
 import PolicyView from './views/PolicyView.vue'
@@ -147,12 +144,8 @@ function closeStatusPanel() {
   requestAnimationFrame(() => statusTrigger.value?.focus())
 }
 
-watch(authed, (v) => {
-  if (v) {
-    refreshSessions().catch(() => {})
-    loadModelConfig().catch(() => {})
-  }
-}, { immediate: true })
+refreshSessions().catch(() => {})
+loadModelConfig().catch(() => {})
 </script>
 
 <style scoped>

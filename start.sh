@@ -17,17 +17,8 @@ fi
 if [ ! -f .env ]; then
   cp .env.example .env
   cat <<'EOF'
-已自动创建 .env，请至少补充以下配置后重新执行：
-- KG_ADMIN_PASSWORD
-
-模型提供商与 API Key 可以在登录后的“模型服务”页面配置。
+已自动创建 .env。模型提供商与 API Key 可在“模型服务”页面配置。
 EOF
-  exit 1
-fi
-
-if grep -Eq '^KG_ADMIN_PASSWORD=(|请设置强密码|change-me|changeme|password)$' .env 2>/dev/null; then
-  echo "检测到 .env 尚未设置安全的 KG_ADMIN_PASSWORD，请先改成你的登录密码。" >&2
-  exit 1
 fi
 
 echo "正在构建并启动 KylinGuard Docker 容器..."

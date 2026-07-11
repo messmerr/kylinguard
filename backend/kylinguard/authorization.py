@@ -37,7 +37,7 @@ _DESTRUCTIVE_COMMAND_RULES = {
 
 
 def execution_profile_fingerprint(settings) -> str:
-    """绑定 FULL_ACCESS 获批时的实际执行边界，配置改变后必须重新复验。"""
+    """绑定 FULL_ACCESS 获批时的实际执行边界，配置改变后必须重新开启。"""
     target_uid = os.geteuid()
     if settings.exec_user:
         try:
@@ -385,7 +385,7 @@ def apply_permission_mode(
 ) -> GateDecision:
     """在风险裁决上应用会话权限。
 
-    FULL_ACCESS 是管理员复验后的绝对产品权限：它可以覆盖精确路径等产品层
+    FULL_ACCESS 是用户显式开启的绝对产品权限：它可以覆盖精确路径等产品层
     限制，避免结构化文件工具与 shell 出现路线依赖。协议/参数无效等规则层
     hard deny 仍由 ``base.action == DENY`` 保持不可执行。
     """

@@ -1,7 +1,7 @@
-"""FastAPI 入口：鉴权、SSE 任务流、人工确认、审计查询与前端托管。
+"""FastAPI 入口：SSE 任务流、人工确认、审计查询与前端托管。
 
-除健康检查和登录外，业务端点统一验证 Bearer token；人工确认会把当前
-管理员身份写入审计链。SSE 断开时任务安全取消并补写可回放终态。
+应用按本机单用户运维工具运行，业务端点不要求登录；人工确认统一以本机
+操作者身份写入审计链。SSE 断开时任务安全取消并补写可回放终态。
 """
 import asyncio
 import getpass
@@ -10,6 +10,7 @@ import logging
 import os
 import pwd
 import shutil
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -17,7 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,7 +26,6 @@ from pydantic import BaseModel, Field, SecretStr, field_validator, model_validat
 
 from kylinguard.audit import AuditError, AuditLog
 from kylinguard.authorization import execution_profile_fingerprint
-from kylinguard.auth import AuthStore, TokenManager
 from kylinguard.config import Settings, get_settings
 from kylinguard.llm import (
     LLMError,
@@ -67,6 +67,7 @@ from kylinguard.storage_security import secure_database_path
 from kylinguard.subprocess_env import safe_subprocess_env
 
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+_LOCAL_OPERATOR = "local"
 logger = logging.getLogger(__name__)
 
 ReasoningEffort = Literal[
@@ -103,7 +104,7 @@ class ChatRequest(BaseModel):
                 raise ValueError("设置可信目录或有效期时必须同时指定 permission_mode")
             return self
         if self.permission_mode == PermissionMode.FULL_ACCESS:
-            raise ValueError("完全访问必须在会话创建后通过独立权限接口复验密码")
+            raise ValueError("完全访问必须在会话创建后通过独立权限接口启用")
         if self.permission_mode == PermissionMode.TRUSTED_WORKSPACE:
             if not self.trusted_roots:
                 raise ValueError("信任目录模式至少需要一个可信目录")
@@ -117,11 +118,6 @@ class ConfirmRequest(BaseModel):
     approved: bool
 
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
 class SessionCreateRequest(BaseModel):
     """在首条消息前原子创建完全访问草稿会话。"""
 
@@ -132,7 +128,6 @@ class SessionCreateRequest(BaseModel):
     )
     mode: PermissionMode
     ttl_seconds: int = Field(ge=1)
-    password: str = Field(min_length=1, max_length=1024)
     workspace_root: str = Field(default="", max_length=4096)
     provider_id: str = Field(default="", max_length=64)
     model_id: str = Field(default="", max_length=256)
@@ -225,7 +220,6 @@ class PermissionUpdateRequest(BaseModel):
     version: int = Field(ge=1)
     trusted_roots: list[str] = Field(default_factory=list, max_length=32)
     ttl_seconds: int | None = Field(default=None, ge=1)
-    password: str = Field(default="", max_length=1024)
 
 
 class PermissionResolveRequest(BaseModel):
@@ -233,7 +227,6 @@ class PermissionResolveRequest(BaseModel):
     context_version: int = Field(ge=1)
     trusted_path: str = ""
     ttl_seconds: int | None = Field(default=None, ge=1)
-    password: str = Field(default="", max_length=1024)
 
 
 class PolicyRequest(BaseModel):
@@ -270,19 +263,17 @@ class AlertChannelRequest(BaseModel):
 def create_app(settings: Settings | None = None,
                *, with_tools: bool = True) -> FastAPI:
     settings = settings or get_settings()
-    if settings.admin_password.strip() in {
-        "请设置强密码", "change-me", "changeme", "password",
-    }:
-        raise ValueError("KG_ADMIN_PASSWORD 仍是公开示例值，请设置真实管理员密码。")
     secure_database_path(settings.db_path)
+    with sqlite3.connect(settings.db_path) as connection:
+        connection.execute("DROP TABLE IF EXISTS users")
     audit = AuditLog(settings.db_path)
     sessions = SessionStore(settings.db_path)
     llm_config = LLMConfigStore(settings.db_path, settings)
     llm_runtime = LLMRuntime(llm_config, settings)
     current_execution_profile = execution_profile_fingerprint(settings)
     # FULL_ACCESS 从不跨后端进程重启继承。sudoers、附加组、capabilities 或
-    # 服务沙箱都可能在配置指纹未变化时扩大同一 UID 的权限；重启后重新复验
-    # 一次比尝试穷举所有 OS 授权状态更可靠。kill switch 使用更具体的原因。
+    # 服务沙箱都可能在配置指纹未变化时扩大同一 UID 的权限；重启后主动收回
+    # 比尝试穷举所有 OS 授权状态更可靠。kill switch 使用更具体的原因。
     for summary in sessions.list():
         context = sessions.get_permissions(summary["id"])
         if context is None or context.mode != PermissionMode.FULL_ACCESS:
@@ -321,9 +312,6 @@ def create_app(settings: Settings | None = None,
                     commit=False,
                     lock_held=True,
                 )
-    auth_store = AuthStore(settings.db_path)
-    auth_store.ensure_admin(settings.admin_user, settings.admin_password)
-    tokens = TokenManager(settings.token_ttl)
     policies = PolicyStore(settings.db_path)
     tools = ToolManager(exec_user=settings.exec_user)
     confirmations = Confirmations()
@@ -356,7 +344,6 @@ def create_app(settings: Settings | None = None,
             await tools.stop()
         llm_config.close()
         sessions.close()
-        auth_store.close()
         policies.close()
         alert_rule_store.close()
         audit.close()
@@ -382,19 +369,13 @@ def create_app(settings: Settings | None = None,
     app.state.sessions = sessions
     app.state.snapshot_cache = snapshot_cache
     app.state.alert_rule_store = alert_rule_store
-    app.state.auth = auth_store
-    app.state.tokens = tokens
     app.state.policies = policies
     app.state.llm_config = llm_config
     app.state.llm_runtime = llm_runtime
 
-    async def require_auth(authorization: str = Header("")) -> str:
-        """所有业务端点的鉴权依赖：返回当前管理员用户名。"""
-        token = authorization.removeprefix("Bearer ").strip()
-        username = app.state.tokens.validate(token)
-        if not username:
-            raise HTTPException(401, "未登录或登录已过期")
-        return username
+    async def local_operator() -> str:
+        """为单用户本机部署提供稳定的审计操作者标识。"""
+        return _LOCAL_OPERATOR
 
     def permission_http_error(
         error: SessionPermissionError, status_code: int = 400
@@ -638,28 +619,15 @@ def create_app(settings: Settings | None = None,
     async def health():
         return {"status": "ok"}
 
-    @app.post("/api/login")
-    async def login(req: LoginRequest):
-        if not app.state.auth.verify(req.username, req.password):
-            raise HTTPException(401, "用户名或密码错误")
-        return {"token": app.state.tokens.issue(req.username),
-                "username": req.username}
-
-    @app.post("/api/logout")
-    async def logout(authorization: str = Header("")):
-        app.state.tokens.revoke(
-            authorization.removeprefix("Bearer ").strip())
-        return {"ok": True}
-
     # ---- 模型服务与运行时配置 ----
 
     @app.get("/api/llm/config")
-    async def get_llm_config(_user: str = Depends(require_auth)):
+    async def get_llm_config(_user: str = Depends(local_operator)):
         return llm_config_payload()
 
     @app.post("/api/llm/providers", status_code=201)
     async def create_llm_provider(
-        req: LLMProviderRequest, user: str = Depends(require_auth),
+        req: LLMProviderRequest, user: str = Depends(local_operator),
     ):
         api_key = (req.api_key.get_secret_value()
                    if req.api_key is not None else "")
@@ -691,7 +659,7 @@ def create_app(settings: Settings | None = None,
     @app.put("/api/llm/providers/{provider_id}")
     async def update_llm_provider(
         provider_id: str, req: LLMProviderRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(local_operator),
     ):
         if req.version is None:
             raise HTTPException(422, detail={
@@ -732,7 +700,7 @@ def create_app(settings: Settings | None = None,
     @app.delete("/api/llm/providers/{provider_id}")
     async def delete_llm_provider(
         provider_id: str, req: LLMProviderActionRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(local_operator),
     ):
         try:
             with app.state.audit.serialized():
@@ -761,7 +729,7 @@ def create_app(settings: Settings | None = None,
     @app.post("/api/llm/providers/{provider_id}/test")
     async def test_llm_provider(
         provider_id: str, req: LLMProviderActionRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(local_operator),
     ):
         try:
             provider = app.state.llm_config.get_provider(provider_id)
@@ -783,7 +751,7 @@ def create_app(settings: Settings | None = None,
     @app.post("/api/llm/providers/{provider_id}/discover-models")
     async def discover_llm_models(
         provider_id: str, req: LLMProviderActionRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(local_operator),
     ):
         try:
             provider = app.state.llm_config.get_provider(provider_id)
@@ -811,7 +779,7 @@ def create_app(settings: Settings | None = None,
 
     @app.put("/api/llm/defaults")
     async def update_llm_defaults(
-        req: LLMDefaultsRequest, user: str = Depends(require_auth),
+        req: LLMDefaultsRequest, user: str = Depends(local_operator),
     ):
         try:
             with app.state.audit.serialized():
@@ -838,7 +806,7 @@ def create_app(settings: Settings | None = None,
         return llm_config_payload()
 
     @app.post("/api/chat")
-    async def chat(req: ChatRequest, user: str = Depends(require_auth)):
+    async def chat(req: ChatRequest, user: str = Depends(local_operator)):
         created = not req.session_id
         requested_model = model_selection(
             req.provider_id, req.model_id, req.reasoning_effort)
@@ -1073,7 +1041,7 @@ def create_app(settings: Settings | None = None,
 
     @app.post("/api/confirm")
     async def confirm(req: ConfirmRequest,
-                      user: str = Depends(require_auth)):
+                      user: str = Depends(local_operator)):
         # operator 随 confirm_result 写入审计链：确认决断归因到管理员账号
         return {"ok": app.state.confirmations.resolve(
             req.confirm_id, req.approved, operator=user)}
@@ -1081,18 +1049,13 @@ def create_app(settings: Settings | None = None,
     @app.post("/api/sessions", status_code=201)
     async def create_draft_session(
         req: SessionCreateRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(local_operator),
     ):
-        """经密码复验后，原子创建首条消息前的完全访问会话。"""
+        """原子创建首条消息前的完全访问会话。"""
         available, reason = full_access_status()
         if not available:
             raise HTTPException(403, detail={
                 "code": "full_access_disabled", "message": reason,
-            })
-        if not app.state.auth.verify(user, req.password):
-            raise HTTPException(403, detail={
-                "code": "full_access_reauthentication_failed",
-                "message": "管理员密码复验失败，完全访问会话未创建。",
             })
         requested_model = model_selection(
             req.provider_id, req.model_id, req.reasoning_effort)
@@ -1155,7 +1118,7 @@ def create_app(settings: Settings | None = None,
         }
 
     @app.get("/api/sessions")
-    async def list_sessions(_user: str = Depends(require_auth)):
+    async def list_sessions(_user: str = Depends(local_operator)):
         summaries = app.state.sessions.list()
         for summary in summaries:
             try:
@@ -1172,7 +1135,7 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/api/sessions/{session_id}/model")
     async def get_session_model(
-        session_id: str, _user: str = Depends(require_auth),
+        session_id: str, _user: str = Depends(local_operator),
     ):
         if not app.state.sessions.exists(session_id):
             raise HTTPException(404, "会话不存在")
@@ -1184,7 +1147,7 @@ def create_app(settings: Settings | None = None,
     @app.put("/api/sessions/{session_id}/model")
     async def update_session_model(
         session_id: str, req: SessionModelRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(local_operator),
     ):
         if not app.state.sessions.exists(session_id):
             raise HTTPException(404, "会话不存在")
@@ -1218,7 +1181,7 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/api/sessions/{session_id}/permissions")
     async def get_session_permissions(
-        session_id: str, _user: str = Depends(require_auth)
+        session_id: str, _user: str = Depends(local_operator)
     ):
         context = app.state.sessions.get_permissions(session_id)
         if context is None:
@@ -1229,7 +1192,7 @@ def create_app(settings: Settings | None = None,
     async def update_session_permissions(
         session_id: str,
         req: PermissionUpdateRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(local_operator),
     ):
         previous = app.state.sessions.get_permissions(session_id)
         if previous is None:
@@ -1241,16 +1204,6 @@ def create_app(settings: Settings | None = None,
                     403, detail={
                         "code": "full_access_disabled", "message": reason,
                     })
-            if not req.password or not app.state.auth.verify(user, req.password):
-                app.state.audit.append(session_id, "permission_reauthentication_failed", {
-                    "operator": user,
-                    "source": "settings",
-                    "requested_mode": PermissionMode.FULL_ACCESS.value,
-                })
-                raise HTTPException(403, detail={
-                    "code": "full_access_reauthentication_failed",
-                    "message": "管理员密码复验失败，完全访问未启用。",
-                })
         try:
             expiry = permission_expiry(req.mode, req.ttl_seconds)
             def mutate_permissions(_connection):
@@ -1293,7 +1246,7 @@ def create_app(settings: Settings | None = None,
     async def list_session_grants(
         session_id: str,
         include_inactive: bool = False,
-        _user: str = Depends(require_auth),
+        _user: str = Depends(local_operator),
     ):
         if not app.state.sessions.exists(session_id):
             raise HTTPException(404, "会话不存在")
@@ -1303,7 +1256,7 @@ def create_app(settings: Settings | None = None,
 
     @app.delete("/api/sessions/{session_id}/grants")
     async def revoke_session_grants(
-        session_id: str, user: str = Depends(require_auth)
+        session_id: str, user: str = Depends(local_operator)
     ):
         if not app.state.sessions.exists(session_id):
             raise HTTPException(404, "会话不存在")
@@ -1326,7 +1279,7 @@ def create_app(settings: Settings | None = None,
     @app.delete("/api/sessions/{session_id}/grants/{grant_id}")
     async def revoke_session_grant(
         session_id: str, grant_id: str,
-        user: str = Depends(require_auth),
+        user: str = Depends(local_operator),
     ):
         if not app.state.sessions.exists(session_id):
             raise HTTPException(404, "会话不存在")
@@ -1353,7 +1306,7 @@ def create_app(settings: Settings | None = None,
     async def resolve_permission_request(
         request_id: str,
         req: PermissionResolveRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(local_operator),
     ):
         pending = app.state.permission_requests.get(request_id)
         if pending is None:
@@ -1377,24 +1330,12 @@ def create_app(settings: Settings | None = None,
             })
             raise permission_http_error(PermissionVersionConflict(), 409)
 
-        if (pending.requires_reauthentication
+        if (pending.single_action_only
                 and req.decision != PermissionDecision.DENY):
             if req.decision != PermissionDecision.ALLOW_ONCE:
                 raise HTTPException(400, detail={
                     "code": "high_risk_scope_not_allowed",
                     "message": "高风险操作只能按当前动作单次授权。",
-                })
-            if not req.password or not app.state.auth.verify(user, req.password):
-                app.state.audit.append(pending.session_id,
-                                       "permission_reauthentication_failed", {
-                    "operator": user,
-                    "request_id": request_id,
-                    "action_fingerprint": pending.action_fingerprint,
-                    "capability": pending.capability,
-                })
-                raise HTTPException(403, detail={
-                    "code": "permission_reauthentication_failed",
-                    "message": "高风险操作需要重新验证管理员密码。",
                 })
 
         grant = None
@@ -1533,25 +1474,25 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/api/sessions/{session_id}/events")
     async def session_events(session_id: str,
-                             _user: str = Depends(require_auth)):
+                             _user: str = Depends(local_operator)):
         if not app.state.sessions.exists(session_id):
             raise HTTPException(404, "会话不存在")
         return {"events": app.state.audit.events(session_id)}
 
     @app.get("/api/sessions/{session_id}/verify")
     async def session_verify(session_id: str,
-                             _user: str = Depends(require_auth)):
+                             _user: str = Depends(local_operator)):
         if not app.state.sessions.exists(session_id):
             raise HTTPException(404, "会话不存在")
         return {"ok": app.state.audit.verify_chain(session_id)}
 
     @app.get("/api/stats")
-    async def stats(_user: str = Depends(require_auth)):
+    async def stats(_user: str = Depends(local_operator)):
         return {"sessions": len(app.state.sessions.list()),
                 **app.state.audit.stats()}
 
     @app.get("/api/status")
-    async def status(_user: str = Depends(require_auth)):
+    async def status(_user: str = Depends(local_operator)):
         import json as _j
         snapshot, age = await app.state.snapshot_cache.get()
         body = _j.dumps({"snapshot": snapshot,
@@ -1561,11 +1502,11 @@ def create_app(settings: Settings | None = None,
         return _R(content=body.encode("utf-8"), media_type="application/json")
 
     @app.get("/api/alerts")
-    async def list_alerts(_user: str = Depends(require_auth)):
+    async def list_alerts(_user: str = Depends(local_operator)):
         return {"alerts": app.state.snapshot_cache.alert_store.active()}
 
     @app.post("/api/alerts/{alert_id}/ack")
-    async def ack_alert(alert_id: str, _user: str = Depends(require_auth)):
+    async def ack_alert(alert_id: str, _user: str = Depends(local_operator)):
         if not app.state.snapshot_cache.alert_store.ack(alert_id):
             raise HTTPException(404, "告警不存在")
         return {"ok": True}
@@ -1573,13 +1514,13 @@ def create_app(settings: Settings | None = None,
     # ---- 告警规则 ----
 
     @app.get("/api/alert-rules")
-    async def list_alert_rules(_user: str = Depends(require_auth)):
+    async def list_alert_rules(_user: str = Depends(local_operator)):
         rules = app.state.alert_rule_store.list_rules()
         return {"rules": [vars(r) for r in rules]}
 
     @app.post("/api/alert-rules")
     async def create_alert_rule(req: AlertRuleRequest,
-                                _user: str = Depends(require_auth)):
+                                _user: str = Depends(local_operator)):
         rid = app.state.alert_rule_store.add_rule(
             req.name, req.metric, req.operator, req.threshold,
             req.severity, req.silence_minutes, req.channel_ids, req.enabled)
@@ -1587,7 +1528,7 @@ def create_app(settings: Settings | None = None,
 
     @app.put("/api/alert-rules/{rule_id}")
     async def update_alert_rule(rule_id: int, req: AlertRuleRequest,
-                                _user: str = Depends(require_auth)):
+                                _user: str = Depends(local_operator)):
         ok = app.state.alert_rule_store.update_rule(
             rule_id, name=req.name, metric=req.metric, operator=req.operator,
             threshold=req.threshold, severity=req.severity,
@@ -1598,7 +1539,7 @@ def create_app(settings: Settings | None = None,
         return {"ok": True}
 
     @app.delete("/api/alert-rules/{rule_id}")
-    async def delete_alert_rule(rule_id: int, _user: str = Depends(require_auth)):
+    async def delete_alert_rule(rule_id: int, _user: str = Depends(local_operator)):
         if not app.state.alert_rule_store.delete_rule(rule_id):
             raise HTTPException(404, "规则不存在")
         return {"ok": True}
@@ -1606,20 +1547,20 @@ def create_app(settings: Settings | None = None,
     # ---- 推送渠道 ----
 
     @app.get("/api/alert-channels")
-    async def list_alert_channels(_user: str = Depends(require_auth)):
+    async def list_alert_channels(_user: str = Depends(local_operator)):
         channels = app.state.alert_rule_store.list_channels()
         return {"channels": [vars(c) for c in channels]}
 
     @app.post("/api/alert-channels")
     async def create_alert_channel(req: AlertChannelRequest,
-                                   _user: str = Depends(require_auth)):
+                                   _user: str = Depends(local_operator)):
         cid = app.state.alert_rule_store.add_channel(
             req.name, req.type, req.config, req.enabled)
         return {"id": cid}
 
     @app.put("/api/alert-channels/{ch_id}")
     async def update_alert_channel(ch_id: int, req: AlertChannelRequest,
-                                   _user: str = Depends(require_auth)):
+                                   _user: str = Depends(local_operator)):
         ok = app.state.alert_rule_store.update_channel(
             ch_id, name=req.name, type=req.type,
             config=req.config, enabled=req.enabled)
@@ -1629,13 +1570,13 @@ def create_app(settings: Settings | None = None,
 
     @app.delete("/api/alert-channels/{ch_id}")
     async def delete_alert_channel(ch_id: int,
-                                   _user: str = Depends(require_auth)):
+                                   _user: str = Depends(local_operator)):
         if not app.state.alert_rule_store.delete_channel(ch_id):
             raise HTTPException(404, "渠道不存在")
         return {"ok": True}
 
     @app.post("/api/alert-channels/{ch_id}/test")
-    async def test_alert_channel(ch_id: int, _user: str = Depends(require_auth)):
+    async def test_alert_channel(ch_id: int, _user: str = Depends(local_operator)):
         ch = app.state.alert_rule_store.get_channel(ch_id)
         if not ch:
             raise HTTPException(404, "渠道不存在")
@@ -1651,23 +1592,23 @@ def create_app(settings: Settings | None = None,
     # ---- 告警历史 ----
 
     @app.get("/api/alert-history")
-    async def list_alert_history(_user: str = Depends(require_auth)):
+    async def list_alert_history(_user: str = Depends(local_operator)):
         entries = app.state.alert_rule_store.list_history()
         return {"history": [vars(e) for e in entries]}
 
     @app.delete("/api/alert-history")
-    async def clear_alert_history(_user: str = Depends(require_auth)):
+    async def clear_alert_history(_user: str = Depends(local_operator)):
         app.state.alert_rule_store.clear_history()
         return {"ok": True}
 
     @app.get("/api/policies")
-    async def list_policies(_user: str = Depends(require_auth)):
+    async def list_policies(_user: str = Depends(local_operator)):
         return {"custom": app.state.policies.list(),
                 "builtin": builtin_rules(), "kinds": list(KINDS)}
 
     @app.post("/api/policies")
     async def add_policy(req: PolicyRequest,
-                         user: str = Depends(require_auth)):
+                         user: str = Depends(local_operator)):
         try:
             with app.state.audit.serialized():
                 with app.state.policies.transaction() as connection:
@@ -1694,7 +1635,7 @@ def create_app(settings: Settings | None = None,
 
     @app.delete("/api/policies/{policy_id}")
     async def delete_policy(policy_id: int,
-                            user: str = Depends(require_auth)):
+                            user: str = Depends(local_operator)):
         with app.state.audit.serialized():
             with app.state.policies.transaction() as connection:
                 policy = app.state.policies.get(policy_id)

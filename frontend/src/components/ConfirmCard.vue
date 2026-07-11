@@ -197,22 +197,6 @@ function decisionScope(decision) {
 }
 
 async function confirmHighRisk() {
-  if (props.card.requiresReauthentication) {
-    const { value } = await ElMessageBox.prompt(
-      `${operationSummary.value}${targetPath.value ? `\n目标：${targetPath.value}` : ''}`,
-      '重新验证管理员密码',
-      {
-        inputType: 'password',
-        inputPlaceholder: '输入当前管理员密码',
-        inputValidator: (input) => Boolean(input?.trim()) || '请输入管理员密码',
-        confirmButtonText: primaryActionLabel.value,
-        cancelButtonText: '返回检查',
-        confirmButtonClass: 'el-button--danger',
-        distinguishCancelAndClose: true,
-      },
-    )
-    return value
-  }
   await ElMessageBox.confirm(
     `${operationSummary.value}${targetPath.value ? `\n目标：${targetPath.value}` : ''}`,
     '确认执行高风险操作',
@@ -223,7 +207,6 @@ async function confirmHighRisk() {
       distinguishCancelAndClose: true,
     },
   )
-  return ''
 }
 
 async function act(decision) {
@@ -233,14 +216,10 @@ async function act(decision) {
     return
   }
   try {
-    const password = decision !== 'deny' && isHigh.value
-      ? await confirmHighRisk() : ''
+    if (decision !== 'deny' && isHigh.value) await confirmHighRisk()
     resolving.value = decision
     const scope = decisionScope(decision) || {}
-    await resolveConfirm(props.card, decision, {
-      ...scope,
-      ...(password ? { password } : {}),
-    })
+    await resolveConfirm(props.card, decision, scope)
   } catch (error) {
     resolving.value = ''
     if (error === 'cancel' || error === 'close' || error?.action === 'cancel') return

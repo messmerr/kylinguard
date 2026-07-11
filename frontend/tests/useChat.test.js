@@ -591,10 +591,8 @@ test('首条消息前原子创建完全访问草稿并复用同一会话', async
   await chat.refreshSessions()
   await models.loadModelConfig()
   permissions.setDraftWorkspaceRoot('/srv/custom/../project')
-  const password = 'draft-password-must-not-leak'
-
   const result = await chat.setChatPermissionMode('full_access', {
-    password, durationMinutes: 30,
+    durationMinutes: 30,
   })
 
   assert.equal(result.supported, true)
@@ -608,15 +606,12 @@ test('首条消息前原子创建完全访问草稿并复用同一会话', async
     session_id: chat.activeId.value,
     mode: 'full_access',
     ttl_seconds: 900,
-    password,
     workspace_root: '/srv/project',
     provider_id: 'provider-full',
     model_id: 'model-full',
     reasoning_effort: 'high',
   })
-  assert.equal(JSON.stringify(permissions.permissionContext).includes(password), false)
-  assert.equal(JSON.stringify(chat.sessions.value).includes(password), false)
-  assert.equal(localStorageWrites.some(([, value]) => value.includes(password)), false)
+  assert.equal('password' in draftSessionBodies[0], false)
 
   const sse = controlledSse()
   chatResponses.push(sse)
@@ -635,18 +630,14 @@ test('首条消息前原子创建完全访问草稿并复用同一会话', async
 test('旧后端不支持草稿会话时给出明确降级提示且不绑定本地状态', async () => {
   reset()
   draftSessionStatus = 405
-  const password = 'legacy-password-must-not-leak'
-
   await assert.rejects(
-    chat.setChatPermissionMode('full_access', { password, durationMinutes: 5 }),
+    chat.setChatPermissionMode('full_access', { durationMinutes: 5 }),
     /不支持在首条消息前开启完全访问.*先发送第一条消息/,
   )
 
   assert.equal(chat.activeId.value, '')
   assert.equal(permissions.permissionContext.sessionId, '')
   assert.equal(permissions.permissionMode.value, 'ask')
-  assert.equal(JSON.stringify(permissions.permissionContext).includes(password), false)
-  assert.equal(localStorageWrites.some(([, value]) => value.includes(password)), false)
 })
 
 test('已有任务采用会话工作目录并锁定，新任务恢复服务器默认目录', async () => {
@@ -708,18 +699,17 @@ test('后端 permission_request/result 契约可生成并收起授权卡', () =>
       arguments: { path: '/srv/docs/note.md', content: 'hello' },
       purpose: '记录排查结论', risk: 'high',
     },
-    decision: { action: 'double_confirm', risk: 'high', reason: '需要复验' },
+    decision: { action: 'double_confirm', risk: 'high', reason: '需要二次确认' },
     capability: 'files.write', resource: '/srv/docs/note.md',
-    suggested_path: '/srv/docs', requires_reauthentication: true,
-    choices: ['deny', 'allow_once', 'allow_session', 'trust_path'],
+    suggested_path: '/srv/docs', single_action_only: true,
+    choices: ['deny', 'allow_once'],
     timeout_seconds: 300,
   })
 
   const card = chat.items.value.find((item) => item.kind === 'confirm')
   assert.equal(card.permissionRequestId, 'request-contract')
   assert.equal(card.contextVersion, 3)
-  assert.equal(card.requiresReauthentication, true)
-  assert.deepEqual(card.choices, ['deny', 'allow_once', 'allow_session', 'trust_path'])
+  assert.deepEqual(card.choices, ['deny', 'allow_once'])
   assert.equal(card.operation.suggested_scope.path, '/srv/docs')
 
   chat.handleEvent({

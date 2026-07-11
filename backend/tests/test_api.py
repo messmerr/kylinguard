@@ -8,13 +8,9 @@ from kylinguard.api import create_app
 from kylinguard.audit import AuditError
 from kylinguard.config import Settings
 
-PW = "test-pw-123"
-
-
 @pytest.fixture()
 def app(tmp_path):
-    settings = Settings(_env_file=None, db_path=str(tmp_path / "kg.db"),
-                        admin_password=PW)
+    settings = Settings(_env_file=None, db_path=str(tmp_path / "kg.db"))
     value = create_app(settings, with_tools=False)
     _configure_test_model(value)
     return value
@@ -41,11 +37,8 @@ def _client(app):
         transport=httpx.ASGITransport(app=app), base_url="http://test")
 
 
-async def _login(c) -> dict:
-    r = await c.post("/api/login",
-                     json={"username": "admin", "password": PW})
-    assert r.status_code == 200
-    return {"Authorization": f"Bearer {r.json()['token']}"}
+async def _request_headers(_client) -> dict:
+    return {}
 
 
 def _parse_sse(text: str) -> list[dict]:
@@ -99,38 +92,28 @@ async def test_health无需鉴权(app):
     assert r.status_code == 200 and r.json()["status"] == "ok"
 
 
-async def test_登录成功与失败(app):
+async def test_登录与登出接口已移除(app):
     async with _client(app) as c:
-        ok = await c.post("/api/login",
-                          json={"username": "admin", "password": PW})
-        bad = await c.post("/api/login",
-                           json={"username": "admin", "password": "wrong"})
-    assert ok.status_code == 200 and ok.json()["token"]
-    assert bad.status_code == 401
+        login = await c.post("/api/login", json={})
+        logout = await c.post("/api/logout")
+    assert login.status_code == 405
+    assert logout.status_code == 405
 
 
-async def test_业务端点未登录一律401(app):
+async def test_业务端点无需请求凭据(app):
     async with _client(app) as c:
         r1 = await c.post("/api/chat", json={"message": "x"})
         r2 = await c.get("/api/sessions")
         r3 = await c.get("/api/status")
         r4 = await c.post("/api/confirm",
                           json={"confirm_id": "x", "approved": True})
-    assert [r.status_code for r in (r1, r2, r3, r4)] == [401] * 4
-
-
-async def test_logout后token失效(app):
-    async with _client(app) as c:
-        h = await _login(c)
-        await c.post("/api/logout", headers=h)
-        r = await c.get("/api/sessions", headers=h)
-    assert r.status_code == 401
+    assert [r.status_code for r in (r1, r2, r3, r4)] == [200] * 4
 
 
 async def test_chat_SSE流式事件(app):
     app.state.pipeline = FakePipeline()
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r = await c.post("/api/chat", json={
             "message": "系统怎么样", "request_id": "turn.test-1",
         },
@@ -147,7 +130,7 @@ async def test_chat_SSE流式事件(app):
 @pytest.mark.parametrize("request_id", ["包含 空格", "x" * 129])
 async def test_chat拒绝不安全request_id(app, request_id):
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r = await c.post("/api/chat", headers=h, json={
             "message": "x", "request_id": request_id,
         })
@@ -157,7 +140,7 @@ async def test_chat拒绝不安全request_id(app, request_id):
 async def test_审计失败发fatal事件后收流(app):
     app.state.pipeline = FatalPipeline()
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r = await c.post("/api/chat", json={"message": "x"}, headers=h)
     events = [e for e in _parse_sse(r.text) if e["type"] != "session_created"]
     assert events[0]["type"] == "fatal" and "审计" in events[0]["error"]
@@ -167,7 +150,7 @@ async def test_审计失败发fatal事件后收流(app):
 async def test_未知异常清洗并持久化task_error终态(app):
     app.state.pipeline = UnexpectedPipeline()
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r = await c.post("/api/chat", json={
             "message": "x", "request_id": "turn.error-1",
         }, headers=h)
@@ -192,7 +175,7 @@ async def test_客户端断流会留下取消终态(app):
     pipeline = BlockingPipeline()
     app.state.pipeline = pipeline
     async with _client(app) as c:
-        headers = await _login(c)
+        headers = await _request_headers(c)
         request = asyncio.create_task(
             c.post("/api/chat", json={"message": "等待中"}, headers=headers))
         await asyncio.wait_for(pipeline.started.wait(), timeout=1)
@@ -211,7 +194,7 @@ async def test_确认等待中断流会收口确认并记录阶段(app):
     pipeline = BlockingConfirmPipeline()
     app.state.pipeline = pipeline
     async with _client(app) as c:
-        headers = await _login(c)
+        headers = await _request_headers(c)
         request = asyncio.create_task(c.post(
             "/api/chat",
             json={"message": "等待确认", "request_id": "turn-cancel-1"},
@@ -233,9 +216,9 @@ async def test_确认等待中断流会收口确认并记录阶段(app):
     assert cancelled["request_id"] == "turn-cancel-1"
 
 
-async def test_confirm归因到登录账号(app):
+async def test_confirm归因到本机操作者(app):
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         cid, fut = app.state.confirmations.create()
         r1 = await c.post("/api/confirm",
                           json={"confirm_id": cid, "approved": True},
@@ -244,14 +227,14 @@ async def test_confirm归因到登录账号(app):
                           json={"confirm_id": "不存在", "approved": True},
                           headers=h)
     assert r1.json()["ok"] is True
-    assert fut.result() == (True, "admin")  # 决断归因到具体管理员
+    assert fut.result() == (True, "local")
     assert r2.json()["ok"] is False
 
 
 async def test_chat自动建会话并可续聊(app):
     app.state.pipeline = FakePipeline()
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r1 = await c.post("/api/chat", json={"message": "第一条消息"},
                           headers=h)
         events = _parse_sse(r1.text)
@@ -271,7 +254,7 @@ async def test_chat自动建会话并可续聊(app):
 
 async def test_未知session_id拒绝(app):
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r = await c.post("/api/chat",
                          json={"message": "x", "session_id": "不存在的"},
                          headers=h)
@@ -284,7 +267,7 @@ async def test_会话事件回放(app):
                                                   "aborted": False})
     app.state.sessions.create("sx", "历史问题")
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r = await c.get("/api/sessions/sx/events", headers=h)
     events = r.json()["events"]
     assert [e["event_type"] for e in events] == ["user_query", "final_answer"]
@@ -293,7 +276,7 @@ async def test_会话事件回放(app):
 
 async def test_未知会话回放404(app):
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r = await c.get("/api/sessions/不存在/events", headers=h)
     assert r.status_code == 404
 
@@ -304,7 +287,7 @@ async def test_status返回快照(app, monkeypatch):
 
     monkeypatch.setattr(app.state.snapshot_cache, "get", fake_get)
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r = await c.get("/api/status", headers=h)
     body = r.json()
     assert body["snapshot"]["memory"] == "充足"
@@ -315,7 +298,7 @@ async def test_审计链校验端点(app):
     app.state.audit.append("sv", "user_query", {"query": "x"})
     app.state.sessions.create("sv", "x")
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r = await c.get("/api/sessions/sv/verify", headers=h)
     assert r.json()["ok"] is True
 
@@ -325,7 +308,7 @@ async def test_全局统计端点(app):
                            {"decision": {"action": "deny"}})
     app.state.sessions.create("st", "x")
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r = await c.get("/api/stats", headers=h)
     body = r.json()
     assert body["sessions"] == 1
@@ -334,7 +317,7 @@ async def test_全局统计端点(app):
 
 async def test_策略CRUD端点(app):
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         r1 = await c.post("/api/policies", headers=h,
                           json={"kind": "blacklist", "pattern": r"\bwipefs\b",
                                 "note": "擦除签名"})
@@ -354,7 +337,7 @@ async def test_策略CRUD端点(app):
     assert [event["event_type"] for event in events] == [
         "policy_added", "policy_removed",
     ]
-    assert all(event["payload"]["operator"] == "admin" for event in events)
+    assert all(event["payload"]["operator"] == "local" for event in events)
     assert app.state.audit.verify_chain("__policies__") is True
 
 
@@ -368,7 +351,7 @@ async def test_策略审计失败会回滚策略变更(app, monkeypatch):
 
     monkeypatch.setattr(app.state.audit, "append", fail_policy_audit)
     async with _client(app) as client:
-        headers = await _login(client)
+        headers = await _request_headers(client)
         with pytest.raises(AuditError):
             await client.post("/api/policies", headers=headers, json={
                 "kind": "blacklist", "pattern": r"\bdanger-tool\b",
@@ -379,7 +362,7 @@ async def test_策略审计失败会回滚策略变更(app, monkeypatch):
 
 async def test_失败服务告警规则归一为布尔条件(app):
     async with _client(app) as c:
-        h = await _login(c)
+        h = await _request_headers(c)
         created = await c.post("/api/alert-rules", headers=h, json={
             "name": "自动启动服务停止",
             "metric": "failed_services",

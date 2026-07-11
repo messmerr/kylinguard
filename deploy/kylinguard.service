@@ -9,7 +9,7 @@ User=kylinguard
 Group=kylinguard
 WorkingDirectory=/opt/kylinguard/backend
 EnvironmentFile=/etc/kylinguard/kylinguard.env
-# 控制面携带管理员密码和模型 API Key，默认只监听回环。远程访问应由
+# 控制面携带模型 API Key，默认只监听回环。远程访问应由
 # 同机 HTTPS 反向代理转发，或使用 SSH 端口转发。
 ExecStart=/opt/kylinguard/.venv/bin/python -m uvicorn --factory kylinguard.api:create_app --host 127.0.0.1 --port 8000
 Restart=on-failure

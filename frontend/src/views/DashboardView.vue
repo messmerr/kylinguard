@@ -120,7 +120,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import KgIcon from '../components/KgIcon.vue'
-import { apiFetch } from '../composables/useAuth.js'
+import { apiFetch } from '../composables/useApi.js'
 
 const stats = ref(null)
 const status = ref(null)

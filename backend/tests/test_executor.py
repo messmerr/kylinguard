@@ -199,38 +199,36 @@ async def test_命令不存在():
 
 async def test_执行命令不继承控制面秘密(monkeypatch):
     monkeypatch.setenv("KG_LLM_API_KEY", "llm-secret")
-    monkeypatch.setenv("KG_ADMIN_PASSWORD", "admin-secret")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     monkeypatch.setenv("HTTPS_PROXY", "http://user:password@proxy")
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/auth.sock")
     code = (
         "import os; print('|'.join(str(os.getenv(k)) for k in "
-        "['KG_LLM_API_KEY','KG_ADMIN_PASSWORD','OPENAI_API_KEY',"
+        "['KG_LLM_API_KEY','OPENAI_API_KEY',"
         "'HTTPS_PROXY','SSH_AUTH_SOCK']))"
     )
     r = await run_command([PY, "-c", code])
     assert r.exit_code == 0
-    assert r.stdout.strip() == "None|None|None|None|None"
+    assert r.stdout.strip() == "None|None|None|None"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="完整 shell 能力仅在 Linux/WSL 提供")
 async def test_通用shell继承开发环境但不继承KylinGuard控制面(monkeypatch):
     monkeypatch.setenv("KG_LLM_API_KEY", "llm-secret")
-    monkeypatch.setenv("KG_ADMIN_PASSWORD", "admin-secret")
     monkeypatch.setenv("VIRTUAL_ENV", "/srv/project/.venv")
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
 
     result = await run_shell(
-        "printf '%s|%s|%s|%s|%s' "
-        '"${KG_LLM_API_KEY-unset}" "${KG_ADMIN_PASSWORD-unset}" '
+        "printf '%s|%s|%s|%s' "
+        '"${KG_LLM_API_KEY-unset}" '
         '"$VIRTUAL_ENV" "$SSH_AUTH_SOCK" "$HTTPS_PROXY"',
         shell="/bin/bash",
     )
 
     assert result.exit_code == 0
     assert result.stdout == (
-        "unset|unset|/srv/project/.venv|/tmp/agent.sock|http://proxy.example"
+        "unset|/srv/project/.venv|/tmp/agent.sock|http://proxy.example"
     )
 
 

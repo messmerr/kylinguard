@@ -1,5 +1,5 @@
 import { computed, reactive, ref } from 'vue'
-import { apiFetch } from './useAuth.js'
+import { apiFetch } from './useApi.js'
 
 const EMPTY_SELECTION = Object.freeze({
   providerId: '',

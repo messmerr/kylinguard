@@ -714,7 +714,7 @@ class Pipeline:
                 reason="确定性安全边界已给出结论，不调用 Reviewer 覆盖。",
             )
         elif full_access_active:
-            # 完全访问是管理员经密码复验开启的显式信任边界。Reviewer 在
+            # 完全访问是用户显式开启的信任边界。Reviewer 在
             # 普通模式中负责提高风险和触发确认，但不能成为完整能力的第二个
             # 在线依赖或否决者；否则一次模型误判/故障就会让“完全访问”失真。
             review = ReviewVerdict(
@@ -816,8 +816,8 @@ class Pipeline:
                     decision.action == GateAction.DOUBLE_CONFIRM,
                 )
                 if decision.action == GateAction.DOUBLE_CONFIRM:
-                    # 高风险授权必须逐次、精确绑定动作，并在服务端复验密码；
-                    # 不能升级成会话范围或把整个目录顺带设为可信。
+                    # 高风险授权必须逐次、精确绑定动作，不能升级成会话范围
+                    # 或把整个目录顺带设为可信。
                     permission_options = ["deny", "allow_once"]
                 else:
                     permission_options = ["deny", "allow_once", "allow_session"]
@@ -838,7 +838,7 @@ class Pipeline:
                     "resource": action.resource,
                     "suggested_path": action.suggested_path,
                     "context_version": permission_context.version,
-                    "requires_reauthentication": (
+                    "single_action_only": (
                         decision.action == GateAction.DOUBLE_CONFIRM),
                     "options": permission_options,
                     "choices": permission_options,

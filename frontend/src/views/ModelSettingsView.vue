@@ -287,7 +287,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import KgIcon from '../components/KgIcon.vue'
-import { apiFetch } from '../composables/useAuth.js'
+import { apiFetch } from '../composables/useApi.js'
 import {
   availableModelGroups,
   effortLabel,

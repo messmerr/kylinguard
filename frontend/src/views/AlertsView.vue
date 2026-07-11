@@ -379,7 +379,7 @@
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 import KgIcon from '../components/KgIcon.vue'
-import { apiFetch } from '../composables/useAuth.js'
+import { apiFetch } from '../composables/useApi.js'
 
 const tab = ref('rules')
 const rules = ref([])

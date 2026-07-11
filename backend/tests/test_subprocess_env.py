@@ -33,7 +33,6 @@ def test_通用终端保留开发环境但剥离控制面():
         "PROJECT_MODE": "test",
         "LD_LIBRARY_PATH": "/home/user/project/lib",
         "KG_LLM_API_KEY": "llm-secret",
-        "kg_admin_password": "admin-secret",
         "KG_DB_PATH": "/srv/control.db",
     })
 

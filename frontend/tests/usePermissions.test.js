@@ -138,7 +138,7 @@ test('从会话权限接口读取模式、执行身份与有效授权', async ()
   assert.equal(permissions.permissionGrants.value[0].label, '/srv/project/report.md')
 })
 
-test('完全访问升级集中通过 permissions PUT 并携带密码与时限', async () => {
+test('完全访问升级集中通过 permissions PUT 并携带时限', async () => {
   reset()
   permissions.bindPermissionSession('session-full')
   permissions.permissionContext.version = 1
@@ -155,13 +155,11 @@ test('完全访问升级集中通过 permissions PUT 并携带密码与时限', 
     })
   }
 
-  await permissions.setPermissionMode('full_access', {
-    password: 'secret', durationMinutes: 30,
-  })
+  await permissions.setPermissionMode('full_access', { durationMinutes: 30 })
 
   assert.deepEqual(submitted, {
     mode: 'full_access', version: 1, trusted_roots: [],
-    ttl_seconds: 600, password: 'secret',
+    ttl_seconds: 600,
   })
   assert.equal(permissions.fullAccessActive.value, true)
   assert.equal(permissions.permissionContext.executorIdentity, 'root')
@@ -231,7 +229,7 @@ test('新权限请求与旧确认接口都支持带范围的授权决断', async
   const scope = { kind: 'path', path: '/srv/docs', actions: ['modify'], recursive: true }
   await permissions.resolvePermissionRequest(
     { permissionRequestId: 'request-1', contextVersion: 2 }, 'allow_session',
-    { ...scope, password: 'high-risk-password' },
+    scope,
   )
   await permissions.resolvePermissionRequest(
     { confirmId: 'confirm-1' }, 'trust_path', scope,
@@ -240,7 +238,6 @@ test('新权限请求与旧确认接口都支持带范围的授权决断', async
   assert.equal(calls[0].url, '/api/permission-requests/request-1/resolve')
   assert.deepEqual(calls[0].body, {
     decision: 'allow_session', context_version: 2, trusted_path: '',
-    password: 'high-risk-password',
   })
   assert.equal(calls[1].url, '/api/confirm')
   assert.equal(calls[1].body.approved, true)

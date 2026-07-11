@@ -79,7 +79,7 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { apiFetch } from '../composables/useAuth.js'
+import { apiFetch } from '../composables/useApi.js'
 import { stats } from '../composables/useChat.js'
 import KgIcon from './KgIcon.vue'
 

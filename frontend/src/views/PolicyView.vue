@@ -243,7 +243,7 @@
                 <span class="baseline-count">{{ builtin.protected_prefixes.length }} 个</span>
               </div>
             </template>
-            <p class="baseline-note">普通模式会拦截或复核显式控制面路径；管理员复验后的完全访问可覆盖产品层路径限制。不同 UID 只说明执行账户分离，是否真正隔离仍取决于文件权限与 ACL。</p>
+            <p class="baseline-note">普通模式会拦截或复核显式控制面路径；明确开启的完全访问可覆盖产品层路径限制。不同 UID 只说明执行账户分离，是否真正隔离仍取决于文件权限与 ACL。</p>
             <code class="code-line">{{ builtin.protected_prefixes.join('  ') }}</code>
           </el-collapse-item>
 
@@ -324,7 +324,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import KgIcon from '../components/KgIcon.vue'
-import { apiFetch } from '../composables/useAuth.js'
+import { apiFetch } from '../composables/useApi.js'
 import { activeId, setChatPermissionMode } from '../composables/useChat.js'
 import {
   PERMISSION_MODES,
@@ -405,27 +405,6 @@ function lifetimeLabel(lifetime) {
   }[lifetime] || lifetime || '本次会话'
 }
 
-async function requestFullAccessPassword() {
-  const identitySource = executionIdentitySourceLabel()
-  const separationNotice = permissionContext.executionAccountSeparated
-    ? '执行账户 UID 与后端 UID 不同'
-    : '执行账户与后端使用相同 UID；工具子进程仍不会继承 LLM 密钥和管理员口令'
-  const rootNotice = permissionContext.grantsRoot
-    ? '警告：该执行身份拥有 root 权限。' : ''
-  const { value } = await ElMessageBox.prompt(
-    `Agent 将获得完整 shell、文件、网络和进程能力，不再逐项确认，并以“${permissionContext.executorIdentity}”（${identitySource}）运行。${separationNotice}。${rootNotice}管理员复验、限时自动收回与审计仍然生效。`,
-    '开启完全访问',
-    {
-      inputType: 'password',
-      inputPlaceholder: '输入当前登录密码',
-      confirmButtonText: `开启 ${fullAccessDurationMinutes.value} 分钟`,
-      cancelButtonText: '取消',
-      inputValidator: (value) => Boolean(String(value || '').trim()) || '请输入密码',
-    },
-  )
-  return String(value || '')
-}
-
 async function choosePermissionMode(mode) {
   if (permissionChanging.value || mode === permissionMode.value) return
   if (mode === 'full_access' && !permissionContext.fullAccessAvailable) {
@@ -438,9 +417,8 @@ async function choosePermissionMode(mode) {
   }
   permissionChanging.value = true
   try {
-    const password = mode === 'full_access' ? await requestFullAccessPassword() : ''
     const result = await setChatPermissionMode(mode, mode === 'full_access'
-      ? { password, durationMinutes: fullAccessDurationMinutes.value }
+      ? { durationMinutes: fullAccessDurationMinutes.value }
       : mode === 'trusted_workspace'
         ? {
           trustedRoots: trustedRoots.value,
