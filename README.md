@@ -62,6 +62,9 @@
 接口读取。模型发现只导入 ID，不猜测推理能力；管理员需要按该模型官方说明勾选
 支持的推理档位和 `temperature` 能力。新任务使用全局 Agent 默认值，安全 Reviewer
 单独配置；任务建立后保存自己的主模型，可在输入框旁切换，下一轮生效。
+模型服务管理沿用当前登录状态，不会在添加、编辑、测试或读取模型时重复索要
+管理员密码；提供商变更仍执行版本校验并进入审计日志。完全访问与高风险操作的
+密码复验不受影响，因为它们会直接扩大 Agent 的系统执行权限。
 
 DeepSeek 的 `thinking/reasoning_effort`、DashScope 的
 `enable_thinking/thinking_budget` 与 OpenAI 的 `reasoning_effort` 会由后端适配，
@@ -74,6 +77,8 @@ DeepSeek 的 `thinking/reasoning_effort`、DashScope 的
 GUI Key 不进入 SQLite、审计、SSE 或工具子进程，而是保存到工作区外的受限独立
 文件；数据库只保存随机引用。此处的文件权限不能替代账户隔离：完全访问与后端
 共用同一 UID 时仍可能读取同身份文件，生产环境应配置独立 `KG_EXEC_USER`。
+设置页会把这种情况标成“开发环境说明”；普通任务并未因此失效，它描述的是开启
+完全访问后的隔离上限，而不是模型连接故障。
 模型提供商、API Key、可用模型与 Agent/Reviewer 默认值只从图形界面的持久化
 配置读取；`.env` 不再提供模型配置或回退路径。
 

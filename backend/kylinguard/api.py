@@ -183,7 +183,6 @@ class LLMProviderRequest(BaseModel):
     models: list[LLMModelRequest] = Field(default_factory=list, max_length=256)
     enabled: bool = True
     allow_insecure_http: bool = False
-    admin_password: SecretStr | None = None
     version: int | None = Field(default=None, ge=1)
 
     @field_validator("name", "base_url")
@@ -219,7 +218,6 @@ class SessionModelRequest(LLMSelectionRequest):
 
 class LLMProviderActionRequest(BaseModel):
     version: int = Field(ge=1)
-    admin_password: SecretStr | None = None
 
 
 class PermissionUpdateRequest(BaseModel):
@@ -451,10 +449,12 @@ def create_app(settings: Settings | None = None,
         payload["security"] = {
             "credentials_isolated": isolated,
             "message": (
-                "Agent 使用独立 OS 执行账户；模型凭据只保存在控制面账户的受限目录。"
+                "API Key 由后端保存在受限文件中；Agent 命令使用独立 Linux 账户，"
+                "无法以同一账户直接读取这些文件。"
                 if isolated else
-                "当前 Agent 与后端共用 OS 身份。完全访问模式下这不构成凭据隔离；"
-                "生产部署请配置独立 KG_EXEC_USER，并仅通过 HTTPS 远程提交 API Key。"
+                "API Key 由后端保存在受限文件中，不会注入工具进程。当前是开发模式："
+                "Agent 命令与后端使用同一 Linux 账户；只有开启完全访问时，"
+                "才不能保证 Agent 无法读取该账户的其他文件。"
             ),
         }
         return payload
@@ -591,19 +591,6 @@ def create_app(settings: Settings | None = None,
         return ModelSelection(
             raw["provider_id"], raw["model_id"], raw["reasoning_effort"])
 
-    def require_config_reauthentication(
-        user: str, password: SecretStr | None,
-    ) -> None:
-        raw = password.get_secret_value() if password is not None else ""
-        if not raw or not app.state.auth.verify(user, raw):
-            app.state.audit.append("__llm_config__", "llm_reauthentication_failed", {
-                "operator": user,
-            })
-            raise HTTPException(403, detail={
-                "code": "llm_reauthentication_failed",
-                "message": "保存模型提供商前需要重新验证管理员密码。",
-            })
-
     def audit_llm_config(event_type: str, user: str, **payload) -> None:
         # 白名单调用点只传元数据；禁止把 Pydantic 请求整体写入审计链。
         app.state.audit.append("__llm_config__", event_type, {
@@ -674,7 +661,6 @@ def create_app(settings: Settings | None = None,
     async def create_llm_provider(
         req: LLMProviderRequest, user: str = Depends(require_auth),
     ):
-        require_config_reauthentication(user, req.admin_password)
         api_key = (req.api_key.get_secret_value()
                    if req.api_key is not None else "")
         try:
@@ -707,7 +693,6 @@ def create_app(settings: Settings | None = None,
         provider_id: str, req: LLMProviderRequest,
         user: str = Depends(require_auth),
     ):
-        require_config_reauthentication(user, req.admin_password)
         if req.version is None:
             raise HTTPException(422, detail={
                 "code": "provider_version_required",
@@ -749,7 +734,6 @@ def create_app(settings: Settings | None = None,
         provider_id: str, req: LLMProviderActionRequest,
         user: str = Depends(require_auth),
     ):
-        require_config_reauthentication(user, req.admin_password)
         try:
             with app.state.audit.serialized():
                 app.state.llm_config.delete_provider(
@@ -779,7 +763,6 @@ def create_app(settings: Settings | None = None,
         provider_id: str, req: LLMProviderActionRequest,
         user: str = Depends(require_auth),
     ):
-        require_config_reauthentication(user, req.admin_password)
         try:
             provider = app.state.llm_config.get_provider(provider_id)
             if provider["version"] != req.version:
@@ -802,7 +785,6 @@ def create_app(settings: Settings | None = None,
         provider_id: str, req: LLMProviderActionRequest,
         user: str = Depends(require_auth),
     ):
-        require_config_reauthentication(user, req.admin_password)
         try:
             provider = app.state.llm_config.get_provider(provider_id)
             if provider["version"] != req.version:

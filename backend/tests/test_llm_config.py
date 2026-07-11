@@ -243,6 +243,14 @@ async def test图形化配置API与会话切换且响应不泄漏key(tmp_path):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test",
     ) as client:
+        unauthenticated = await client.post("/api/llm/providers", json={
+            "name": "未登录不能配置",
+            "adapter": "openai_compatible",
+            "base_url": "https://gateway.example.test/v1",
+            "api_key": "sk-unauthenticated",
+            "models": [_model("m1")],
+        })
+        assert unauthenticated.status_code == 401
         headers = await _login(client)
         initial = (await client.get("/api/llm/config", headers=headers)).json()
         assert initial["providers"] == []
@@ -262,7 +270,6 @@ async def test图形化配置API与会话切换且响应不泄漏key(tmp_path):
             "adapter": "openai_compatible",
             "base_url": "https://gateway.example.test/v1",
             "api_key": secret,
-            "admin_password": "test-password",
             "models": [_model("m1", ["low", "high"]), _model("m2")],
             "enabled": True,
         })
@@ -299,7 +306,7 @@ async def test图形化配置API与会话切换且响应不泄漏key(tmp_path):
         unsafe = await client.post("/api/llm/providers", headers=headers, json={
             "name": "x", "adapter": "not-an-adapter",
             "base_url": "https://example.test", "api_key": secret,
-            "admin_password": "test-password", "models": [],
+            "models": [],
         })
         assert unsafe.status_code == 422
         assert secret not in unsafe.text
@@ -346,7 +353,7 @@ async def test模型配置变更与审计同事务失败会完整回滚(tmp_path
             await client.post("/api/llm/providers", headers=headers, json={
                 "name": "不能半提交", "adapter": "openai_compatible",
                 "base_url": "https://gateway.example.test/v1",
-                "api_key": "sk-rollback-secret", "admin_password": "test-password",
+                "api_key": "sk-rollback-secret",
                 "models": [_model("m1")], "enabled": True,
             })
         assert app.state.llm_config.get_defaults()["version"] == 0
@@ -357,7 +364,7 @@ async def test模型配置变更与审计同事务失败会完整回滚(tmp_path
         created = await client.post("/api/llm/providers", headers=headers, json={
             "name": "可提交", "adapter": "openai_compatible",
             "base_url": "https://gateway.example.test/v1",
-            "api_key": "sk-valid-secret", "admin_password": "test-password",
+            "api_key": "sk-valid-secret",
             "models": [_model("m1"), _model("m2")], "enabled": True,
         })
         provider = created.json()["provider"]

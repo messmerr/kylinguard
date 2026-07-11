@@ -11,11 +11,14 @@
       <div
         v-if="modelSecurity.message"
         class="security-note"
-        :class="{ warning: !modelSecurity.credentialsIsolated }"
+        :class="{ isolated: modelSecurity.credentialsIsolated }"
         role="status"
       >
-        <KgIcon :name="modelSecurity.credentialsIsolated ? 'lock' : 'warning'" :size="15" />
-        <span>{{ modelSecurity.message }}</span>
+        <KgIcon :name="modelSecurity.credentialsIsolated ? 'lock' : 'info'" :size="15" />
+        <div>
+          <strong>{{ modelSecurity.credentialsIsolated ? '执行账户已隔离' : '开发环境说明' }}</strong>
+          <span>{{ modelSecurity.message }}</span>
+        </div>
       </div>
 
       <section class="model-section provider-section">
@@ -204,17 +207,6 @@
             :disabled="Boolean(providerForm.apiKey)"
           >移除已保存的 API Key</el-checkbox>
         </el-form-item>
-        <el-form-item label="管理员密码" class="admin-password">
-          <el-input
-            v-model="providerForm.adminPassword"
-            type="password"
-            show-password
-            autocomplete="current-password"
-            placeholder="保存模型凭据前重新验证"
-            @keyup.enter="saveProvider"
-          />
-        </el-form-item>
-
         <div class="models-editor">
           <div class="models-editor-head">
             <div>
@@ -296,7 +288,7 @@ const providerForm = reactive({
   id: '', version: 0, name: '', adapter: 'openai_compatible', baseUrl: '', originalBaseUrl: '',
   allowInsecureHttp: false,
   apiKey: '', apiKeyConfigured: false, models: [], enabled: true,
-  clearApiKey: false, adminPassword: '',
+  clearApiKey: false,
 })
 const defaultDraft = reactive({
   agent: { key: '', reasoningEffort: 'auto' },
@@ -449,7 +441,7 @@ function clearProviderForm() {
     id: '', version: 0, name: '', adapter: 'openai_compatible', baseUrl: '', originalBaseUrl: '',
     allowInsecureHttp: false,
     apiKey: '', apiKeyConfigured: false, models: [], enabled: true,
-    clearApiKey: false, adminPassword: '',
+    clearApiKey: false,
   })
 }
 
@@ -472,7 +464,6 @@ function providerPayload() {
       supports_temperature: model.supportsTemperature,
     })),
     enabled: providerForm.enabled,
-    admin_password: providerForm.adminPassword,
     ...(providerForm.id ? { version: providerForm.version } : {}),
   }
 }
@@ -497,10 +488,6 @@ async function saveProvider() {
     ElMessage.warning('API 地址所属站点已改变，请重新输入 API Key')
     return
   }
-  if (!providerForm.adminPassword) {
-    ElMessage.warning('请输入管理员密码')
-    return
-  }
   if (nonLocalInsecureHttp.value && !providerForm.allowInsecureHttp) {
     ElMessage.warning('此地址使用不安全 HTTP；请改用 HTTPS，或明确允许可信内网 HTTP')
     return
@@ -519,7 +506,6 @@ async function saveProvider() {
     )
     if (!response.ok) throw await responseError(response, '提供商保存失败')
     providerForm.apiKey = ''
-    providerForm.adminPassword = ''
     providerDialogOpen.value = false
     await loadModelConfig()
     ElMessage.success('API 提供商已保存')
@@ -530,29 +516,7 @@ async function saveProvider() {
   }
 }
 
-async function askAdminPassword(title) {
-  try {
-    const { value } = await ElMessageBox.prompt(
-      '此操作会访问或修改模型服务配置，请重新验证管理员密码。',
-      title,
-      {
-        inputType: 'password',
-        inputPlaceholder: '管理员密码',
-        inputValidator: (value) => Boolean(value) || '请输入管理员密码',
-        confirmButtonText: '继续',
-        cancelButtonText: '取消',
-      },
-    )
-    return String(value || '')
-  } catch (error) {
-    if (error === 'cancel' || error === 'close' || error?.action === 'cancel') return ''
-    throw error
-  }
-}
-
 async function providerAction(provider, action, successText) {
-  const adminPassword = await askAdminPassword(successText)
-  if (!adminPassword) return
   actionBusy.value = true
   try {
     const response = await apiFetch(
@@ -561,7 +525,6 @@ async function providerAction(provider, action, successText) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          admin_password: adminPassword,
           version: provider.version,
         }),
       },
@@ -586,8 +549,6 @@ function discoverModels(provider) {
 }
 
 async function deleteProvider(provider) {
-  const adminPassword = await askAdminPassword('删除 API 提供商')
-  if (!adminPassword) return
   try {
     await ElMessageBox.confirm(
       `确定删除“${provider.name}”？使用它的默认配置或会话需要先切换模型。`,
@@ -605,7 +566,6 @@ async function deleteProvider(provider) {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          admin_password: adminPassword,
           version: provider.version,
         }),
       },
@@ -657,9 +617,13 @@ function originChanged() {
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--kg-space-6); }
 .page-head :deep(.el-button) { gap: 7px; }
 .page-description { margin: 0; color: var(--kg-text-tertiary); font-size: 13px; }
-.security-note { min-height: 38px; display: flex; align-items: center; gap: 9px; margin-top: var(--kg-space-5); padding: 8px 11px; border: 1px solid var(--kg-success-border); border-radius: var(--kg-radius-md); background: var(--kg-success-soft); color: var(--kg-success); font-size: 12px; }
-.security-note.warning { border-color: var(--kg-warning-border); background: var(--kg-warning-soft); color: var(--kg-warning); }
-.security-note span { color: var(--kg-text-secondary); }
+.security-note { min-height: 44px; display: flex; align-items: flex-start; gap: 9px; margin-top: var(--kg-space-5); padding: 9px 11px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-2); color: var(--kg-text-secondary); font-size: 12px; }
+.security-note > .kg-icon { margin-top: 2px; color: var(--kg-text-muted); }
+.security-note > div { display: grid; gap: 2px; }
+.security-note strong { color: var(--kg-text-primary); font-weight: 600; }
+.security-note span { color: var(--kg-text-secondary); line-height: 1.55; }
+.security-note.isolated { border-color: var(--kg-success-border); background: var(--kg-success-soft); }
+.security-note.isolated > .kg-icon { color: var(--kg-success); }
 .model-section { margin-top: var(--kg-space-6); }
 .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--kg-space-5); margin-bottom: var(--kg-space-3); }
 .section-head p { margin: 3px 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
@@ -718,7 +682,6 @@ function originChanged() {
 .form-enabled { display: flex; align-items: center; justify-content: space-between; gap: var(--kg-space-5); min-height: 54px; padding: 9px 12px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-1); }
 .form-enabled strong { display: block; color: var(--kg-text-secondary); font-size: 12px; font-weight: 550; }
 .form-enabled span { display: block; margin-top: 2px; color: var(--kg-text-tertiary); font-size: 11px; }
-.admin-password { margin-top: 2px; }
 :global(.provider-dialog .el-dialog__body) { max-height: calc(100vh - 180px); overflow-y: auto; }
 
 @media (max-width: 1080px) {
