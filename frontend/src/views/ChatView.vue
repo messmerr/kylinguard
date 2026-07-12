@@ -289,7 +289,7 @@ const activityMeta = computed(() => {
   const detail = []
   const generated = planningProgressCount(activity)
   if (generated) detail.push(generated)
-  if (activity?.attempt && activity.maxAttempts > 1) {
+  if (activity?.attempt > 1 && activity.maxAttempts > 1) {
     detail.push(`第 ${activity.attempt}/${activity.maxAttempts} 次尝试`)
   }
   return detail.join(' · ')
