@@ -152,6 +152,58 @@ def test更换提供商主机必须重新输入key(tmp_path):
     store.close()
 
 
+def test发现模型会补齐首次配置默认值(tmp_path):
+    settings = _settings(tmp_path)
+    store = LLMConfigStore(settings.db_path, settings)
+    provider = store.create_provider(
+        name="DeepSeek",
+        adapter="deepseek",
+        base_url="https://api.deepseek.com",
+        api_key="key-deepseek",
+        models=[],
+    )
+    assert store.get_defaults()["agent"]["provider_id"] == ""
+
+    store.add_discovered_models(
+        provider["id"], ["deepseek-v4-flash"],
+        expected_version=provider["version"],
+    )
+    defaults = store.get_defaults()
+    assert defaults["agent"] == {
+        "provider_id": provider["id"],
+        "model_id": "deepseek-v4-flash",
+        "reasoning_effort": "auto",
+    }
+    assert defaults["reviewer"] == defaults["agent"]
+    store.close()
+
+
+def test运行时在缺少reviewer默认值时复用会话模型(tmp_path):
+    settings = _settings(tmp_path)
+    store = LLMConfigStore(settings.db_path, settings)
+    provider = store.create_provider(
+        name="DeepSeek",
+        adapter="deepseek",
+        base_url="https://api.deepseek.com",
+        api_key="key-deepseek",
+        models=[_model("deepseek-v4-flash")],
+    )
+    store._conn.execute("DELETE FROM llm_defaults")
+    store._conn.commit()
+    store.ensure_session(
+        "s1",
+        selection=ModelSelection(provider["id"], "deepseek-v4-flash", "auto"),
+    )
+    store._conn.execute("DELETE FROM llm_defaults")
+    store._conn.commit()
+
+    spec = store.runtime_spec("s1")
+    assert spec["agent"]["provider_id"] == provider["id"]
+    assert spec["reviewer"]["provider_id"] == provider["id"]
+    assert spec["reviewer"]["model_id"] == "deepseek-v4-flash"
+    store.close()
+
+
 def test模型发现为兼容协议填入常用档位并保留DeepSeek语义(tmp_path):
     settings = _settings(tmp_path)
     store = LLMConfigStore(settings.db_path, settings)

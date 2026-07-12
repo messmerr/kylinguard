@@ -1,4 +1,5 @@
 FROM node:20-bookworm-slim AS frontend-builder
+ENV NODE_OPTIONS=--max-old-space-size=4096
 WORKDIR /app/frontend
 
 COPY frontend/package*.json ./

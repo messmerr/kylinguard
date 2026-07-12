@@ -5,9 +5,8 @@ services:
       dockerfile: Dockerfile
     container_name: kylinguard
     ports:
-      # API Key 等控制面信息只通过本机回环暴露；远程访问请在宿主机配置
-      # HTTPS 反向代理，不要把 8000 明文发布到局域网。
-      - "127.0.0.1:8000:8000"
+      # 直接对外开放 HTTP 8000；公网部署建议改用 HTTPS 反向代理。
+      - "0.0.0.0:8000:8000"
     env_file:
       - .env
     environment:

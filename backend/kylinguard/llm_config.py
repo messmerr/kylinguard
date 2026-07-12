@@ -422,8 +422,9 @@ class LLMConfigStore:
             "DELETE FROM llm_defaults WHERE agent_provider_id='legacy-env' "
             "OR reviewer_provider_id='legacy-env'"
         )
-        self._conn.commit()
         self._lock = threading.RLock()
+        self._repair_missing_defaults_locked()
+        self._conn.commit()
         configured_secrets = (
             secrets_dir if secrets_dir is not None else settings.llm_secrets_dir or None
         )
@@ -454,6 +455,33 @@ class LLMConfigStore:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def _repair_missing_defaults_locked(self) -> None:
+        if self._conn.execute(
+                "SELECT 1 FROM llm_defaults WHERE singleton=1").fetchone():
+            return
+        row = self._conn.execute(
+            "SELECT s.provider_id, s.model_id, s.reasoning_effort "
+            "FROM session_llm_settings s "
+            "JOIN llm_providers p ON p.id=s.provider_id "
+            "JOIN llm_models m ON m.provider_id=s.provider_id "
+            "AND m.model_id=s.model_id "
+            "WHERE p.enabled=1 AND m.enabled=1 "
+            "ORDER BY s.updated_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            row = self._conn.execute(
+                "SELECT p.id, m.model_id, 'auto' "
+                "FROM llm_providers p "
+                "JOIN llm_models m ON m.provider_id=p.id "
+                "WHERE p.enabled=1 AND m.enabled=1 "
+                "ORDER BY p.created_at, m.rowid LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return
+        self._ensure_default_selection_locked(
+            ModelSelection(row[0], row[1], row[2]), "system-repair",
+        )
 
     def _models_locked(self, provider_id: str) -> list[dict]:
         rows = self._conn.execute(
@@ -526,13 +554,11 @@ class LLMConfigStore:
             ) for model in models],
         )
 
-    def _ensure_defaults_locked(self, provider_id: str,
-                                models: list[dict], user: str) -> None:
+    def _ensure_default_selection_locked(
+        self, selection: ModelSelection, user: str,
+    ) -> None:
         if self._conn.execute(
                 "SELECT 1 FROM llm_defaults WHERE singleton=1").fetchone():
-            return
-        first = next((model for model in models if model["enabled"]), None)
-        if first is None:
             return
         now = time.time()
         self._conn.execute(
@@ -540,8 +566,18 @@ class LLMConfigStore:
             "agent_model_id, agent_reasoning_effort, reviewer_provider_id, "
             "reviewer_model_id, reviewer_reasoning_effort, version, "
             "updated_at, updated_by) VALUES (1,?,?,?,?,?,?,1,?,?)",
-            (provider_id, first["id"], "auto", provider_id, first["id"],
-             "auto", now, user),
+            (selection.provider_id, selection.model_id,
+             selection.reasoning_effort, selection.provider_id,
+             selection.model_id, selection.reasoning_effort, now, user),
+        )
+
+    def _ensure_defaults_locked(self, provider_id: str,
+                                models: list[dict], user: str) -> None:
+        first = next((model for model in models if model["enabled"]), None)
+        if first is None:
+            return
+        self._ensure_default_selection_locked(
+            ModelSelection(provider_id, first["id"], "auto"), user,
         )
 
     def create_provider(self, *, name: str, adapter: str, base_url: str,
@@ -960,6 +996,17 @@ class LLMConfigStore:
             (session_id, selection.provider_id, selection.model_id,
              selection.reasoning_effort, now, updated_by),
         )
+        if not connection.execute(
+                "SELECT 1 FROM llm_defaults WHERE singleton=1").fetchone():
+            connection.execute(
+                "INSERT INTO llm_defaults(singleton, agent_provider_id, "
+                "agent_model_id, agent_reasoning_effort, reviewer_provider_id, "
+                "reviewer_model_id, reviewer_reasoning_effort, version, "
+                "updated_at, updated_by) VALUES (1,?,?,?,?,?,?,1,?,?)",
+                (selection.provider_id, selection.model_id,
+                 selection.reasoning_effort, selection.provider_id,
+                 selection.model_id, selection.reasoning_effort, now, updated_by),
+            )
         return {
             "session_id": session_id,
             **selection.public_payload(),
@@ -1071,6 +1118,8 @@ class LLMConfigStore:
                 "supports_temperature": False,
             } for model_id in cleaned_ids if model_id not in existing]
             self._insert_models_locked(provider_id, additions)
+            if additions:
+                self._ensure_defaults_locked(provider_id, additions, updated_by)
             if additions or capability_updates:
                 now = time.time()
                 self._conn.execute(
@@ -1104,10 +1153,13 @@ class LLMConfigStore:
                 session["reasoning_effort"],
             )
             reviewer_raw = defaults["reviewer"]
-            reviewer_selection = ModelSelection(
-                reviewer_raw["provider_id"], reviewer_raw["model_id"],
-                reviewer_raw["reasoning_effort"],
-            )
+            if reviewer_raw["provider_id"] and reviewer_raw["model_id"]:
+                reviewer_selection = ModelSelection(
+                    reviewer_raw["provider_id"], reviewer_raw["model_id"],
+                    reviewer_raw["reasoning_effort"],
+                )
+            else:
+                reviewer_selection = agent_selection
 
             def endpoint(selection: ModelSelection) -> dict:
                 provider, model = self._validate_selection_locked(selection)
