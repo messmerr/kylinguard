@@ -21,8 +21,8 @@ body {
   background: var(--kg-bg-canvas);
   color: var(--kg-text-primary);
   font-family: var(--kg-font-ui);
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.6;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
@@ -49,7 +49,7 @@ textarea:focus-visible {
 }
 
 ::selection {
-  background: rgb(107 194 177 / 28%);
+  background: var(--kg-selection);
   color: var(--kg-text-primary);
 }
 
@@ -65,12 +65,12 @@ textarea:focus-visible {
 ::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: var(--kg-radius-pill);
-  background: #394142;
+  background: #c9d2e1;
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #56605f;
+  background: #aab6ca;
   background-clip: padding-box;
 }
 
@@ -84,13 +84,13 @@ textarea:focus-visible {
 .kg-page-inner {
   width: min(100%, var(--kg-content-max));
   margin: 0 auto;
-  padding: var(--kg-space-6) var(--kg-space-8) var(--kg-space-10);
+  padding: var(--kg-space-5) var(--kg-space-6) var(--kg-space-8);
 }
 
 .kg-page-title {
   margin: 0;
   color: var(--kg-text-primary);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
   line-height: 28px;
 }
@@ -98,7 +98,7 @@ textarea:focus-visible {
 .kg-section-title {
   margin: 0;
   color: var(--kg-text-primary);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 22px;
 }

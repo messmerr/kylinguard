@@ -238,7 +238,7 @@ function openSettings() {
 .model-search { margin-top: 11px; }
 .model-list { max-height: 260px; margin: 10px -5px 0; padding: 0 5px; overflow-y: auto; }
 .model-group + .model-group { margin-top: 10px; }
-.provider-name { padding: 0 7px 4px; color: var(--kg-text-tertiary); font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.provider-name { padding: 0 7px 4px; color: var(--kg-text-tertiary); font-size: 10px; font-weight: 600; letter-spacing: 0; text-transform: uppercase; }
 .model-option { width: 100%; min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 5px 8px; border: 0; border-radius: var(--kg-radius-sm); background: transparent; color: var(--kg-text-secondary); text-align: left; cursor: pointer; }
 .model-option:hover:not(:disabled) { background: var(--kg-bg-surface-2); color: var(--kg-text-primary); }
 .model-option.selected { background: var(--kg-selection); color: var(--kg-text-primary); }

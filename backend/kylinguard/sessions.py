@@ -229,13 +229,16 @@ class SessionStore:
             ).fetchone()
             return str(row[0]) if row and row[0] else ""
 
-    def list(self) -> list[dict]:
+    def list(self, *, include_drafts: bool = True) -> list[dict]:
         with self._lock:
-            rows = self._conn.execute(
+            query = (
                 "SELECT id, title, created_at, updated_at, draft, workspace_root "
                 "FROM sessions "
-                "ORDER BY updated_at DESC"
-            ).fetchall()
+            )
+            if not include_drafts:
+                query += "WHERE draft=0 "
+            query += "ORDER BY updated_at DESC"
+            rows = self._conn.execute(query).fetchall()
             result = []
             for row in rows:
                 permission = self._get_permissions_locked(row[0], time.time())

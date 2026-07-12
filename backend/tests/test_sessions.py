@@ -60,6 +60,7 @@ def test_草稿严格创建且只由首条消息finalize(store):
     assert summary["draft"] is True
     assert summary["title"] == "新任务"
     assert summary["workspace_root"] == "/srv/project"
+    assert store.list(include_drafts=False) == []
     assert store.get_workspace_root("draft") == "/srv/project"
 
     with pytest.raises(PermissionError) as error:
@@ -70,6 +71,7 @@ def test_草稿严格创建且只由首条消息finalize(store):
     summary = store.list()[0]
     assert summary["draft"] is False
     assert summary["title"] == "第一条真实任务"
+    assert [item["id"] for item in store.list(include_drafts=False)] == ["draft"]
 
     store.touch("draft", first_message="第二条消息不能重命名")
     assert store.list()[0]["title"] == "第一条真实任务"

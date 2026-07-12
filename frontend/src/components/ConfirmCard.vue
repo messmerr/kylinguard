@@ -303,8 +303,8 @@ async function act(decision) {
 .technical-detail summary { width: fit-content; cursor: pointer; user-select: none; }
 .technical-detail[open] summary { color: var(--kg-text-secondary); }
 .command-row { display: grid; gap: 4px; margin-top: 9px; padding: 9px 10px; border-radius: var(--kg-radius-sm); background: var(--kg-bg-code); }
-.command-row code { color: var(--kg-text-secondary); font: 12px/1.55 var(--kg-font-mono); word-break: break-all; }
-.command-row code:first-child { color: var(--kg-accent); }
+.command-row code { color: #dbe5f4; font: 12px/1.55 var(--kg-font-mono); word-break: break-all; }
+.command-row code:first-child { color: #79a7ff; }
 
 .reason-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; align-items: baseline; margin-top: 10px; }
 .reason-row > span { color: var(--kg-text-tertiary); font-size: 11px; }

@@ -51,7 +51,7 @@
 
       <section v-else-if="selectedId && events.length" class="timeline" aria-label="审计事件">
         <article
-          v-for="ev in events"
+          v-for="ev in pagedEvents"
           :key="ev.seq"
           class="event"
           :class="eventTone(ev)"
@@ -115,6 +115,16 @@
             }}</pre>
           </div>
         </article>
+
+        <div class="pagination-bar">
+          <el-pagination
+            v-model:current-page="currentPage"
+            v-model:page-size="pageSize"
+            :page-sizes="[20, 50, 100]"
+            :total="events.length"
+            layout="total, sizes, prev, pager, next"
+          />
+        </div>
       </section>
 
       <div v-else-if="selectedId" class="kg-empty audit-empty">
@@ -144,7 +154,14 @@ const loading = ref(false)
 const loadError = ref('')
 const expanded = reactive(new Set())
 const rawExpanded = reactive(new Set())
+const currentPage = ref(1)
+const pageSize = ref(20)
 let selectRequest = 0
+
+const pagedEvents = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return events.value.slice(start, start + pageSize.value)
+})
 
 const TYPE_LABELS = {
   user_query: '管理员指令',
@@ -440,6 +457,7 @@ async function select(id) {
   loadError.value = ''
   expanded.clear()
   rawExpanded.clear()
+  currentPage.value = 1
   if (!id) {
     loading.value = false
     return
@@ -718,13 +736,20 @@ onMounted(refreshSessions)
   overflow: auto;
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-sm);
-  background: var(--kg-bg-code);
+  background: var(--kg-bg-surface-2);
   color: var(--kg-text-secondary);
   font-family: var(--kg-font-mono);
   font-size: 11px;
   line-height: 1.55;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.pagination-bar {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--kg-space-5) 0 var(--kg-space-2) 28px;
+  border-top: 1px solid var(--kg-border-subtle);
 }
 
 .audit-empty { min-height: 280px; align-content: center; }
@@ -747,5 +772,45 @@ onMounted(refreshSessions)
 
   .event-hash { display: none; }
   .event-detail { margin-right: 0; }
+}
+
+@media (max-width: 720px) {
+  .audit-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--kg-space-3);
+    margin-top: var(--kg-space-4);
+  }
+
+  .session-picker { width: 100%; }
+  .chain-summary { justify-content: space-between; }
+  .timeline { overflow-x: hidden; }
+  .event { padding-left: 24px; }
+  .event:not(:last-child)::before { left: 7px; }
+  .event-marker { left: 0; }
+
+  .event-head {
+    grid-template-columns: 28px 84px minmax(0, 1fr) 14px;
+    gap: 5px;
+    padding-inline: 4px;
+  }
+
+  .event-ts { display: none; }
+  .event-type { font-size: 12px; }
+  .event-brief { font-size: 12px; }
+  .event-detail { margin-left: 4px; padding: var(--kg-space-3); }
+  .hash-chain { grid-template-columns: 1fr; }
+  .hash-chain > .kg-icon { display: none; }
+
+  .pagination-bar {
+    justify-content: center;
+    padding-left: 0;
+    overflow: hidden;
+  }
+
+  .pagination-bar :deep(.el-pagination__total),
+  .pagination-bar :deep(.el-pagination__sizes) { display: none; }
+
+  .pagination-bar :deep(.el-pager li) { min-width: 24px; }
 }
 </style>

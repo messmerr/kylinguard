@@ -31,7 +31,7 @@ const html = computed(() => md.render(props.text || ''))
 .md p { margin: 8px 0; }
 .md strong { color: var(--kg-text-primary); font-weight: 600; }
 .md h1 { margin: 22px 0 10px; color: var(--kg-text-primary); font-size: 22px;
-  font-weight: 600; line-height: 1.35; letter-spacing: -.02em; }
+  font-weight: 650; line-height: 1.35; letter-spacing: 0; }
 .md h3 { margin: 18px 0 7px; color: var(--kg-text-primary); font-size: 15px;
   font-weight: 600; line-height: 1.45; }
 .md h2 { margin: 20px 0 8px; padding-top: 14px;
@@ -45,8 +45,8 @@ const html = computed(() => md.render(props.text || ''))
   font-family: var(--kg-font-mono); font-size: .88em; }
 .md pre { position: relative; margin: 11px 0; padding: 13px 14px; overflow-x: auto;
   border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md);
-  background: var(--kg-bg-code); box-shadow: inset 3px 0 0 var(--kg-border-default); }
-.md pre code { padding: 0; border: none; background: none; color: var(--kg-text-secondary);
+  background: var(--kg-bg-code); box-shadow: inset 3px 0 0 #31548d; }
+.md pre code { padding: 0; border: none; background: none; color: #d9e2ef;
   font-size: 12px; line-height: 1.65; }
 .md table { display: block; width: 100%; margin: 11px 0; overflow-x: auto;
   border-collapse: collapse; border: 1px solid var(--kg-border-subtle);
@@ -71,7 +71,7 @@ const html = computed(() => md.render(props.text || ''))
 .md img { max-width: 100%; border-radius: var(--kg-radius-md); }
 
 /* KylinGuard syntax palette: restrained semantic accents instead of a vendor theme. */
-.md .hljs-comment, .md .hljs-quote { color: var(--kg-text-tertiary); font-style: italic; }
+.md .hljs-comment, .md .hljs-quote { color: #7f8da4; font-style: italic; }
 .md .hljs-keyword, .md .hljs-selector-tag, .md .hljs-literal,
 .md .hljs-section, .md .hljs-link { color: var(--kg-info); }
 .md .hljs-string, .md .hljs-title, .md .hljs-name, .md .hljs-type,

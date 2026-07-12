@@ -9,9 +9,11 @@
     "test": "node --test tests/*.test.js"
   },
   "dependencies": {
+    "echarts": "^6.1.0",
     "element-plus": "^2.7.0",
     "highlight.js": "^11.11.1",
     "markdown-it": "^14.3.0",
+    "mermaid": "^11.16.0",
     "vue": "^3.4.0"
   },
   "devDependencies": {

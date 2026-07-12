@@ -274,6 +274,27 @@ async def test_会话事件回放(app):
     assert events[1]["payload"]["answer"] == "历史答案"
 
 
+async def test_公开会话列表隐藏草稿但草稿仍可回放(app):
+    app.state.sessions.create("finalized", "正式任务")
+    app.state.sessions.create(
+        "draft", "新任务", draft=True, strict=True,
+    )
+    app.state.audit.append("draft", "permission_changed", {"draft": True})
+
+    async with _client(app) as c:
+        h = await _request_headers(c)
+        listed = await c.get("/api/sessions", headers=h)
+        replayed = await c.get("/api/sessions/draft/events", headers=h)
+
+    assert {item["id"] for item in app.state.sessions.list()} == {
+        "draft", "finalized",
+    }
+    assert [item["id"] for item in listed.json()["sessions"]] == ["finalized"]
+    assert [event["event_type"] for event in replayed.json()["events"]] == [
+        "permission_changed",
+    ]
+
+
 async def test_未知会话回放404(app):
     async with _client(app) as c:
         h = await _request_headers(c)
@@ -307,6 +328,7 @@ async def test_全局统计端点(app):
     app.state.audit.append("st", "verification",
                            {"decision": {"action": "deny"}})
     app.state.sessions.create("st", "x")
+    app.state.sessions.create("draft", "新任务", draft=True, strict=True)
     async with _client(app) as c:
         h = await _request_headers(c)
         r = await c.get("/api/stats", headers=h)

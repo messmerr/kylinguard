@@ -373,14 +373,15 @@ async def test_首条消息前原子创建完全访问草稿并在首轮finalize
             "ttl_seconds": 120,
             "workspace_root": str(workspace),
         })
+        assert created.status_code == 201, created.text
         listed_before = await client.get("/api/sessions", headers=headers)
+        internal_before = draft_app.state.sessions.list()[0]
         first_turn = await client.post("/api/chat", headers=headers, json={
             "message": "第一条真实任务",
             "session_id": session_id,
         })
         listed_after = await client.get("/api/sessions", headers=headers)
 
-    assert created.status_code == 201
     assert created.json()["session_id"] == session_id
     assert created.json()["draft"] is True
     permission = created.json()["permission"]
@@ -391,9 +392,10 @@ async def test_首条消息前原子创建完全访问草稿并在首轮finalize
     assert permission["workspace_root"] == str(workspace)
 
     before = listed_before.json()
-    assert before["sessions"][0]["draft"] is True
-    assert before["sessions"][0]["title"] == "新任务"
-    assert before["sessions"][0]["workspace_root"] == str(workspace)
+    assert before["sessions"] == []
+    assert internal_before["draft"] is True
+    assert internal_before["title"] == "新任务"
+    assert internal_before["workspace_root"] == str(workspace)
     assert before["permission_capabilities"]["full_access_available"] is True
     assert before["permission_capabilities"]["execution_identity"]
 

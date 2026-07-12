@@ -5,13 +5,19 @@
         <div>
           <p class="page-description">决定 Agent 什么时候可以直接执行，并管理额外的固定限制。</p>
         </div>
-        <el-button type="primary" @click="openAddDialog">
+        <el-button v-if="policyTab === 'rules'" type="primary" @click="openAddDialog">
           <KgIcon name="plus" :size="15" />
           添加策略
         </el-button>
       </header>
 
-      <section class="policy-section permission-section">
+      <el-tabs v-model="policyTab" class="main-tabs">
+        <el-tab-pane name="access">
+          <template #label>
+            <span class="tab-label"><KgIcon name="shield" :size="14" />权限模式</span>
+          </template>
+
+          <section class="policy-section permission-section">
         <div class="section-head permission-heading">
           <div>
             <h2 class="kg-section-title">Agent 权限</h2>
@@ -80,9 +86,18 @@
             <span>开启完全访问后，Agent 可在不逐项确认的情况下以 root 执行完整 Shell、文件、网络和进程操作。</span>
           </div>
         </div>
-      </section>
+          </section>
+        </el-tab-pane>
 
-      <section class="policy-section grants-section">
+        <el-tab-pane name="grants">
+          <template #label>
+            <span class="tab-label">
+              <KgIcon name="lock" :size="14" />授权管理
+              <span>{{ trustedRoots.length + activePermissionGrants.length }}</span>
+            </span>
+          </template>
+
+          <section class="policy-section grants-section">
         <div class="section-head">
           <div>
             <h2 class="kg-section-title">可信目录与有效授权</h2>
@@ -151,9 +166,18 @@
           <KgIcon name="lock" :size="17" />
           <span>还没有操作授权。普通修改会按当前模式询问。</span>
         </div>
-      </section>
+          </section>
+        </el-tab-pane>
 
-      <section class="policy-section custom-section">
+        <el-tab-pane name="rules">
+          <template #label>
+            <span class="tab-label">
+              <KgIcon name="audit" :size="14" />策略规则
+              <span>{{ custom.length }}</span>
+            </span>
+          </template>
+
+          <section class="policy-section custom-section">
         <div class="section-head">
           <div>
             <h2 class="kg-section-title">自定义策略</h2>
@@ -192,9 +216,9 @@
           <span>需要让某类命令或路径获得更醒目的风险确认时，可以在这里添加。</span>
           <el-button @click="openAddDialog">添加策略</el-button>
         </div>
-      </section>
+          </section>
 
-      <section class="policy-section builtin-section">
+          <section class="policy-section builtin-section">
         <div class="section-head">
           <div>
             <div class="builtin-heading">
@@ -284,7 +308,9 @@
           <span class="kg-spinner"></span>
           正在读取内置策略
         </div>
-      </section>
+          </section>
+        </el-tab-pane>
+      </el-tabs>
     </div>
 
     <el-dialog v-model="addDialog" title="添加策略" width="480px" align-center>
@@ -355,6 +381,7 @@ const removingGrantId = ref('')
 const removingRootPath = ref('')
 const trustedRootInput = ref('')
 const trustedRootLifetime = ref('session')
+const policyTab = ref('access')
 
 const activePermissionGrants = computed(() => permissionGrants.value.filter(
   (grant) => !grant.revoked,
@@ -558,7 +585,28 @@ onMounted(() => {
   font-size: 13px;
 }
 
-.policy-section { margin-top: var(--kg-space-8); }
+.main-tabs { margin-top: var(--kg-space-5); }
+.main-tabs :deep(.el-tabs__header) { margin-bottom: var(--kg-space-3); }
+
+.tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tab-label > span {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: var(--kg-radius-pill);
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-tertiary);
+  font-family: var(--kg-font-mono);
+  font-size: 10px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.policy-section { margin-top: var(--kg-space-4); }
 
 .permission-section,
 .grants-section {
@@ -604,6 +652,7 @@ onMounted(() => {
 
 .mode-card:hover:not(:disabled) { border-color: var(--kg-border-default); background: var(--kg-bg-surface-2); }
 .mode-card.active { border-color: var(--kg-accent-active); background: var(--kg-accent-soft); }
+.mode-card.is-safe.active { border-color: var(--kg-success-border); background: var(--kg-success-soft); }
 .mode-card.is-warning.active { border-color: var(--kg-warning-border); background: var(--kg-warning-soft); }
 .mode-card.is-danger.active { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); }
 .mode-card:disabled { opacity: .55; cursor: not-allowed; }
@@ -623,7 +672,7 @@ onMounted(() => {
   padding: 10px 12px;
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-md);
-  background: var(--kg-bg-code);
+  background: var(--kg-bg-surface-2);
 }
 .effective-access.danger { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); }
 .execution-facts { display: flex; flex: none; gap: var(--kg-space-4); }
@@ -818,7 +867,8 @@ onMounted(() => {
   padding: var(--kg-space-3);
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-sm);
-  background: var(--kg-bg-code);
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-secondary);
   line-height: 1.65;
 }
 

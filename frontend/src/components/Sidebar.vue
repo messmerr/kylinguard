@@ -53,6 +53,7 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import { activeId, loadSession, newSession, running, sessions } from '../composables/useChat.js'
+import { formatRelativeTime } from '../utils/relativeTime.js'
 import KgIcon from './KgIcon.vue'
 import KgLogo from './KgLogo.vue'
 
@@ -60,6 +61,8 @@ defineProps({ view: { type: String, required: true } })
 const emit = defineEmits(['change-view'])
 const historyOpen = ref(false)
 const sidebar = ref(null)
+const relativeClock = ref(Date.now())
+let relativeClockTimer = null
 
 const VIEWS = [
   { key: 'chat', icon: 'task', label: '任务' },
@@ -91,15 +94,17 @@ function closeHistoryOnOutside(event) {
   if (historyOpen.value && !sidebar.value?.contains(event.target)) historyOpen.value = false
 }
 
-onMounted(() => document.addEventListener('pointerdown', closeHistoryOnOutside))
-onUnmounted(() => document.removeEventListener('pointerdown', closeHistoryOnOutside))
+onMounted(() => {
+  document.addEventListener('pointerdown', closeHistoryOnOutside)
+  relativeClockTimer = setInterval(() => { relativeClock.value = Date.now() }, 30_000)
+})
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', closeHistoryOnOutside)
+  clearInterval(relativeClockTimer)
+})
 
 function timeText(ts) {
-  const d = new Date(ts * 1000)
-  const now = new Date()
-  return d.toDateString() === now.toDateString()
-    ? d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-    : d.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
+  return formatRelativeTime(ts, relativeClock.value)
 }
 </script>
 
@@ -111,7 +116,7 @@ function timeText(ts) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-right: 1px solid var(--kg-border-subtle);
+  border-right: 1px solid #dfe6f5;
   background: var(--kg-bg-sidebar);
   color: var(--kg-text-secondary);
   transition: width var(--kg-motion-base) var(--kg-ease-standard),
@@ -124,7 +129,7 @@ function timeText(ts) {
   align-items: center;
   gap: var(--kg-space-3);
   padding: 0 var(--kg-space-4);
-  border-bottom: 1px solid var(--kg-border-subtle);
+  border-bottom: 1px solid #dfe6f5;
 }
 
 .brand-mark {
@@ -133,11 +138,11 @@ function timeText(ts) {
   display: grid;
   flex: none;
   place-items: center;
-  border: 1px solid var(--kg-border-subtle);
-  border-radius: var(--kg-radius-md);
-  background: var(--kg-bg-surface-1);
-  color: var(--kg-accent);
-  box-shadow: inset 0 1px rgb(255 255 255 / 3%);
+  border: 0;
+  border-radius: var(--kg-radius-sm);
+  background: var(--kg-accent);
+  color: #fff;
+  box-shadow: 0 4px 12px rgb(23 92 255 / 18%);
 }
 
 .brand-copy {
@@ -147,16 +152,16 @@ function timeText(ts) {
 }
 
 .brand-copy strong {
-  color: var(--kg-text-primary);
-  font-size: 14px;
-  font-weight: 600;
+  color: #1046c7;
+  font-size: 16px;
+  font-weight: 700;
 }
 
 .brand-copy span {
   margin-top: 3px;
   color: var(--kg-text-tertiary);
   font-size: 11px;
-  letter-spacing: .04em;
+  letter-spacing: 0;
 }
 
 .new-btn {
@@ -167,22 +172,22 @@ function timeText(ts) {
   align-items: center;
   gap: var(--kg-space-2);
   flex: none;
-  border: 1px solid var(--kg-border-default);
+  border: 1px solid #a8c0ff;
   border-radius: var(--kg-radius-sm);
-  background: var(--kg-bg-surface-1);
-  color: var(--kg-text-secondary);
+  background: #fff;
+  color: var(--kg-accent);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  box-shadow: inset 0 1px rgb(255 255 255 / 2.5%);
+  box-shadow: 0 2px 8px rgb(23 92 255 / 7%);
   transition: color var(--kg-motion-fast), background var(--kg-motion-fast),
     border-color var(--kg-motion-fast);
 }
 
 .new-btn:hover:not(:disabled) {
-  border-color: var(--kg-border-strong);
-  background: var(--kg-bg-surface-2);
-  color: var(--kg-text-primary);
+  border-color: var(--kg-accent);
+  background: var(--kg-accent-soft);
+  color: var(--kg-accent-hover);
 }
 
 .new-btn:active:not(:disabled) { background: var(--kg-bg-surface-3); }
@@ -195,14 +200,14 @@ function timeText(ts) {
 
 .nav-section {
   display: grid;
-  gap: 2px;
-  padding: 0 var(--kg-space-2);
+  gap: 4px;
+  padding: 0 var(--kg-space-3);
 }
 
 .nav-item {
   position: relative;
   width: 100%;
-  height: 34px;
+  height: 36px;
   padding: 0 var(--kg-space-3);
   display: flex;
   align-items: center;
@@ -210,7 +215,8 @@ function timeText(ts) {
   border: 0;
   border-radius: var(--kg-radius-sm);
   background: transparent;
-  color: var(--kg-text-tertiary);
+  border: 1px solid transparent;
+  color: var(--kg-text-secondary);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
@@ -218,24 +224,15 @@ function timeText(ts) {
 }
 
 .nav-item:hover {
-  background: var(--kg-bg-surface-2);
-  color: var(--kg-text-secondary);
-}
-
-.nav-item.active {
-  background: var(--kg-selection);
+  background: rgb(255 255 255 / 68%);
   color: var(--kg-text-primary);
 }
 
-.nav-item.active::before {
-  content: '';
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  left: 0;
-  width: 2px;
-  border-radius: var(--kg-radius-pill);
-  background: var(--kg-accent);
+.nav-item.active {
+  border-color: #9db9ff;
+  background: #fff;
+  color: var(--kg-accent);
+  box-shadow: 0 3px 10px rgb(23 92 255 / 8%);
 }
 
 .nav-item.active :deep(.kg-icon) { color: var(--kg-accent); }
@@ -301,13 +298,13 @@ function timeText(ts) {
 }
 
 .session-item:hover {
-  background: var(--kg-bg-surface-2);
+  background: rgb(255 255 255 / 68%);
   color: var(--kg-text-primary);
 }
 
 .session-item.active {
-  background: var(--kg-selection);
-  color: var(--kg-text-primary);
+  background: #fff;
+  color: var(--kg-accent);
 }
 
 .session-title {
@@ -393,10 +390,9 @@ function timeText(ts) {
     border: 1px solid var(--kg-border-default);
     border-radius: var(--kg-radius-lg);
     background: var(--kg-bg-elevated);
-    box-shadow: 0 18px 42px rgb(0 0 0 / 42%);
+    box-shadow: 0 18px 42px rgb(38 55 85 / 18%);
   }
 
   .session-section.open { display: flex; }
-  .user-bar { margin-top: auto; flex-direction: column; padding: var(--kg-space-2) 0; }
 }
 </style>

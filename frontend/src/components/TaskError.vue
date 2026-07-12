@@ -105,7 +105,7 @@ async function copyDetails() {
 .error-content p { margin: 5px 0 0; color: var(--kg-text-secondary); font-size: 13px; line-height: 1.55; }
 .error-content .error-answer { color: var(--kg-text-tertiary); }
 .error-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.error-meta code { padding: 2px 5px; border-radius: var(--kg-radius-xs); background: var(--kg-bg-code); color: var(--kg-text-tertiary); font: 11px/1.4 var(--kg-font-mono); }
+.error-meta code { padding: 2px 5px; border-radius: var(--kg-radius-xs); background: var(--kg-bg-code); color: #b8c4d7; font: 11px/1.4 var(--kg-font-mono); }
 .error-actions { display: flex; gap: 8px; margin-top: 10px; }
 .error-actions button { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid var(--kg-border-default); border-radius: var(--kg-radius-sm); background: var(--kg-bg-surface-1); color: var(--kg-text-secondary); font-size: 12px; cursor: pointer; }
 .error-actions button:hover:not(:disabled) { color: var(--kg-text-primary); border-color: var(--kg-border-strong); }

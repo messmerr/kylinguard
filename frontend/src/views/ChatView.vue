@@ -32,7 +32,7 @@
                       @click="it.expanded = !it.expanded">
                 <span class="record-node"><KgIcon name="activity" :size="14" /></span>
                 <span class="record-title">已读取系统状态</span>
-                <span class="record-meta">{{ ageText(it.age) }}采集</span>
+                <span class="record-meta">{{ ageText(it) }}采集</span>
                 <KgIcon name="chevron" :size="14" class="chevron"
                         :class="{ open: it.expanded }" />
               </button>
@@ -50,7 +50,7 @@
                 <span v-if="it.streaming" class="state-dot"></span>
                 <span>{{ it.streaming ? '正在分析' : '分析过程' }}</span>
               </div>
-              <MarkdownText :text="it.text" />
+              <RichMessage :text="it.text" />
               <span v-if="it.streaming" class="cursor">▍</span>
               <div v-if="it.role === 'answer' && !it.streaming && it.model?.modelId"
                    class="assistant-model" :title="it.model.providerName || it.model.providerId">
@@ -167,12 +167,12 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import ConfirmCard from '../components/ConfirmCard.vue'
 import KgIcon from '../components/KgIcon.vue'
 import KgLogo from '../components/KgLogo.vue'
-import MarkdownText from '../components/MarkdownText.vue'
+import RichMessage from '../components/RichMessage.vue'
 import ModelSelector from '../components/ModelSelector.vue'
 import PermissionSelector from '../components/PermissionSelector.vue'
 import TaskError from '../components/TaskError.vue'
@@ -190,6 +190,7 @@ import {
   planningProgressCount,
   planningProgressText,
 } from '../utils/progressPresentation.js'
+import { formatCollectionAge } from '../utils/relativeTime.js'
 
 const WELCOME_HINTS = [
   { icon: 'disk', title: '检查磁盘使用', description: '只读取状态', text: '查看磁盘使用情况' },
@@ -205,7 +206,11 @@ const workspaceDisplay = computed(() => (
   permissionContext.workspaceRoot || '服务器默认目录'
 ))
 
-const ageText = (age) => (age < 3 ? '刚刚' : `${Math.round(age)} 秒前`)
+const snapshotClock = ref(Date.now())
+let snapshotClockTimer = null
+const ageText = (item) => formatCollectionAge(
+  (snapshotClock.value - (item.collectedAt || snapshotClock.value)) / 1000,
+)
 
 const now = ref(Date.now())
 let timerId = null
@@ -221,7 +226,13 @@ watch(running, (active) => {
     timerId = null
   }
 })
-onUnmounted(() => timerId && clearInterval(timerId))
+onMounted(() => {
+  snapshotClockTimer = setInterval(() => { snapshotClock.value = Date.now() }, 1000)
+})
+onUnmounted(() => {
+  if (timerId) clearInterval(timerId)
+  clearInterval(snapshotClockTimer)
+})
 
 const currentActivity = computed(() => currentTurn.value?.activities?.at(-1) || null)
 const showTurnActivity = computed(() => currentTurn.value
@@ -402,6 +413,7 @@ function downloadReport(text) {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  background: #f8faff;
 }
 
 .chat-inner {
@@ -432,7 +444,7 @@ function downloadReport(text) {
   border-radius: var(--kg-radius-lg);
   background: var(--kg-bg-surface-1);
   color: var(--kg-accent);
-  box-shadow: inset 0 1px rgb(255 255 255 / 3%);
+  box-shadow: 0 8px 24px rgb(23 92 255 / 10%);
 }
 
 .welcome h1 {
@@ -471,11 +483,12 @@ function downloadReport(text) {
   cursor: pointer;
   transition: color var(--kg-motion-fast), background var(--kg-motion-fast),
     border-color var(--kg-motion-fast);
+  box-shadow: 0 3px 12px rgb(37 58 95 / 5%);
 }
 
 .hint:hover:not(:disabled) {
-  border-color: var(--kg-border-default);
-  background: var(--kg-bg-surface-2);
+  border-color: #aec4f8;
+  background: var(--kg-accent-soft);
   color: var(--kg-accent);
 }
 
@@ -498,21 +511,23 @@ function downloadReport(text) {
 
 .user-prompt {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 0;
   margin: 12px 0 20px;
   padding-left: 2px;
 }
 
-.user-chevron {
-  flex: none;
-  color: var(--kg-accent);
-  font: 18px/1 var(--kg-font-mono);
-}
+.user-chevron { display: none; }
 
 .user-text {
-  color: var(--kg-text-primary);
-  font-size: 15px;
+  max-width: min(78%, 680px);
+  padding: 9px 13px;
+  border: 1px solid #c9d9ff;
+  border-radius: var(--kg-radius-lg) var(--kg-radius-lg) var(--kg-radius-xs) var(--kg-radius-lg);
+  background: var(--kg-accent-soft);
+  color: #18315f;
+  font-size: 14px;
   font-weight: 500;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -561,17 +576,26 @@ function downloadReport(text) {
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-md);
   background: var(--kg-bg-code);
+  box-shadow: 0 8px 22px rgb(17 24 39 / 10%);
 }
 
 .snapshot-item + .snapshot-item { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--kg-border-subtle); }
-.snapshot-key { margin-bottom: 4px; color: var(--kg-text-tertiary); font-size: 12px; }
+.snapshot-key { margin-bottom: 4px; color: #93a4be; font-size: 12px; }
 .snapshot-detail pre,
-.intent-detail { margin: 0; color: var(--kg-text-secondary); font: 12px/1.55 var(--kg-font-mono); white-space: pre-wrap; word-break: break-all; }
+.intent-detail { margin: 0; color: #dbe5f4; font: 12px/1.55 var(--kg-font-mono); white-space: pre-wrap; word-break: break-all; }
 
 .assistant {
   margin: 16px 0 20px 42px;
   color: var(--kg-text-primary);
   font-size: 14px;
+}
+
+.assistant.answer {
+  padding: 15px 17px;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-lg);
+  background: #fff;
+  box-shadow: 0 4px 16px rgb(34 52 84 / 5%);
 }
 
 .assistant-state {
@@ -614,6 +638,7 @@ function downloadReport(text) {
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-md);
   background: var(--kg-bg-surface-1);
+  box-shadow: 0 3px 12px rgb(34 52 84 / 5%);
 }
 .activity-node { width: 18px; display: grid; place-items: center; flex: none; color: var(--kg-info); }
 .turn-activity.is-cancelled .activity-node { color: var(--kg-text-tertiary); }
@@ -645,7 +670,7 @@ function downloadReport(text) {
 .composer {
   flex: none;
   padding: 8px 24px 14px;
-  background: var(--kg-bg-canvas);
+  background: linear-gradient(to bottom, rgb(248 250 255 / 0%), #f8faff 34%);
 }
 
 .composer-shell {
@@ -654,13 +679,13 @@ function downloadReport(text) {
   border: 1px solid var(--kg-border-default);
   border-radius: var(--kg-radius-lg);
   background: var(--kg-bg-surface-1);
-  box-shadow: inset 0 1px rgb(255 255 255 / 2.5%);
+  box-shadow: 0 10px 28px rgb(34 52 84 / 12%);
   transition: border-color var(--kg-motion-fast), box-shadow var(--kg-motion-fast);
 }
 
 .composer-shell:focus-within {
   border-color: var(--kg-accent);
-  box-shadow: 0 0 0 3px rgb(107 194 177 / 12%), inset 0 1px rgb(255 255 255 / 2.5%);
+  box-shadow: 0 0 0 3px rgb(23 92 255 / 10%), 0 12px 30px rgb(34 52 84 / 12%);
 }
 
 .composer-box { position: relative; padding: 11px 52px 8px 13px; }

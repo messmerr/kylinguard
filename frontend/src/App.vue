@@ -1,8 +1,8 @@
 <template>
   <div class="app-shell">
-    <Sidebar :view="view" :inert="showPanel" @change-view="changeView" />
+    <Sidebar :view="view" @change-view="changeView" />
     <section class="workspace">
-      <header class="page-bar" :inert="showPanel">
+      <header class="page-bar">
         <div class="page-ident">
           <h1>{{ currentView.label }}</h1>
           <span v-if="currentContext" class="page-context">{{ currentContext }}</span>
@@ -18,14 +18,14 @@
           </div>
           <button ref="statusTrigger" class="status-trigger" :class="{ active: showPanel }"
                   type="button" aria-controls="system-status-panel"
-                  :aria-expanded="showPanel" @click="toggleStatusPanel">
-            <KgIcon name="server" :size="16" />
+                  aria-haspopup="dialog" :aria-expanded="showPanel" @click="toggleStatusPanel">
+            <KgIcon name="gauge" :size="16" />
             <span>系统状态</span>
           </button>
         </div>
       </header>
 
-      <div class="content-area" :inert="showPanel">
+      <div class="content-area">
         <ChatView v-if="view === 'chat'" @open-model-settings="changeView('models')" />
         <ModelSettingsView v-else-if="view === 'models'" />
         <AuditView v-else-if="view === 'audit'" />
@@ -34,11 +34,7 @@
         <AlertsView v-else-if="view === 'alerts'" />
       </div>
 
-      <Transition name="inspector-fade">
-        <button v-if="showPanel" class="inspector-scrim" type="button"
-                aria-label="关闭系统状态" @click="closeStatusPanel"></button>
-      </Transition>
-      <StatusPanel :open="showPanel" @close="closeStatusPanel" />
+      <StatusPanel :open="showPanel" @close="closeStatusPanel" @closed="restoreStatusFocus" />
     </section>
   </div>
 </template>
@@ -65,7 +61,9 @@ import KgIcon from './components/KgIcon.vue'
 import Sidebar from './components/Sidebar.vue'
 import StatusPanel from './components/StatusPanel.vue'
 
-const view = ref('chat')
+const VALID_VIEWS = new Set(['chat', 'models', 'audit', 'policy', 'dashboard', 'alerts'])
+const initialView = new URLSearchParams(window.location.search).get('view')
+const view = ref(VALID_VIEWS.has(initialView) ? initialView : 'chat')
 const showPanel = ref(false)
 const statusTrigger = ref(null)
 
@@ -129,8 +127,13 @@ async function stopFullAccess() {
 }
 
 function changeView(next) {
+  if (!VALID_VIEWS.has(next)) return
   view.value = next
   showPanel.value = false
+  const url = new URL(window.location.href)
+  if (next === 'chat') url.searchParams.delete('view')
+  else url.searchParams.set('view', next)
+  window.history.replaceState(null, '', url)
 }
 
 function toggleStatusPanel() {
@@ -141,7 +144,10 @@ function toggleStatusPanel() {
 function closeStatusPanel() {
   if (!showPanel.value) return
   showPanel.value = false
-  requestAnimationFrame(() => statusTrigger.value?.focus())
+}
+
+function restoreStatusFocus() {
+  statusTrigger.value?.focus()
 }
 
 refreshSessions().catch(() => {})
@@ -172,9 +178,10 @@ loadModelConfig().catch(() => {})
   align-items: center;
   justify-content: space-between;
   gap: var(--kg-space-4);
-  padding: 0 var(--kg-space-6);
+  padding: 0 var(--kg-space-5);
   border-bottom: 1px solid var(--kg-border-subtle);
-  background: rgb(16 19 20 / 92%);
+  background: var(--kg-bg-surface-1);
+  box-shadow: 0 1px 2px rgb(26 43 74 / 4%);
   z-index: 5;
 }
 
@@ -189,9 +196,20 @@ loadModelConfig().catch(() => {})
   flex: none;
   margin: 0;
   color: var(--kg-text-primary);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 22px;
+}
+
+.page-ident h1::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 14px;
+  margin-right: 9px;
+  border-radius: 2px;
+  background: var(--kg-accent);
+  vertical-align: -2px;
 }
 
 .page-context {
@@ -219,18 +237,18 @@ loadModelConfig().catch(() => {})
 }
 
 .full-access-status strong { color: var(--kg-danger); font-size: 12px; font-weight: 650; }
-.full-access-status > span { color: #dba09d; }
+.full-access-status > span { color: #a74747; }
 .full-access-status button {
   height: 22px;
   padding: 0 7px;
   border: 1px solid var(--kg-danger-border);
   border-radius: var(--kg-radius-xs);
-  background: rgb(0 0 0 / 14%);
+  background: #fff;
   color: var(--kg-text-primary);
   font-size: 11px;
   cursor: pointer;
 }
-.full-access-status button:hover:not(:disabled) { background: rgb(0 0 0 / 28%); }
+.full-access-status button:hover:not(:disabled) { background: var(--kg-danger-soft); }
 .full-access-status button:disabled { color: var(--kg-text-disabled); cursor: wait; }
 
 .status-trigger {
@@ -242,7 +260,7 @@ loadModelConfig().catch(() => {})
   padding: 0 10px;
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-sm);
-  background: transparent;
+  background: var(--kg-bg-surface-1);
   color: var(--kg-text-tertiary);
   font-size: 12px;
   cursor: pointer;
@@ -252,9 +270,9 @@ loadModelConfig().catch(() => {})
 
 .status-trigger:hover,
 .status-trigger.active {
-  border-color: var(--kg-border-default);
-  background: var(--kg-bg-surface-2);
-  color: var(--kg-text-primary);
+  border-color: #9db8f6;
+  background: var(--kg-accent-soft);
+  color: var(--kg-accent);
 }
 
 .content-area {
@@ -263,25 +281,6 @@ loadModelConfig().catch(() => {})
   min-height: 0;
   display: flex;
   flex-direction: column;
-}
-
-.inspector-scrim {
-  position: absolute;
-  inset: var(--kg-pagebar-height) 0 0;
-  z-index: 19;
-  border: 0;
-  background: rgb(0 0 0 / 24%);
-  cursor: default;
-}
-
-.inspector-fade-enter-active,
-.inspector-fade-leave-active {
-  transition: opacity var(--kg-motion-base) var(--kg-ease-standard);
-}
-
-.inspector-fade-enter-from,
-.inspector-fade-leave-to {
-  opacity: 0;
 }
 
 @media (max-width: 1080px) {

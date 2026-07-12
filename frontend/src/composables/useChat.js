@@ -143,10 +143,17 @@ export function handleEvent(ev) {
     case 'progress':
       upsertActivity(ev)
       break
-    case 'snapshot':
-      push({ kind: 'snapshot', snapshot: ev.snapshot,
-             age: ev.collected_ago_seconds ?? 0, expanded: false })
+    case 'snapshot': {
+      const ageSeconds = Math.max(0, Number(ev.collected_ago_seconds) || 0)
+      const eventTime = Date.parse(ev.event_timestamp || '')
+      const referenceTime = Number.isFinite(eventTime) ? eventTime : Date.now()
+      push({
+        kind: 'snapshot', snapshot: ev.snapshot,
+        collectedAt: referenceTime - ageSeconds * 1000,
+        expanded: false,
+      })
       break
+    }
     case 'assistant_delta':
       if (currentTurn.value) currentTurn.value.transport = 'streaming'
       if (!streamingItem) {
@@ -410,7 +417,7 @@ export async function refreshSessions() {
   const r = await apiFetch('/api/sessions')
   if (!r.ok) throw new Error(`任务列表读取失败（HTTP ${r.status}）`)
   const body = await r.json()
-  sessions.value = body.sessions || []
+  sessions.value = (body.sessions || []).filter((session) => !session.draft)
   applyPermissionCapabilities(body.permission_capabilities)
   return body
 }
@@ -691,7 +698,7 @@ export async function loadSession(id) {
     const body = await r.json()
     if (requestId !== _loadRequest || activeId.value !== id) return
     for (const ev of body.events || []) {
-      handleEvent({ type: ev.event_type, ...ev.payload })
+      handleEvent({ type: ev.event_type, event_timestamp: ev.ts, ...ev.payload })
     }
     // 历史 permission_changed 事件只用于回放；最后以服务器当前上下文校准，
     // 避免过期的 full_access 被历史事件重新点亮。

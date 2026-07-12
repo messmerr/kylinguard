@@ -601,7 +601,7 @@ test('首条消息前原子创建完全访问草稿并复用同一会话', async
   assert.equal(permissions.permissionMode.value, 'full_access')
   assert.equal(permissions.permissionContext.synced, true)
   assert.equal(permissions.permissionContext.workspaceRoot, '/srv/project')
-  assert.equal(chat.sessions.value[0].id, chat.activeId.value)
+  assert.equal(chat.sessions.value.length, 0)
   assert.deepEqual(draftSessionBodies[0], {
     session_id: chat.activeId.value,
     mode: 'full_access',

@@ -156,7 +156,7 @@ async function chooseMode(mode) {
   border: 1px solid currentColor;
   border-radius: 3px;
   font: 700 9px/1.2 var(--kg-font-mono);
-  letter-spacing: .04em;
+  letter-spacing: 0;
 }
 .select-chevron { transform: rotate(90deg); }
 

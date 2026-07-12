@@ -284,7 +284,18 @@ const decisionClass = computed(() => ({
 
 .output-head { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--kg-border-subtle); }
 .output-head span:last-child { color: var(--kg-text-tertiary); font: 12px/1 var(--kg-font-mono); font-weight: 400; }
-.output-block { max-height: 280px; margin: 0; padding: 11px 12px; overflow: auto; background: var(--kg-bg-code); color: var(--kg-text-secondary); font: 12px/1.55 var(--kg-font-mono); white-space: pre-wrap; word-break: break-all; }
+.output-block {
+  max-height: 280px;
+  margin: 0;
+  padding: 11px 12px;
+  overflow: auto;
+  border-top: 1px solid var(--kg-border-subtle);
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-secondary);
+  font: 12px/1.65 var(--kg-font-mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 .step-error { padding: 11px 12px; border-top: 1px solid var(--kg-danger-border); background: var(--kg-danger-soft); color: var(--kg-danger); font-size: 12px; line-height: 1.55; }
 .step-error.warning { border-top-color: var(--kg-warning-border); background: var(--kg-warning-soft); color: var(--kg-warning); }
 

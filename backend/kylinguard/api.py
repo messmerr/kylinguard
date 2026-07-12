@@ -1119,7 +1119,7 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/api/sessions")
     async def list_sessions(_user: str = Depends(local_operator)):
-        summaries = app.state.sessions.list()
+        summaries = app.state.sessions.list(include_drafts=False)
         for summary in summaries:
             try:
                 summary["model"] = app.state.llm_config.get_session(
@@ -1488,7 +1488,7 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/api/stats")
     async def stats(_user: str = Depends(local_operator)):
-        return {"sessions": len(app.state.sessions.list()),
+        return {"sessions": len(app.state.sessions.list(include_drafts=False)),
                 **app.state.audit.stats()}
 
     @app.get("/api/status")

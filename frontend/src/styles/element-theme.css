@@ -1,4 +1,4 @@
-html.dark {
+:root {
   --el-color-primary: var(--kg-accent);
   --el-color-primary-light-3: var(--kg-accent-hover);
   --el-color-primary-light-5: color-mix(in srgb, var(--kg-accent) 55%, var(--kg-bg-canvas));
@@ -32,7 +32,7 @@ html.dark {
   --el-fill-color-light: var(--kg-bg-surface-2);
   --el-fill-color: var(--kg-bg-surface-2);
   --el-fill-color-dark: var(--kg-bg-surface-3);
-  --el-fill-color-darker: #2d3435;
+  --el-fill-color-darker: #e3e9f2;
 
   --el-text-color-primary: var(--kg-text-primary);
   --el-text-color-regular: var(--kg-text-secondary);
@@ -48,8 +48,8 @@ html.dark {
   --el-border-radius-small: var(--kg-radius-xs);
   --el-component-size: 32px;
   --el-mask-color: var(--kg-overlay);
-  --el-box-shadow-light: 0 16px 40px rgb(0 0 0 / 38%),
-    0 0 0 1px rgb(255 255 255 / 3.5%);
+  --el-box-shadow-light: 0 16px 40px rgb(38 55 85 / 14%),
+    0 0 0 1px rgb(32 48 78 / 4%);
 }
 
 .el-button {
@@ -74,13 +74,13 @@ html.dark {
 }
 
 .el-button--warning {
-  --el-button-text-color: #171108;
+  --el-button-text-color: #fff;
   --el-button-bg-color: var(--kg-warning);
   --el-button-border-color: var(--kg-warning);
-  --el-button-hover-text-color: #100c06;
+  --el-button-hover-text-color: #fff;
   --el-button-hover-bg-color: color-mix(in srgb, var(--kg-warning) 84%, white);
   --el-button-hover-border-color: color-mix(in srgb, var(--kg-warning) 84%, white);
-  --el-button-active-text-color: #171108;
+  --el-button-active-text-color: #fff;
   --el-button-active-bg-color: color-mix(in srgb, var(--kg-warning) 84%, black);
   --el-button-active-border-color: color-mix(in srgb, var(--kg-warning) 84%, black);
 }
@@ -116,7 +116,7 @@ html.dark {
 .el-textarea__inner:focus,
 .el-select__wrapper.is-focused {
   box-shadow: 0 0 0 1px var(--kg-accent) inset,
-    0 0 0 3px rgb(107 194 177 / 14%);
+    0 0 0 3px rgb(23 92 255 / 12%);
 }
 
 .el-table,
