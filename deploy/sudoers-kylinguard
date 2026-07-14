@@ -1,7 +1,9 @@
 Defaults:kylinguard !requiretty
 
-# General commands run as the unprivileged execution account.
-kylinguard ALL=(kylinguard-exec) NOPASSWD: ALL
+# General commands run as the unprivileged execution account. KylinGuard builds
+# a minimal allow-listed environment before using -E; SETENV lets an MCP receive
+# only its explicitly configured variables without exposing values in argv.
+kylinguard ALL=(kylinguard-exec) NOPASSWD: SETENV: ALL
 
 # Privileged operations are narrowed to a root-owned validator helper.
 kylinguard ALL=(root) NOPASSWD: /usr/local/libexec/kylinguard/execctl *

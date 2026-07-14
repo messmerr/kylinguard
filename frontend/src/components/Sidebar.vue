@@ -67,6 +67,7 @@ let relativeClockTimer = null
 const VIEWS = [
   { key: 'chat', icon: 'task', label: '任务' },
   { key: 'models', icon: 'model', label: '模型服务' },
+  { key: 'extensions', icon: 'server', label: '扩展' },
   { key: 'audit', icon: 'audit', label: '审计记录' },
   { key: 'policy', icon: 'shield', label: '权限与安全' },
   { key: 'dashboard', icon: 'dashboard', label: '总览' },

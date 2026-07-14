@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import pwd
 import shlex
 import shutil
@@ -222,6 +223,26 @@ def _protected_path_reason(
         (Path("/etc/kylinguard"), "服务配置与密钥目录属于控制面"),
         (Path("/usr/local/libexec/kylinguard"), "特权 helper 属于控制面"),
     ])
+    state_home = os.environ.get("XDG_STATE_HOME", "").strip()
+    state_root = (Path(state_home).expanduser() if state_home
+                  else Path.home() / ".local" / "state")
+    db_namespace = hashlib.sha256(
+        str(db_path).encode("utf-8")
+    ).hexdigest()[:16]
+    for value, reason in (
+        (settings.llm_secrets_dir or (
+            state_root / "kylinguard" / "provider-secrets" / db_namespace
+        ), "模型凭据目录属于控制面"),
+        (settings.mcp_secrets_dir or db_path.parent / "mcp-secrets",
+         "MCP 凭据目录属于控制面"),
+        (settings.skills_dir or db_path.parent / "skills",
+         "Skill 定义目录属于控制面"),
+        (settings.skills_state_path or db_path.parent / "skills-state.json",
+         "Skill 状态文件属于控制面"),
+    ):
+        candidates.append((
+            Path(value).expanduser().resolve(strict=False), reason,
+        ))
     root_env = Path(__file__).resolve().parents[2] / ".env"
     candidates.append((root_env.resolve(strict=False), "LLM 与管理员密钥文件受保护"))
     for protected, reason in candidates:
@@ -244,6 +265,7 @@ def describe_action(
     rule: RuleVerdict,
     settings,
     protected_prefixes: tuple[str, ...] = (),
+    tool_identity: str = "",
 ) -> ActionDescriptor:
     """生成授权绑定的动作清单；指纹使用真实参数，展示资源会脱敏。"""
     server, _, tool = step.tool.partition(".")
@@ -339,6 +361,7 @@ def describe_action(
         "tool": step.tool,
         "arguments": step.arguments,
         "capability": capability,
+        "tool_identity": tool_identity,
     })
     return ActionDescriptor(
         fingerprint=fingerprint,

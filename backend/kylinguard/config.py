@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     # 指向 /var/lib/kylinguard 等仅控制面账户可读的位置。
     llm_secrets_dir: str = ""
 
+    # 扩展配置。MCP 的敏感环境变量与模型密钥一样放在数据库之外的
+    # 受限目录；自定义 Skill 只会从这个受控根目录按需读取。
+    mcp_secrets_dir: str = ""
+    skills_dir: str = ""
+    skills_state_path: str = ""
+
     # 存储
     db_path: str = "data/kylinguard.db"
 

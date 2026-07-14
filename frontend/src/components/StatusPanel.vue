@@ -178,6 +178,14 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiFetch } from '../composables/useApi.js'
 import { stats } from '../composables/useChat.js'
+import {
+  cpuUsagePercent,
+  diskUsagePercent as diskPercent,
+  isMetricUnavailable as isUnavailable,
+  isMetricUnsupported,
+  loadAverage,
+  memoryUsagePercent as memoryPercent,
+} from '../utils/systemMetrics.js'
 import KgIcon from './KgIcon.vue'
 
 const props = defineProps({ open: { type: Boolean, default: true } })
@@ -237,16 +245,17 @@ const taskStats = computed(() => [
 
 function loadMetric(raw = '') {
   if (isUnavailable(raw)) return unavailableMetric('uptime_load', 'CPU / 负载', 'gauge', raw)
-  const cpu = raw.match(/CPU:\s*(\d+(?:\.\d+)?)%/i)
-  if (cpu) {
-    return percentMetric('uptime_load', 'CPU / 负载', 'gauge', Number(cpu[1]), raw, 'CPU 使用率')
+  const cpu = cpuUsagePercent(raw)
+  if (cpu != null) {
+    return percentMetric('uptime_load', 'CPU / 负载', 'gauge', cpu, raw, 'CPU 使用率')
   }
-  const load = raw.match(/load average[s]?:\s*([\d.]+)/i)
-  if (load) {
-    return percentMetric(
-      'uptime_load', 'CPU / 负载', 'gauge', Number(load[1]) * 100,
-      raw, '1 分钟负载（按单核折算）',
-    )
+  const load = loadAverage(raw)
+  if (load != null) {
+    return {
+      key: 'uptime_load', label: '系统负载', icon: 'gauge',
+      value: String(load), percent: null, note: '最近 1 分钟平均负载',
+      tone: 'neutral', raw,
+    }
   }
   return unavailableMetric('uptime_load', 'CPU / 负载', 'gauge', raw)
 }
@@ -275,7 +284,7 @@ function unavailableMetric(key, label, icon, raw = '') {
     icon,
     value: '—',
     percent: null,
-    note: '数据暂不可用',
+    note: isMetricUnsupported(raw) ? '当前平台不支持' : '数据暂不可用',
     tone: 'neutral',
     raw,
   }
@@ -297,28 +306,6 @@ function countMetric(key, label, icon, raw, kind, emptyNote, populatedNote, popu
     tone,
     raw,
   }
-}
-
-function memoryPercent(raw = '') {
-  const linux = raw.match(/Mem:\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)/i)
-  if (linux && Number(linux[1]) > 0) return Number(linux[2]) / Number(linux[1]) * 100
-  const windows = raw.match(/total=(\d+(?:\.\d+)?)MB\s+used=(\d+(?:\.\d+)?)MB/i)
-  if (windows && Number(windows[1]) > 0) return Number(windows[2]) / Number(windows[1]) * 100
-  const explicit = raw.match(/(\d+(?:\.\d+)?)%/)
-  return explicit ? Number(explicit[1]) : null
-}
-
-function diskPercent(raw = '') {
-  let highest = null
-  for (const line of meaningfulLines(raw)) {
-    const explicit = line.match(/(\d+(?:\.\d+)?)%/)
-    if (explicit) highest = Math.max(highest ?? 0, Number(explicit[1]))
-    const windows = line.match(/total=([\d.]+)G\s+used=([\d.]+)G/i)
-    if (windows && Number(windows[1]) > 0) {
-      highest = Math.max(highest ?? 0, Number(windows[2]) / Number(windows[1]) * 100)
-    }
-  }
-  return highest
 }
 
 function usageTone(percent) {
@@ -358,10 +345,6 @@ function statusRows(raw = '', kind) {
 function detailLines(raw = '') {
   if (!raw || isUnavailable(raw)) return []
   return meaningfulLines(raw).filter((line) => !/^\(无输出\)$/.test(line)).slice(0, 24)
-}
-
-function isUnavailable(raw) {
-  return typeof raw !== 'string' || !raw || raw.startsWith('[采集失败]')
 }
 
 function toggleDetail(key) {

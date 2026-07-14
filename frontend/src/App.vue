@@ -26,8 +26,13 @@
       </header>
 
       <div class="content-area">
-        <ChatView v-if="view === 'chat'" @open-model-settings="changeView('models')" />
+        <ChatView
+          v-if="view === 'chat'"
+          @open-model-settings="changeView('models')"
+          @open-extensions="changeView('extensions')"
+        />
         <ModelSettingsView v-else-if="view === 'models'" />
+        <ExtensionsView v-else-if="view === 'extensions'" />
         <AuditView v-else-if="view === 'audit'" />
         <PolicyView v-else-if="view === 'policy'" />
         <DashboardView v-else-if="view === 'dashboard'" />
@@ -43,6 +48,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { activeId, refreshSessions, sessions } from './composables/useChat.js'
+import { loadExtensions } from './composables/useExtensions.js'
 import { loadModelConfig } from './composables/useModels.js'
 import {
   fullAccessActive,
@@ -55,13 +61,14 @@ import AuditView from './views/AuditView.vue'
 import ChatView from './views/ChatView.vue'
 import DashboardView from './views/DashboardView.vue'
 import AlertsView from './views/AlertsView.vue'
+import ExtensionsView from './views/ExtensionsView.vue'
 import ModelSettingsView from './views/ModelSettingsView.vue'
 import PolicyView from './views/PolicyView.vue'
 import KgIcon from './components/KgIcon.vue'
 import Sidebar from './components/Sidebar.vue'
 import StatusPanel from './components/StatusPanel.vue'
 
-const VALID_VIEWS = new Set(['chat', 'models', 'audit', 'policy', 'dashboard', 'alerts'])
+const VALID_VIEWS = new Set(['chat', 'models', 'extensions', 'audit', 'policy', 'dashboard', 'alerts'])
 const initialView = new URLSearchParams(window.location.search).get('view')
 const view = ref(VALID_VIEWS.has(initialView) ? initialView : 'chat')
 const showPanel = ref(false)
@@ -70,6 +77,7 @@ const statusTrigger = ref(null)
 const VIEWS = {
   chat: { label: '任务' },
   models: { label: '模型服务' },
+  extensions: { label: '扩展' },
   audit: { label: '审计记录' },
   policy: { label: '权限与安全' },
   dashboard: { label: '总览' },
@@ -151,6 +159,7 @@ function restoreStatusFocus() {
 }
 
 refreshSessions().catch(() => {})
+loadExtensions().catch(() => {})
 loadModelConfig().catch(() => {})
 </script>
 

@@ -4,6 +4,14 @@
 import { computed, reactive, ref } from 'vue'
 import { apiFetch } from './useApi.js'
 import {
+  contextFilePaths,
+  nodesFromMessageAndMentions,
+  normalizeContextFiles,
+  normalizeContextMentions,
+  requestContextMentions,
+  serializeEditorSnapshot,
+} from '../utils/contextMention.js'
+import {
   applySessionModel,
   beginNewModelSession,
   bindModelSession,
@@ -390,6 +398,76 @@ export function handleEvent(ev) {
       for (const card of Object.values(confirmsById)) card.hidden = true
       break
     }
+    case 'skill_selected': {
+      const skillId = String(ev.id || ev.skill_id || '')
+      const skillName = String(ev.name || ev.skill_name || '')
+      const userItem = [...items.value].reverse().find((item) => item.kind === 'user')
+      const selectedMode = ['auto', 'manual', 'none'].includes(ev.skill_mode)
+        ? ev.skill_mode : currentTurn.value?.skillMode || userItem?.skillMode || 'auto'
+      if (userItem) {
+        userItem.skillId = skillId // 旧 UI/旧事件兼容
+        userItem.skillName = skillName
+        userItem.skillMode = selectedMode
+        userItem.skillResolved = true
+        if (selectedMode === 'auto') {
+          userItem.routedSkillId = skillId
+          userItem.routedSkillName = skillName
+        } else if (!userItem.skillIds?.length) {
+          userItem.skillIds = normalizeSkillIds(ev.skill_ids, skillId)
+        }
+        if (selectedMode === 'manual' && skillName) {
+          userItem.skillNames ||= []
+          const position = Number(ev.position)
+          if (Number.isInteger(position) && position > 0) {
+            userItem.skillNames[position - 1] = skillName
+          } else if (!userItem.skillNames.includes(skillName)) {
+            userItem.skillNames.push(skillName)
+          }
+        }
+      }
+      if (currentTurn.value) {
+        currentTurn.value.skillId = skillId
+        currentTurn.value.skillMode = selectedMode
+        currentTurn.value.skillResolved = true
+        if (selectedMode === 'auto') {
+          currentTurn.value.routedSkillId = skillId
+          currentTurn.value.routedSkillName = skillName
+        } else if (!currentTurn.value.skillIds?.length) {
+          currentTurn.value.skillIds = normalizeSkillIds(ev.skill_ids, skillId)
+        }
+        if (selectedMode === 'manual' && skillName) {
+          currentTurn.value.skillNames ||= []
+          const position = Number(ev.position)
+          if (Number.isInteger(position) && position > 0) {
+            currentTurn.value.skillNames[position - 1] = skillName
+          } else if (!currentTurn.value.skillNames.includes(skillName)) {
+            currentTurn.value.skillNames.push(skillName)
+          }
+        }
+      }
+      break
+    }
+    case 'skill_not_selected': {
+      const userItem = [...items.value].reverse().find((item) => item.kind === 'user')
+      const selectedMode = ['auto', 'none'].includes(ev.skill_mode)
+        ? ev.skill_mode : currentTurn.value?.skillMode || userItem?.skillMode || 'auto'
+      if (userItem) {
+        userItem.skillId = ''
+        userItem.skillName = ''
+        userItem.skillMode = selectedMode
+        userItem.skillResolved = true
+        userItem.routedSkillId = ''
+        userItem.routedSkillName = ''
+      }
+      if (currentTurn.value) {
+        currentTurn.value.skillId = ''
+        currentTurn.value.skillMode = selectedMode
+        currentTurn.value.skillResolved = true
+        currentTurn.value.routedSkillId = ''
+        currentTurn.value.routedSkillName = ''
+      }
+      break
+    }
     case 'done':
       if (currentTurn.value) {
         currentTurn.value.transport = 'closed'
@@ -408,7 +486,28 @@ export function handleEvent(ev) {
       break
     case 'user_query':
       // 回放模式渲染历史用户消息；实时模式已在发送时本地插入
-      if (!running.value) push({ kind: 'user', text: ev.query })
+      if (!running.value) {
+        const skillMode = ['auto', 'manual', 'none'].includes(ev.skill_mode)
+          ? ev.skill_mode : ''
+        const skillIds = skillMode === 'manual'
+          ? normalizeSkillIds(ev.requested_skill_ids ?? ev.skill_ids, ev.skill_id) : []
+        const contextMentions = normalizeContextMentions(ev.context_mentions)
+        const contextFiles = normalizeContextFiles(ev.context_files)
+        push({
+          kind: 'user', text: String(ev.query || ''),
+          contentNodes: nodesFromMessageAndMentions(ev.query, contextMentions),
+          contextMentions,
+          skillIds,
+          skillId: String(ev.skill_id || ''),
+          skillName: String(ev.skill_name || ''),
+          skillMode,
+          // UI 会逐项隐藏已放回正文的文件；未 mention 的兼容客户端引用仍保留。
+          contextFiles,
+          routedSkillId: skillMode === 'auto' ? String(ev.skill_id || '') : '',
+          routedSkillName: skillMode === 'auto' ? String(ev.skill_name || '') : '',
+          skillResolved: Boolean(ev.skill_id) || ev.skill_selected === false,
+        })
+      }
       break
   }
 }
@@ -493,7 +592,23 @@ function turnId() {
   return globalThis.crypto?.randomUUID?.() || `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-function startTurn(prompt) {
+function normalizeSkillIds(values, fallback = '', limit = 4) {
+  const source = Array.isArray(values) ? values : []
+  const result = []
+  const seen = new Set()
+  for (const raw of [...source, fallback]) {
+    const id = String(raw || '').trim()
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    result.push(id)
+    if (result.length >= limit) break
+  }
+  return result
+}
+
+function startTurn(prompt, {
+  skillIds = [], skillMode = 'auto', contextFiles = [], contextMentions = [], contentNodes = [],
+} = {}) {
   const now = Date.now()
   const turn = reactive({
     id: turnId(), prompt, status: 'running', stage: 'accepting',
@@ -501,6 +616,8 @@ function startTurn(prompt) {
     elapsedMs: null, lastEventAt: now, stopRequested: false,
     outcome: null, error: null, activities: [], terminalSeen: false,
     busy: true, model: modelSelectionSnapshot(),
+    skillIds, skillId: skillIds[0] || '', skillMode, contextFiles, contextMentions, contentNodes,
+    routedSkillId: '', routedSkillName: '', skillResolved: false,
   })
   currentTurn.value = turn
   activitiesById = {}
@@ -656,14 +773,22 @@ function appendTaskError(ev, fallback) {
   const error = normalizeError(ev.error || ev, fallback, { stage: ev.stage })
   finishStreamingInterrupted()
   finishTurn('failed', { outcome: ev.outcome || 'failed', elapsedMs: ev.elapsed_ms, error })
-  const prompt = currentTurn.value?.prompt
-    || [...items.value].reverse().find((item) => item.kind === 'user')?.text || ''
+  const lastUser = [...items.value].reverse().find((item) => item.kind === 'user')
+  const prompt = currentTurn.value?.prompt || lastUser?.text || ''
+  const skillId = currentTurn.value?.skillId || lastUser?.skillId || ''
+  const skillIds = currentTurn.value?.skillIds || lastUser?.skillIds || []
+  const skillMode = currentTurn.value?.skillMode || lastUser?.skillMode || 'auto'
+  const contextFiles = currentTurn.value?.contextFiles || lastUser?.contextFiles || []
+  const contextMentions = currentTurn.value?.contextMentions || lastUser?.contextMentions || []
+  const contentNodes = currentTurn.value?.contentNodes || lastUser?.contentNodes || []
   const previous = items.value[items.value.length - 1]
   if (previous?.kind === 'task_error' && previous.turnId === currentTurn.value?.id) {
     previous.error = error
     return
   }
-  push({ kind: 'task_error', error, prompt, turnId: currentTurn.value?.id || '',
+  push({ kind: 'task_error', error, prompt, skillId, skillIds, skillMode,
+         contextFiles, contextMentions, contentNodes,
+         turnId: currentTurn.value?.id || '',
          elapsedMs: ev.elapsed_ms ?? currentTurn.value?.elapsedMs ?? null })
 }
 
@@ -711,17 +836,61 @@ export async function loadSession(id) {
   }
 }
 
-export async function sendMessage(text, { onUpdate } = {}) {
-  if (!text.trim() || running.value) return
+export async function sendMessage(text, {
+  onUpdate,
+  skillId = '',
+  skillIds = [],
+  skillMode,
+  contextFiles = [],
+  contextMentions = [],
+  contentNodes = [],
+} = {}) {
+  if (running.value) return
+  const hasContentNodes = Array.isArray(contentNodes) && contentNodes.length > 0
+  const snapshot = hasContentNodes ? serializeEditorSnapshot(contentNodes) : null
+  const prompt = snapshot?.message ?? String(text || '').trim()
+  // 标签本身不是任务正文；只有引用而没有文字时不能发送。
+  if (!(snapshot ? snapshot.plainText : prompt).trim()) return
   _loadRequest++
-  const prompt = text.trim()
-  const turn = startTurn(prompt)
+  const legacySkillIds = normalizeSkillIds(skillIds, skillId)
+  const inlineSkillIds = snapshot?.skillIds || []
+  const requestedSkillIds = inlineSkillIds.length ? inlineSkillIds : legacySkillIds
+  const wantsManualSkills = inlineSkillIds.length > 0
+    || skillMode === 'manual'
+    || (skillMode == null && legacySkillIds.length > 0)
+  // 新界面不再提供 none，但旧审计记录的失败重试必须保持原语义；同理，
+  // 没有行内标签的旧 manual 记录仍使用其结构化 skill_ids。
+  const turnSkillMode = skillMode === 'none'
+    ? 'none' : wantsManualSkills && requestedSkillIds.length ? 'manual' : 'auto'
+  // 自动模式下的 skillId 可能来自上一轮服务端的路由结果。重试时必须
+  // 重新路由，不能把模型曾经自动选中的 Skill 偷偷升级成人工强制选择。
+  const turnSkillIds = turnSkillMode === 'manual' ? requestedSkillIds : []
+  const turnSkillId = turnSkillIds[0] || ''
+  const turnContextFiles = normalizeContextFiles([
+    ...(snapshot?.contextFiles || []), ...normalizeContextFiles(contextFiles),
+  ])
+  const turnContextMentions = snapshot?.contextMentions?.length
+    ? snapshot.contextMentions : normalizeContextMentions(contextMentions)
+  const turnContentNodes = snapshot?.contentNodes
+    || nodesFromMessageAndMentions(prompt, turnContextMentions)
+  const turn = startTurn(prompt, {
+    skillIds: turnSkillIds,
+    skillMode: turnSkillMode,
+    contextFiles: turnContextFiles,
+    contextMentions: turnContextMentions,
+    contentNodes: turnContentNodes,
+  })
   const controller = new AbortController()
   activeController = controller
   stepsById = {}
   confirmsById = {}
   streamingItem = null
-  push({ kind: 'user', text: prompt, turnId: turn.id })
+  push({
+    kind: 'user', text: prompt, contentNodes: turnContentNodes,
+    skillIds: turnSkillIds, skillId: turnSkillId, skillMode: turnSkillMode,
+    contextFiles: turnContextFiles, contextMentions: turnContextMentions,
+    routedSkillId: '', routedSkillName: '', skillResolved: false, turnId: turn.id,
+  })
   let sawDone = false
   try {
     const includeDraftModel = !activeId.value || !sessionModel.synced
@@ -730,16 +899,27 @@ export async function sendMessage(text, { onUpdate } = {}) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: prompt, session_id: activeId.value,
                              request_id: turn.id,
+                             skill_id: turnSkillId || '',
+                             skill_ids: turnSkillIds,
+                             skill_mode: turnSkillMode,
+                             context_files: contextFilePaths(turnContextFiles),
+                             context_mentions: requestContextMentions(turnContextMentions),
                              ...(!activeId.value ? permissionRequestPayload() : {}),
                              ...(includeDraftModel ? modelRequestPayload() : {}) }),
       signal: controller.signal,
     })
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}))
+      const detailObject = body.detail && typeof body.detail === 'object'
+        && !Array.isArray(body.detail) ? body.detail : null
       const detail = typeof body.detail === 'string' ? body.detail
-        : body.detail?.message
+        : detailObject?.message
           || (Array.isArray(body.detail) ? body.detail[0]?.msg : '')
       const error = new Error(detail || `请求失败（HTTP ${resp.status}）`)
+      error.code = detailObject?.code || body.code || `http_${resp.status}`
+      error.detail = detailObject?.detail || detail || error.message
+      error.retryable = detailObject?.retryable
+        ?? ([408, 425, 429].includes(resp.status) || resp.status >= 500)
       error.httpStatus = resp.status
       throw error
     }
@@ -786,7 +966,9 @@ export async function sendMessage(text, { onUpdate } = {}) {
       turn.transport = 'broken'
       appendTaskError({
         error: { code: e.code || 'connection_interrupted', message: e.message,
-          detail: e.message, retryable: true, http_status: e.httpStatus },
+          detail: e.detail || e.message,
+          retryable: e.retryable ?? (e.httpStatus == null || e.httpStatus >= 500),
+          http_status: e.httpStatus },
         stage: turn.stage, elapsed_ms: Date.now() - turn.startedAt,
       }, '与服务的连接中断。')
     }

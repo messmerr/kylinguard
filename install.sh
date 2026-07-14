@@ -30,6 +30,8 @@ id -u "$EXEC_USER" >/dev/null 2>&1 || \
 
 install -d -m 0755 "$INSTALL_DIR" "$HELPER_DIR"
 install -d -m 0750 -o "$APP_USER" -g "$APP_USER" "$STATE_DIR"
+install -d -m 0700 -o "$APP_USER" -g "$APP_USER" \
+  "$STATE_DIR/mcp-secrets" "$STATE_DIR/skills"
 install -d -m 0750 -o root -g "$APP_USER" "$CONFIG_DIR"
 install -d -m 0750 -o "$EXEC_USER" -g "$EXEC_USER" "$WORKSPACE_DIR"
 
@@ -58,6 +60,15 @@ fi
 if ! grep -q '^KG_WORKSPACE_ROOT=' "$CONFIG_DIR/kylinguard.env"; then
   echo "KG_WORKSPACE_ROOT=$WORKSPACE_DIR" >> "$CONFIG_DIR/kylinguard.env"
 fi
+if ! grep -q '^KG_MCP_SECRETS_DIR=' "$CONFIG_DIR/kylinguard.env"; then
+  echo "KG_MCP_SECRETS_DIR=$STATE_DIR/mcp-secrets" >> "$CONFIG_DIR/kylinguard.env"
+fi
+if ! grep -q '^KG_SKILLS_DIR=' "$CONFIG_DIR/kylinguard.env"; then
+  echo "KG_SKILLS_DIR=$STATE_DIR/skills" >> "$CONFIG_DIR/kylinguard.env"
+fi
+if ! grep -q '^KG_SKILLS_STATE_PATH=' "$CONFIG_DIR/kylinguard.env"; then
+  echo "KG_SKILLS_STATE_PATH=$STATE_DIR/skills-state.json" >> "$CONFIG_DIR/kylinguard.env"
+fi
 
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
@@ -80,5 +91,5 @@ cat <<EOF
 1. 编辑 $CONFIG_DIR/kylinguard.env
 2. 执行 systemctl start kylinguard
 3. 本机浏览器访问 http://127.0.0.1:8000；远程访问请使用 SSH 端口转发，
-   或配置同机 HTTPS 反向代理，切勿在局域网明文暴露 8000 端口
+   或配置带强认证与访问控制的 HTTPS 网关，切勿直接暴露 8000 端口
 EOF

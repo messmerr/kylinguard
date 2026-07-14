@@ -27,6 +27,8 @@ async def test_单项失败降级不抛错(monkeypatch):
         return _result(0, "ok")
 
     monkeypatch.setattr(snap, "run_command", fake_run)
+    monkeypatch.setattr(snap, "_SNAPSHOT_COMMANDS", snap._SNAPSHOT_COMMANDS_LINUX)
+    monkeypatch.setattr(snap, "_STATIC_SNAPSHOT", {})
     s = await snap.collect_snapshot()
     assert "[采集失败]" in s["recent_errors"]
     assert s["memory"] == "ok"
@@ -37,6 +39,43 @@ def test_格式化截断():
     text = snap.format_snapshot(s, per_item=100)
     assert "memory" in text and "disk" in text
     assert len(text) < 700
+
+
+def test_macos磁盘解析忽略伪文件系统与inode百分比(monkeypatch):
+    monkeypatch.setattr(snap, "_IS_WINDOWS", False)
+    raw = """Filesystem        Size Used Avail Capacity iused ifree %iused Mounted on
+/dev/disk3s1s1   228Gi 17Gi 22Gi 44% 447k 227M 0% /
+devfs            204Ki 204Ki 0Bi 100% 706 0 100% /dev
+/dev/disk3s5     228Gi 171Gi 22Gi 89% 2.4M 227M 1% /System/Volumes/Data
+map auto_home      0Bi 0Bi 0Bi 100% 0 0 - /System/Volumes/Data/home
+"""
+    assert snap._parse_disk_pcts({"disk": raw}) == [
+        ("/", 44), ("/System/Volumes/Data", 89),
+    ]
+
+
+def test_load_average不会被当成cpu百分比(monkeypatch):
+    monkeypatch.setattr(snap, "_IS_WINDOWS", False)
+    assert snap._parse_cpu_pct({
+        "uptime_load": "up 4:47, load averages: 1.88 2.03 2.27",
+    }) is None
+    assert snap._parse_cpu_pct({
+        "uptime_load": "CPU usage: 22.98% user, 13.70% sys, 63.30% idle",
+    }) == 37
+
+
+def test_macos内存压力使用空闲百分比(monkeypatch):
+    monkeypatch.setattr(snap, "_IS_WINDOWS", False)
+    assert snap._parse_memory_pct({
+        "memory": "System-wide memory free percentage: 68%",
+    }) == 32
+
+
+def test_平台不支持不会触发失败服务告警(monkeypatch):
+    monkeypatch.setattr(snap, "_IS_WINDOWS", False)
+    snapshot = {"failed_units": "[平台不支持] macOS 不提供 systemd 失败服务列表"}
+    assert snap._has_failed_units(snapshot) is False
+    assert snap.detect_anomalies(snapshot) == []
 
 
 def test_未读同类告警不会重复堆积(monkeypatch):

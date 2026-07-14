@@ -16,17 +16,34 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 from kylinguard.audit import AuditError, AuditLog
 from kylinguard.authorization import execution_profile_fingerprint
 from kylinguard.config import Settings, get_settings
+from kylinguard.context_files import (
+    MAX_CONTEXT_FILES,
+    MAX_CONTEXT_MENTIONS,
+    ContextFileError,
+    ContextMentionError,
+    normalize_context_mentions,
+    search_context_files,
+    validate_context_files,
+)
 from kylinguard.llm import (
     LLMError,
     internal_error,
@@ -40,7 +57,13 @@ from kylinguard.llm_config import (
     LLMRuntime,
     ModelSelection,
 )
-from kylinguard.mcp_client import ToolManager
+from kylinguard.mcp_client import (
+    BUILTIN_SERVER_NAMES,
+    MCPConnectionError,
+    ToolManager,
+    test_configured_stdio_server,
+)
+from kylinguard.mcp_config import MCPConfigError, MCPConfigStore, redact_mcp_error
 from kylinguard.models import (
     PermissionDecision,
     PermissionGrantScope,
@@ -63,6 +86,23 @@ from kylinguard.alert_rules import AlertRuleStore
 from kylinguard.alert_pusher import push_channel
 from kylinguard.sessions import SessionStore
 from kylinguard.snapshot import SnapshotCache
+from kylinguard.skills import (
+    MAX_SKILLS_PER_TURN,
+    SkillConflictError,
+    SkillDisabledError,
+    SkillError,
+    SkillNotFoundError,
+    SkillStore,
+    SkillValidationError,
+    collect_skill_dependencies,
+    normalize_selected_skill_ids,
+)
+
+
+_SYSTEM_AUDIT_SCOPES = {
+    "__extensions__": "扩展配置",
+    "__llm_config__": "模型配置",
+}
 from kylinguard.storage_security import secure_database_path
 from kylinguard.subprocess_env import safe_subprocess_env
 
@@ -75,6 +115,40 @@ ReasoningEffort = Literal[
 ]
 ProviderAdapter = Literal[
     "openai", "deepseek", "dashscope", "openai_compatible",
+]
+
+
+class SkillContextMention(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["skill"]
+    offset: int = Field(ge=0, strict=True)
+    skill_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$",
+    )
+
+
+class FileContextMention(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["file"]
+    offset: int = Field(ge=0, strict=True)
+    path: str = Field(min_length=1, max_length=4096)
+
+    @field_validator("path")
+    @classmethod
+    def normalize_path(cls, value: str) -> str:
+        path = value.strip()
+        if not path or "\x00" in path:
+            raise ValueError("文件 mention 路径为空或包含 NUL")
+        return path
+
+
+ContextMention = Annotated[
+    SkillContextMention | FileContextMention,
+    Field(discriminator="type"),
 ]
 
 
@@ -92,9 +166,64 @@ class ChatRequest(BaseModel):
     provider_id: str = Field(default="", max_length=64)
     model_id: str = Field(default="", max_length=256)
     reasoning_effort: ReasoningEffort = "auto"
+    skill_id: str = Field(
+        default="", max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$|^$",
+    )
+    skill_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_SKILLS_PER_TURN,
+    )
+    skill_mode: Literal["auto", "manual", "none"] = "auto"
+    context_files: list[str] = Field(
+        default_factory=list, max_length=MAX_CONTEXT_FILES,
+    )
+    context_mentions: list[ContextMention] = Field(
+        default_factory=list, max_length=MAX_CONTEXT_MENTIONS,
+    )
+
+    @field_validator("context_files")
+    @classmethod
+    def validate_context_file_values(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("context_files 必须是非空相对路径字符串数组")
+            if len(value) > 4096 or "\x00" in value:
+                raise ValueError("context_files 路径过长或包含 NUL")
+        return [value.strip() for value in values]
 
     @model_validator(mode="after")
     def validate_initial_permissions(self):
+        try:
+            normalized_skill_ids = normalize_selected_skill_ids(
+                self.skill_ids, legacy_skill_id=self.skill_id,
+            )
+        except SkillValidationError as exc:
+            raise ValueError(str(exc)) from exc
+        self.skill_ids = list(normalized_skill_ids)
+        if self.skill_mode == "none" and self.skill_ids:
+            raise ValueError("skill_mode=none 时不能指定 skill_ids")
+        if self.skill_mode == "manual" and not self.skill_ids:
+            raise ValueError("skill_mode=manual 时必须指定 skill_ids")
+        if self.skill_mode == "auto" and self.skill_ids:
+            # 兼容旧版前端：显式 ID 永远等价于明确人工选择。
+            self.skill_mode = "manual"
+        selected_paths = set(self.context_files)
+        selected_skill_ids = set(self.skill_ids)
+        for mention in self.context_mentions:
+            if mention.offset > len(self.message):
+                raise ValueError(
+                    "context_mentions.offset 超出 message 的 Unicode 字符范围"
+                )
+            if (isinstance(mention, SkillContextMention)
+                    and mention.skill_id not in selected_skill_ids):
+                raise ValueError(
+                    "Skill mention 必须属于规范化 skill_ids"
+                )
+            if (isinstance(mention, FileContextMention)
+                    and mention.path not in selected_paths):
+                raise ValueError(
+                    "文件 mention 必须属于规范化 context_files"
+                )
         if bool(self.provider_id) != bool(self.model_id):
             raise ValueError("provider_id 与 model_id 必须同时提供")
         if not self.provider_id and self.reasoning_effort != "auto":
@@ -296,6 +425,77 @@ class AlertChannelRequest(BaseModel):
     enabled: bool = True
 
 
+class MCPServerRequest(BaseModel):
+    """自定义 stdio MCP 配置；secret_env 永远只写。"""
+
+    id: str = Field(default="", max_length=64)
+    name: str = Field(min_length=1, max_length=80)
+    command: str = Field(min_length=1, max_length=4096)
+    cwd: str = Field(default="", max_length=4096)
+    args: list[str] = Field(default_factory=list, max_length=128)
+    env: dict[str, str] = Field(default_factory=dict, max_length=64)
+    secret_env: dict[str, SecretStr] = Field(
+        default_factory=dict, max_length=64,
+    )
+    clear_secret_env_keys: list[str] = Field(
+        default_factory=list, max_length=64,
+    )
+    # 启停只能走独立接口；保留字段用于兼容前端草稿但不会据此启动程序。
+    enabled: bool = False
+    version: int | None = Field(default=None, ge=1)
+
+    @field_validator("id", "name", "command", "cwd")
+    @classmethod
+    def strip_mcp_text(cls, value: str) -> str:
+        return value.strip()
+
+    def secret_values(self) -> dict[str, str]:
+        return {
+            key: value.get_secret_value()
+            for key, value in self.secret_env.items()
+        }
+
+
+class MCPVersionRequest(BaseModel):
+    version: int = Field(ge=1)
+
+
+class MCPEnabledRequest(MCPVersionRequest):
+    enabled: bool
+
+
+class SkillRequest(BaseModel):
+    id: str = Field(default="", max_length=64)
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=1024)
+    version: str = Field(default="1.0.0", max_length=64)
+    # KylinGuard 的可选兼容扩展：只检查依赖是否存在，不授权或限制工具。
+    required_tools: list[str] = Field(default_factory=list, max_length=128)
+    # 兼容旧客户端字段；自动路由上线后不再作为选择约束。
+    manual_only: bool = False
+    instructions: str = Field(min_length=1, max_length=128 * 1024)
+    # 新建始终停用；编辑保持现有状态。字段只为兼容界面请求。
+    enabled: bool = False
+    expected_sha256: str = Field(
+        default="", pattern=r"^(?:|[a-f0-9]{64})$",
+    )
+
+    @field_validator("id", "name", "description", "version", "instructions")
+    @classmethod
+    def strip_skill_text(cls, value: str) -> str:
+        return value.strip()
+
+class ExtensionEnabledRequest(BaseModel):
+    enabled: bool
+    expected_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_enabled: bool
+
+
+class SkillVersionRequest(BaseModel):
+    expected_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_enabled: bool
+
+
 def create_app(settings: Settings | None = None,
                *, with_tools: bool = True) -> FastAPI:
     settings = settings or get_settings()
@@ -306,6 +506,24 @@ def create_app(settings: Settings | None = None,
     sessions = SessionStore(settings.db_path)
     llm_config = LLMConfigStore(settings.db_path, settings)
     llm_runtime = LLMRuntime(llm_config, settings)
+    data_root = Path(settings.db_path).expanduser().resolve().parent
+    mcp_config = MCPConfigStore(
+        settings.db_path,
+        secrets_dir=(settings.mcp_secrets_dir or data_root / "mcp-secrets"),
+    )
+    skills = SkillStore(
+        user_dir=(settings.skills_dir or data_root / "skills"),
+        state_path=(
+            settings.skills_state_path or data_root / "skills-state.json"
+        ),
+    )
+    # 将真正落盘路径回填到运行时 Settings，使结构化文件工具
+    # 能把默认 XDG/数据库相对目录也视为控制面，而不只保护
+    # 管理员显式写入环境变量的路径。
+    settings.llm_secrets_dir = str(llm_config.secrets.directory)
+    settings.mcp_secrets_dir = str(mcp_config.secrets.directory)
+    settings.skills_dir = str(skills.user_dir)
+    settings.skills_state_path = str(skills.state_path)
     current_execution_profile = execution_profile_fingerprint(settings)
     # FULL_ACCESS 从不跨后端进程重启继承。sudoers、附加组、capabilities 或
     # 服务沙箱都可能在配置指纹未变化时扩大同一 UID 的权限；重启后主动收回
@@ -349,7 +567,12 @@ def create_app(settings: Settings | None = None,
                     lock_held=True,
                 )
     policies = PolicyStore(settings.db_path)
-    tools = ToolManager(exec_user=settings.exec_user)
+    tools = ToolManager(
+        exec_user=settings.exec_user,
+        config_store=mcp_config,
+        custom_call_timeout=settings.command_max_timeout,
+        output_max_bytes=settings.output_max_bytes,
+    )
     confirmations = Confirmations()
     permission_requests = PermissionRequests()
     snapshot_cache = SnapshotCache(settings.snapshot_interval)
@@ -367,24 +590,73 @@ def create_app(settings: Settings | None = None,
         session_store=sessions,
         permission_requests=permission_requests,
         llm_runtime=llm_runtime,
+        skills=skills,
     )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        if with_tools:
-            await tools.start()
-            await snapshot_cache.start()
-        yield
-        if with_tools:
-            await snapshot_cache.stop()
-            await tools.stop()
-        llm_config.close()
-        sessions.close()
-        policies.close()
-        alert_rule_store.close()
-        audit.close()
+        tools_started = False
+        snapshot_started = False
+        try:
+            if with_tools:
+                tools_started = True
+                await tools.start()
+                snapshot_started = True
+                await snapshot_cache.start()
+            yield
+        finally:
+            # 长寿命 MCP 子进程与 SQLite 连接必须逐项回收；
+            # 某一项清理失败不能跳过后续资源。
+            async def stop_safely(label: str, operation) -> None:
+                try:
+                    await operation()
+                except (Exception, asyncio.CancelledError) as exc:
+                    logger.error("停止 %s 失败：%s", label, exc)
+
+            if snapshot_started:
+                await stop_safely("快照缓存", snapshot_cache.stop)
+            if tools_started:
+                await stop_safely("MCP 工具管理器", tools.stop)
+            for label, close in (
+                ("MCP 配置库", mcp_config.close),
+                ("模型配置库", llm_config.close),
+                ("会话库", sessions.close),
+                ("策略库", policies.close),
+                ("告警规则库", alert_rule_store.close),
+                ("审计库", audit.close),
+            ):
+                try:
+                    close()
+                except BaseException as exc:
+                    logger.error("关闭 %s 失败：%s", label, exc)
 
     app = FastAPI(title="麒盾 KylinGuard", lifespan=lifespan)
+    # 产品是无登录的本机单用户控制面。除端口绑定回环外，
+    # 服务端也拒绝 DNS rebinding 携带的任意 Host。test/testserver
+    # 仅供 ASGI 测试载体使用，真实套接字仍由部署层绑回环。
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[
+        "127.0.0.1", "localhost", "[::1]", "test", "testserver",
+    ])
+
+    @app.middleware("http")
+    async def same_origin_mutations(request: Request, call_next):
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            origin = request.headers.get("origin", "").strip()
+            host = request.headers.get("host", "").strip()
+            if origin:
+                from urllib.parse import urlsplit
+                try:
+                    origin_host = urlsplit(origin).netloc
+                except ValueError:
+                    origin_host = ""
+                if not origin_host or origin_host.lower() != host.lower():
+                    return JSONResponse(status_code=403, content={
+                        "detail": {
+                            "code": "cross_origin_mutation_denied",
+                            "message": "本机控制面拒绝跨源状态修改请求。",
+                        }
+                    })
+        return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def safe_validation_error(_request, exc: RequestValidationError):
@@ -408,6 +680,10 @@ def create_app(settings: Settings | None = None,
     app.state.policies = policies
     app.state.llm_config = llm_config
     app.state.llm_runtime = llm_runtime
+    app.state.mcp_config = mcp_config
+    app.state.skills = skills
+    app.state.tools = tools
+    app.state.tools_active = with_tools
 
     async def local_operator() -> str:
         """为单用户本机部署提供稳定的审计操作者标识。"""
@@ -615,6 +891,136 @@ def create_app(settings: Settings | None = None,
             **payload,
         })
 
+    def audit_extension(event_type: str, user: str, **payload) -> None:
+        """扩展审计只记录元数据；不接收环境变量值或 Skill 正文。"""
+        app.state.audit.append("__extensions__", event_type, {
+            "operator": user,
+            **payload,
+        })
+
+    def mcp_http_error(error: MCPConfigError) -> HTTPException:
+        return HTTPException(
+            error.status_code,
+            detail={"code": error.code, "message": error.message},
+        )
+
+    def skill_http_error(error: SkillError) -> HTTPException:
+        if isinstance(error, SkillNotFoundError):
+            status = 404
+            code = "skill_not_found"
+        elif isinstance(error, SkillDisabledError):
+            status = 409
+            code = "skill_disabled"
+        elif isinstance(error, SkillConflictError):
+            status = 409
+            code = "skill_conflict"
+        elif isinstance(error, SkillValidationError):
+            status = 400
+            code = "skill_invalid"
+        else:
+            status = 400
+            code = "skill_error"
+        return HTTPException(
+            status,
+            detail={"code": code, "message": str(error)},
+        )
+
+    def render_skill_document(req: SkillRequest) -> str:
+        """把结构化表单安全序列化成受限 SKILL.md。"""
+        def scalar(value: str) -> str:
+            return json.dumps(value, ensure_ascii=False)
+
+        lines = [
+            "---",
+            f"name: {scalar(req.name)}",
+            f"description: {scalar(req.description or req.name)}",
+            f"version: {scalar(req.version or '1.0.0')}",
+            "required_tools:",
+            *[f"  - {scalar(tool)}" for tool in req.required_tools],
+            # 创建或编辑正文不会暗中启用 Skill；显式启停状态由状态文件覆盖。
+            "enabled: false",
+            "---",
+            req.instructions,
+            "",
+        ]
+        return "\n".join(lines)
+
+    def skill_payload(summary) -> dict:
+        definition = app.state.skills.get_skill(
+            summary.id, include_disabled=True,
+        )
+        has_tool = getattr(app.state.tools, "has_tool", None)
+        missing_tools = [
+            tool for tool in definition.required_tools
+            if not (callable(has_tool) and has_tool(tool))
+        ]
+        return {
+            **summary.model_dump(mode="json"),
+            "instructions": definition.instructions,
+            "missing_tools": missing_tools,
+            "available": summary.enabled and not missing_tools,
+        }
+
+    async def extensions_payload() -> dict:
+        summaries = app.state.skills.list_skills()
+        configured_mcp = app.state.mcp_config.list_servers()
+        active_server_summaries = getattr(
+            app.state.tools, "active_server_summaries", None,
+        )
+        active_mcp = (
+            await active_server_summaries()
+            if app.state.tools_active and callable(active_server_summaries)
+            else []
+        )
+        active_by_id = {item["id"]: item for item in active_mcp}
+        enabled_mcp_servers = [
+            {
+                **item,
+                "name": BUILTIN_SERVER_NAMES.get(item["id"], item["id"]),
+                "available": True,
+            }
+            for item in active_mcp
+            if item["source"] == "builtin"
+        ]
+        enabled_mcp_servers.extend(
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "source": "custom",
+                "tool_count": active_by_id.get(
+                    item["id"], {"tool_count": item.get("tool_count", 0)},
+                )["tool_count"],
+                "available": item["id"] in active_by_id,
+            }
+            for item in configured_mcp
+            if item["enabled"]
+        )
+        return {
+            "mcp_servers": configured_mcp,
+            "enabled_mcp_servers": enabled_mcp_servers,
+            "skills": [skill_payload(item) for item in summaries],
+            "skill_issues": [
+                issue.model_dump(mode="json")
+                for issue in app.state.skills.issues()
+            ],
+        }
+
+    async def reload_custom_tools() -> dict:
+        if not app.state.tools_active:
+            return {"loaded": [], "failed": {}, "disabled": []}
+        return await app.state.tools.reload_custom()
+
+    async def detach_custom_tool(server_id: str) -> dict:
+        """先从工具路由摘除服务；子进程回收由 ToolManager 后台完成。"""
+        if not app.state.tools_active:
+            return {"detached": False, "inactive": True}
+        detach = getattr(app.state.tools, "detach_custom", None)
+        if not callable(detach):
+            return {"detached": False, "fallback_reload": True}
+        # detach 在返回前已完成路由摘除；shield 保证 HTTP 请求取消也不会
+        # 中断这一 fail-closed 收敛动作。
+        return {"detached": bool(await asyncio.shield(detach(server_id)))}
+
     def transactional_llm_audit(
         session_id: str, event_type: str, user: str, payload_builder,
     ):
@@ -629,6 +1035,40 @@ def create_app(settings: Settings | None = None,
                 lock_held=True,
             )
         return append
+
+    def transactional_extension_audit(
+        event_type: str, user: str, payload_builder,
+    ):
+        """把 MCP 配置终态与扩展审计写入同一个 SQLite 事务。"""
+        def append(value, connection):
+            app.state.audit.append(
+                "__extensions__",
+                event_type,
+                {"operator": user, **payload_builder(value)},
+                connection=connection,
+                commit=False,
+                lock_held=True,
+            )
+        return append
+
+    def mcp_audit_payload(server: dict) -> dict:
+        """MCP 审计白名单；绝不包含 secret_env 值。"""
+        return {
+            "server_id": server["id"],
+            "name": server["name"],
+            "version": server["version"],
+            "command": server["command"],
+            "cwd": server.get("cwd", ""),
+            "arg_count": len(server.get("args", [])),
+            "env_keys": sorted(server.get("env", {})),
+            "secret_env_keys": server.get("secret_env_keys", []),
+            "enabled": bool(server.get("enabled")),
+            "tools": [
+                tool.get("name", "")
+                for tool in server.get("tools", [])
+                if isinstance(tool, dict) and tool.get("name")
+            ],
+        }
 
     def permission_expiry(mode: PermissionMode, ttl_seconds: int | None) -> float | None:
         if mode not in {
@@ -654,6 +1094,503 @@ def create_app(settings: Settings | None = None,
     @app.get("/api/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/api/context/files")
+    async def context_file_candidates(
+        q: str = Query(default="", max_length=200),
+        root: str = Query(default="", max_length=4096),
+        _user: str = Depends(local_operator),
+    ):
+        """搜索已知工作目录中的文件路径；绝不读取文件内容。"""
+        try:
+            requested_root = resolve_session_workspace(root)
+        except SessionPermissionError as exc:
+            raise permission_http_error(exc) from exc
+        try:
+            result = search_context_files(requested_root, q)
+        except ContextFileError as exc:
+            raise HTTPException(400, detail={
+                "code": "context_search_invalid",
+                "message": str(exc),
+            }) from exc
+        result["files"] = [
+            {**item, "path": item["relative_path"]}
+            for item in result["files"]
+        ]
+        return result
+
+    # ---- MCP 与 Skill 扩展 ----
+
+    @app.get("/api/extensions")
+    async def get_extensions(_user: str = Depends(local_operator)):
+        try:
+            return await extensions_payload()
+        except SkillError as exc:
+            raise skill_http_error(exc) from exc
+
+    @app.post("/api/extensions/mcp", status_code=201)
+    async def create_mcp_server(
+        req: MCPServerRequest, user: str = Depends(local_operator),
+    ):
+        if not req.id:
+            raise HTTPException(422, detail={
+                "code": "mcp_server_id_required",
+                "message": "添加 MCP 服务必须提供 ID。",
+            })
+        audit_extension(
+            "mcp_server_create_requested", user,
+            server_id=req.id, name=req.name, command=req.command,
+            cwd=req.cwd,
+            arg_count=len(req.args), env_keys=sorted(req.env),
+            secret_env_keys=sorted(req.secret_env),
+        )
+        try:
+            with app.state.audit.serialized():
+                server = app.state.mcp_config.create_server(
+                    server_id=req.id,
+                    name=req.name,
+                    command=req.command,
+                    cwd=req.cwd or None,
+                    args=req.args,
+                    env=req.env,
+                    secret_env=req.secret_values(),
+                    # 保存与启动严格分离，避免一次普通表单提交执行新程序。
+                    enabled=False,
+                    updated_by=user,
+                    audit=transactional_extension_audit(
+                        "mcp_server_created", user, mcp_audit_payload,
+                    ),
+                )
+        except MCPConfigError as exc:
+            raise mcp_http_error(exc) from exc
+        return {"server": server}
+
+    @app.put("/api/extensions/mcp/{server_id}")
+    async def update_mcp_server(
+        server_id: str, req: MCPServerRequest,
+        user: str = Depends(local_operator),
+    ):
+        if req.version is None:
+            raise HTTPException(422, detail={
+                "code": "mcp_version_required",
+                "message": "编辑 MCP 服务必须携带当前版本。",
+            })
+        try:
+            current = app.state.mcp_config.get_server(server_id)
+            if current["enabled"]:
+                raise MCPConfigError(
+                    "mcp_disable_before_edit",
+                    "请先停用 MCP 服务，再修改启动配置。",
+                    status_code=409,
+                )
+            audit_extension(
+                "mcp_server_update_requested", user,
+                server_id=server_id, expected_version=req.version,
+                name=req.name, command=req.command, cwd=req.cwd,
+                arg_count=len(req.args), env_keys=sorted(req.env),
+                secret_env_keys=sorted(req.secret_env),
+                clear_secret_env_keys=sorted(req.clear_secret_env_keys),
+            )
+            with app.state.audit.serialized():
+                server = app.state.mcp_config.update_server(
+                    server_id,
+                    expected_version=req.version,
+                    name=req.name,
+                    command=req.command,
+                    cwd=req.cwd or None,
+                    args=req.args,
+                    env=req.env,
+                    secret_env=req.secret_values(),
+                    clear_secret_env_keys=req.clear_secret_env_keys,
+                    enabled=False,
+                    updated_by=user,
+                    audit=transactional_extension_audit(
+                        "mcp_server_updated", user, mcp_audit_payload,
+                    ),
+                )
+        except MCPConfigError as exc:
+            raise mcp_http_error(exc) from exc
+        return {"server": server}
+
+    @app.post("/api/extensions/mcp/{server_id}/test")
+    async def test_mcp_server(
+        server_id: str, req: MCPVersionRequest,
+        user: str = Depends(local_operator),
+    ):
+        try:
+            current = app.state.mcp_config.get_server(server_id)
+            if current["version"] != req.version:
+                raise MCPConfigError(
+                    "mcp_config_version_conflict",
+                    "MCP 服务配置已变化，请刷新后重试。",
+                    status_code=409,
+                )
+            # 测试会启动第三方代码；先落审计意图，审计不可用时
+            # 绝不启动程序。
+            audit_extension(
+                "mcp_server_test_requested", user,
+                server_id=server_id, version=req.version,
+                command=current["command"],
+            )
+            result = await test_configured_stdio_server(
+                app.state.mcp_config, server_id,
+                exec_user=settings.exec_user,
+                expected_version=req.version,
+            )
+            runtime = None
+            fresh = app.state.mcp_config.get_server(server_id)
+            if fresh["version"] == req.version and fresh["enabled"]:
+                runtime = await reload_custom_tools()
+                if server_id in runtime.get("failed", {}):
+                    raise MCPConfigError(
+                        "mcp_runtime_unavailable",
+                        ("MCP 临时测试成功，但运行时恢复失败："
+                         + runtime["failed"][server_id]),
+                        status_code=400,
+                    )
+        except MCPConfigError as exc:
+            raise mcp_http_error(exc) from exc
+        except MCPConnectionError as exc:
+            audit_extension(
+                "mcp_server_tested", user, server_id=server_id,
+                version=req.version, ok=False, error=exc.message,
+            )
+            raise HTTPException(400, detail={
+                "code": "mcp_connection_failed",
+                "message": exc.message,
+            }) from exc
+        audit_extension(
+            "mcp_server_tested", user, server_id=server_id,
+            version=req.version, ok=True,
+            tool_count=result["tool_count"],
+            tools=[tool["name"] for tool in result["tools"]],
+        )
+        return {**result, "runtime": runtime}
+
+    @app.post("/api/extensions/mcp/{server_id}/enabled")
+    async def set_mcp_server_enabled(
+        server_id: str, req: MCPEnabledRequest,
+        user: str = Depends(local_operator),
+    ):
+        try:
+            current = app.state.mcp_config.get_server(server_id)
+            if current["version"] != req.version:
+                raise MCPConfigError(
+                    "mcp_config_version_conflict",
+                    "MCP 服务配置已变化，请刷新后重试。",
+                    status_code=409,
+                )
+            if current["enabled"] == req.enabled:
+                return {"server": current, "runtime": None}
+
+            audit_extension(
+                "mcp_server_enable_requested" if req.enabled
+                else "mcp_server_disable_requested",
+                user, server_id=server_id, version=req.version,
+                command=current["command"],
+            )
+
+            if req.enabled:
+                # 启用是代码执行边界：先临时握手并发现工具，成功后才持久化。
+                await test_configured_stdio_server(
+                    app.state.mcp_config, server_id,
+                    exec_user=settings.exec_user,
+                    expected_version=req.version,
+                )
+                with app.state.audit.serialized():
+                    server = app.state.mcp_config.set_enabled(
+                        server_id,
+                        expected_version=req.version,
+                        enabled=True,
+                        updated_by=user,
+                        audit=transactional_extension_audit(
+                            "mcp_server_enabled", user, mcp_audit_payload,
+                        ),
+                    )
+                try:
+                    runtime = await reload_custom_tools()
+                    failure = runtime.get("failed", {}).get(server_id, "")
+                    if failure:
+                        raise MCPConfigError(
+                            "mcp_start_failed", failure, status_code=400,
+                        )
+                except BaseException as exc:
+                    # 无论请求取消还是启动失败，都先让该服务不可再被新调用。
+                    await detach_custom_tool(server_id)
+                    safe_error = (
+                        exc.message if isinstance(exc, MCPConfigError)
+                        else redact_mcp_error(exc)
+                    )
+                    try:
+                        with app.state.audit.serialized():
+                            rolled_back = app.state.mcp_config.set_enabled(
+                                server_id,
+                                expected_version=server["version"],
+                                enabled=False,
+                                updated_by="(automatic rollback)",
+                                audit=transactional_extension_audit(
+                                    "mcp_server_enable_failed", user,
+                                    lambda value: {
+                                        **mcp_audit_payload(value),
+                                        "error": safe_error,
+                                    },
+                                ),
+                            )
+                    except Exception:
+                        # 终态审计不可用时仍优先收紧持久化开关，避免重启后
+                        # 重新执行已失败的第三方程序。
+                        rolled_back = app.state.mcp_config.set_enabled(
+                            server_id,
+                            expected_version=server["version"],
+                            enabled=False,
+                            updated_by="(automatic safety rollback)",
+                        )
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    raise MCPConfigError(
+                        "mcp_start_failed",
+                        f"MCP 服务启动失败，已恢复为停用状态：{safe_error}",
+                        status_code=400,
+                    ) from exc
+            else:
+                # 停用先摘路由、后提交状态与终态审计；任何中途失败都保持
+                # fail closed，不会出现界面显示停用但 Agent 仍可新调用。
+                runtime = await detach_custom_tool(server_id)
+                if runtime.get("fallback_reload"):
+                    raise MCPConfigError(
+                        "mcp_runtime_detach_unavailable",
+                        "当前工具运行时不支持安全停用，请重启服务后重试。",
+                        status_code=500,
+                    )
+                with app.state.audit.serialized():
+                    server = app.state.mcp_config.set_enabled(
+                        server_id,
+                        expected_version=req.version,
+                        enabled=False,
+                        updated_by=user,
+                        audit=transactional_extension_audit(
+                            "mcp_server_disabled", user, mcp_audit_payload,
+                        ),
+                    )
+        except MCPConfigError as exc:
+            raise mcp_http_error(exc) from exc
+        except MCPConnectionError as exc:
+            audit_extension(
+                "mcp_server_enable_failed", user,
+                server_id=server_id, version=req.version, error=exc.message,
+            )
+            raise HTTPException(400, detail={
+                "code": "mcp_connection_failed",
+                "message": exc.message,
+            }) from exc
+        return {"server": server, "runtime": runtime}
+
+    @app.delete("/api/extensions/mcp/{server_id}")
+    async def delete_mcp_server(
+        server_id: str, req: MCPVersionRequest,
+        user: str = Depends(local_operator),
+    ):
+        try:
+            current = app.state.mcp_config.get_server(server_id)
+            if current["version"] != req.version:
+                raise MCPConfigError(
+                    "mcp_config_version_conflict",
+                    "MCP 服务配置已变化，请刷新后重试。",
+                    status_code=409,
+                )
+            audit_extension(
+                "mcp_server_delete_requested", user,
+                server_id=server_id, version=req.version,
+                name=current["name"], enabled=current["enabled"],
+            )
+            runtime = await detach_custom_tool(server_id)
+            if runtime.get("fallback_reload"):
+                raise MCPConfigError(
+                    "mcp_runtime_detach_unavailable",
+                    "当前工具运行时不支持安全删除，请重启服务后重试。",
+                    status_code=500,
+                )
+            with app.state.audit.serialized():
+                app.state.mcp_config.delete_server(
+                    server_id,
+                    expected_version=req.version,
+                    audit=transactional_extension_audit(
+                        "mcp_server_deleted", user, mcp_audit_payload,
+                    ),
+                )
+        except MCPConfigError as exc:
+            raise mcp_http_error(exc) from exc
+        return {"ok": True, "runtime": runtime}
+
+    @app.post("/api/extensions/skills", status_code=201)
+    async def create_skill(
+        req: SkillRequest, user: str = Depends(local_operator),
+    ):
+        if not req.id:
+            raise HTTPException(422, detail={
+                "code": "skill_id_required",
+                "message": "添加 Skill 必须提供 ID。",
+            })
+        audit_extension(
+            "skill_create_requested", user,
+            skill_id=req.id, name=req.name, version=req.version,
+            required_tools=req.required_tools,
+        )
+        try:
+            definition = app.state.skills.create_user_skill(
+                req.id, render_skill_document(req),
+            )
+        except SkillError as exc:
+            raise skill_http_error(exc) from exc
+        try:
+            audit_extension(
+                "skill_created", user, **definition.audit_payload(),
+            )
+        except Exception:
+            # Skill 文件与审计库无法共享事务；终态审计失败时恢复到
+            # 请求前的“不存在”状态，避免接口 500 却留下幽灵配置。
+            try:
+                app.state.skills.delete_user_skill(
+                    req.id,
+                    expected_sha256=definition.sha256,
+                    expected_enabled=definition.enabled,
+                )
+            except Exception:
+                logger.exception("Skill 创建审计失败后的回滚也失败: %s", req.id)
+            raise
+        return {"skill": skill_payload(definition)}
+
+    @app.put("/api/extensions/skills/{skill_id}")
+    async def update_skill(
+        skill_id: str, req: SkillRequest,
+        user: str = Depends(local_operator),
+    ):
+        try:
+            if not req.expected_sha256:
+                raise SkillValidationError("编辑 Skill 必须携带当前内容哈希。")
+            previous = app.state.skills.get_skill(
+                skill_id, include_disabled=True,
+            )
+            if previous.sha256 != req.expected_sha256:
+                raise SkillConflictError(
+                    "Skill 内容已被其他操作修改，请刷新后重试。"
+                )
+            audit_extension(
+                "skill_update_requested", user,
+                skill_id=skill_id, expected_sha256=req.expected_sha256,
+                name=req.name, version=req.version,
+                required_tools=req.required_tools,
+            )
+            definition = app.state.skills.update_user_skill(
+                skill_id, render_skill_document(req),
+                expected_sha256=req.expected_sha256,
+            )
+        except SkillError as exc:
+            raise skill_http_error(exc) from exc
+        try:
+            audit_extension(
+                "skill_updated", user, **definition.audit_payload(),
+            )
+        except Exception:
+            try:
+                app.state.skills.update_user_skill(
+                    skill_id, previous.content,
+                    expected_sha256=definition.sha256,
+                )
+            except Exception:
+                logger.exception("Skill 更新审计失败后的回滚也失败: %s", skill_id)
+            raise
+        return {"skill": skill_payload(definition)}
+
+    @app.post("/api/extensions/skills/{skill_id}/enabled")
+    async def set_skill_enabled(
+        skill_id: str, req: ExtensionEnabledRequest,
+        user: str = Depends(local_operator),
+    ):
+        try:
+            previous = app.state.skills.get_skill(
+                skill_id, include_disabled=True,
+            )
+            if (previous.sha256 != req.expected_sha256
+                    or previous.enabled is not req.expected_enabled):
+                raise SkillConflictError(
+                    "Skill 已被其他操作修改，请刷新后重试。"
+                )
+            audit_extension(
+                "skill_enable_requested" if req.enabled
+                else "skill_disable_requested",
+                user, skill_id=skill_id,
+                expected_sha256=req.expected_sha256,
+                expected_enabled=req.expected_enabled,
+            )
+            definition = app.state.skills.set_enabled(
+                skill_id, req.enabled,
+                expected_sha256=req.expected_sha256,
+                expected_enabled=req.expected_enabled,
+            )
+        except SkillError as exc:
+            raise skill_http_error(exc) from exc
+        try:
+            audit_extension(
+                "skill_enabled" if req.enabled else "skill_disabled",
+                user, **definition.audit_payload(),
+            )
+        except Exception:
+            try:
+                app.state.skills.set_enabled(
+                    skill_id, previous.enabled,
+                    expected_sha256=definition.sha256,
+                    expected_enabled=definition.enabled,
+                )
+            except Exception:
+                logger.exception("Skill 启停审计失败后的回滚也失败: %s", skill_id)
+            raise
+        return {"skill": skill_payload(definition)}
+
+    @app.delete("/api/extensions/skills/{skill_id}")
+    async def delete_skill(
+        skill_id: str, req: SkillVersionRequest,
+        user: str = Depends(local_operator),
+    ):
+        try:
+            definition = app.state.skills.get_skill(
+                skill_id, include_disabled=True,
+            )
+            if (definition.sha256 != req.expected_sha256
+                    or definition.enabled is not req.expected_enabled):
+                raise SkillConflictError(
+                    "Skill 已被其他操作修改，请刷新后重试。"
+                )
+            audit_extension(
+                "skill_delete_requested", user,
+                **definition.audit_payload(),
+            )
+            app.state.skills.delete_user_skill(
+                skill_id,
+                expected_sha256=req.expected_sha256,
+                expected_enabled=req.expected_enabled,
+            )
+        except SkillError as exc:
+            raise skill_http_error(exc) from exc
+        try:
+            audit_extension(
+                "skill_deleted", user, **definition.audit_payload(),
+            )
+        except Exception:
+            try:
+                restored = app.state.skills.create_user_skill(
+                    skill_id, definition.content,
+                )
+                if restored.enabled is not definition.enabled:
+                    app.state.skills.set_enabled(
+                        skill_id, definition.enabled,
+                        expected_sha256=restored.sha256,
+                        expected_enabled=restored.enabled,
+                    )
+            except Exception:
+                logger.exception("Skill 删除审计失败后的回滚也失败: %s", skill_id)
+            raise
+        return {"ok": True}
 
     # ---- 模型服务与运行时配置 ----
 
@@ -870,6 +1807,47 @@ def create_app(settings: Settings | None = None,
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest, user: str = Depends(local_operator)):
+        selected_skills = ()
+        combined_required_tools: tuple[str, ...] = ()
+        if req.skill_ids:
+            try:
+                # 在创建会话前原子校验整组，避免部分有效的选择留下空会话；
+                # Pipeline 仍会在实际开始该轮时重新冻结权威快照。
+                selected_skills = app.state.skills.get_skills(
+                    tuple(req.skill_ids),
+                )
+                combined_required_tools = collect_skill_dependencies(
+                    selected_skills,
+                )
+            except SkillError as exc:
+                raise skill_http_error(exc) from exc
+            has_tool = getattr(app.state.tools, "has_tool", None)
+            missing_tools = [
+                tool for tool in combined_required_tools
+                if not (callable(has_tool) and has_tool(tool))
+            ]
+            if missing_tools:
+                raise HTTPException(409, detail={
+                    "code": "skill_required_tools_missing",
+                    "message": (
+                        "所选 Skill 缺少依赖工具："
+                        + "、".join(missing_tools)
+                    ),
+                    "missing_tools": missing_tools,
+                })
+        skill_names = {item.id: item.name for item in selected_skills}
+        raw_context_mentions = [
+            item.model_dump(mode="json") for item in req.context_mentions
+        ]
+
+        def resolved_mentions(files: list[dict]) -> list[dict]:
+            return normalize_context_mentions(
+                req.message,
+                raw_context_mentions,
+                skill_names=skill_names,
+                context_files=files,
+            )
+
         created = not req.session_id
         requested_model = model_selection(
             req.provider_id, req.model_id, req.reasoning_effort)
@@ -880,11 +1858,19 @@ def create_app(settings: Settings | None = None,
                 app.state.llm_config.validate_selection(requested_model)
             except LLMConfigError as exc:
                 raise llm_http_error(exc) from exc
+        resolved_context_files: list[dict] = []
+        resolved_context_mentions: list[dict] = []
         if created:
             session_id = uuid.uuid4().hex
             initial_mode = req.permission_mode or PermissionMode.ASK
             try:
                 workspace_root = resolve_session_workspace(req.workspace_root)
+                resolved_context_files = validate_context_files(
+                    workspace_root, req.context_files,
+                )
+                resolved_context_mentions = resolved_mentions(
+                    resolved_context_files,
+                )
                 initial_expiry = permission_expiry(
                     initial_mode, req.permission_ttl_seconds)
                 if req.permission_mode is None:
@@ -935,6 +1921,16 @@ def create_app(settings: Settings | None = None,
                     )
             except SessionPermissionError as exc:
                 raise permission_http_error(exc) from exc
+            except ContextMentionError as exc:
+                raise HTTPException(400, detail={
+                    "code": "context_mentions_invalid",
+                    "message": str(exc),
+                }) from exc
+            except ContextFileError as exc:
+                raise HTTPException(400, detail={
+                    "code": "context_files_invalid",
+                    "message": str(exc),
+                }) from exc
             except LLMConfigError as exc:
                 raise llm_http_error(exc) from exc
         else:
@@ -957,10 +1953,33 @@ def create_app(settings: Settings | None = None,
                     session_id, updated_by=user)
             except LLMConfigError as exc:
                 raise llm_http_error(exc) from exc
+            try:
+                workspace_root = (
+                    app.state.sessions.get_workspace_root(session_id)
+                    or settings.workspace_root
+                )
+                resolved_context_files = validate_context_files(
+                    workspace_root, req.context_files,
+                )
+                resolved_context_mentions = resolved_mentions(
+                    resolved_context_files,
+                )
+            except ContextMentionError as exc:
+                raise HTTPException(400, detail={
+                    "code": "context_mentions_invalid",
+                    "message": str(exc),
+                }) from exc
+            except ContextFileError as exc:
+                raise HTTPException(400, detail={
+                    "code": "context_files_invalid",
+                    "message": str(exc),
+                }) from exc
             app.state.sessions.touch(session_id, first_message=req.message)
         queue: asyncio.Queue = asyncio.Queue()
         last_progress: dict = {}
         pending_confirm: dict | None = None
+        started = time.monotonic()
+        cancellation_recorded = False
 
         async def emit(event: dict):
             nonlocal last_progress, pending_confirm
@@ -979,43 +1998,75 @@ def create_app(settings: Settings | None = None,
                   and pending_confirm
                   and event.get("confirm_id") == pending_confirm["confirm_id"]):
                 pending_confirm = None
-            await queue.put(event)
+            # 对 worker 施加真实的 SSE 发送背压。否则连续事件会在无界队列
+            # 中瞬间堆积，客户端恰在 ``yield`` 边界断开时，ASGI 可能先把
+            # 请求取消返回、稍后才关闭生成器，导致取消审计出现短暂空窗。
+            delivered = asyncio.get_running_loop().create_future()
+            await queue.put((event, delivered))
+            await delivered
+
+        def record_client_cancellation() -> None:
+            """同步、幂等地收口断流终态。
+
+            StreamingResponse/ASGI 可能在异步生成器停在 ``yield`` 时直接
+            关闭它；此时仅依赖后台 worker 收到 CancelledError 会形成竞态。
+            生成器和 worker 共用该函数，先标记再写入，确保最多记录一次。
+            """
+            nonlocal cancellation_recorded
+            if cancellation_recorded:
+                return
+            cancellation_recorded = True
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            try:
+                if pending_confirm:
+                    app.state.audit.append(session_id, "confirm_result", {
+                        **pending_confirm,
+                        "approved": False,
+                        "operator": "(任务取消)",
+                        "cancelled": True,
+                        "timed_out": False,
+                    })
+                cancelled_payload = {
+                    "reason": "client_disconnected",
+                    "elapsed_ms": elapsed_ms,
+                    **last_progress,
+                }
+                if req.request_id:
+                    cancelled_payload["request_id"] = req.request_id
+                app.state.audit.append(
+                    session_id, "task_cancelled", cancelled_payload)
+                app.state.audit.append(session_id, "final_answer", {
+                    "answer": ("客户端连接已中断，本轮任务已停止。"
+                               "已经开始的系统操作不会自动回滚。"),
+                    "aborted": True,
+                    "outcome": "cancelled",
+                    "elapsed_ms": elapsed_ms,
+                })
+            except AuditError:
+                pass
 
         async def run():
-            started = time.monotonic()
             try:
-                await app.state.pipeline.handle(session_id, req.message, emit)
+                kwargs = {}
+                if req.skill_ids:
+                    kwargs["skill_ids"] = list(req.skill_ids)
+                    kwargs["skill_mode"] = req.skill_mode
+                elif req.skill_mode != "auto":
+                    kwargs["skill_mode"] = req.skill_mode
+                if resolved_context_files:
+                    kwargs["context_files"] = [
+                        item["relative_path"]
+                        for item in resolved_context_files
+                    ]
+                if resolved_context_mentions:
+                    kwargs["context_mentions"] = resolved_context_mentions
+                await app.state.pipeline.handle(
+                    session_id, req.message, emit, **kwargs,
+                )
             except asyncio.CancelledError:
                 # SSE 断开会停止本轮流水线；即使客户端已收不到事件，
                 # 也必须在审计中留下明确终态，避免历史会话看似悬空。
-                elapsed_ms = int((time.monotonic() - started) * 1000)
-                try:
-                    if pending_confirm:
-                        app.state.audit.append(session_id, "confirm_result", {
-                            **pending_confirm,
-                            "approved": False,
-                            "operator": "(任务取消)",
-                            "cancelled": True,
-                            "timed_out": False,
-                        })
-                    cancelled_payload = {
-                        "reason": "client_disconnected",
-                        "elapsed_ms": elapsed_ms,
-                        **last_progress,
-                    }
-                    if req.request_id:
-                        cancelled_payload["request_id"] = req.request_id
-                    app.state.audit.append(
-                        session_id, "task_cancelled", cancelled_payload)
-                    app.state.audit.append(session_id, "final_answer", {
-                        "answer": ("客户端连接已中断，本轮任务已停止。"
-                                   "已经开始的系统操作不会自动回滚。"),
-                        "aborted": True,
-                        "outcome": "cancelled",
-                        "elapsed_ms": elapsed_ms,
-                    })
-                except AuditError:
-                    pass
+                record_client_cancellation()
                 raise
             except AuditError:
                 await queue.put({"type": "fatal",
@@ -1083,22 +2134,42 @@ def create_app(settings: Settings | None = None,
                      "model_context": session_model},
                     ensure_ascii=False) + "\n\n")
             task = asyncio.create_task(run())
+            reached_end = False
             try:
                 while True:
-                    event = await queue.get()
-                    if event is None:
+                    item = await queue.get()
+                    if item is None:
+                        reached_end = True
                         break
+                    if isinstance(item, tuple):
+                        event, delivered = item
+                    else:
+                        event, delivered = item, None
                     if (req.request_id
                             and event.get("type") in {"task_error", "fatal"}):
                         event = {**event, "request_id": req.request_id}
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    try:
+                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    finally:
+                        if delivered is not None and not delivered.done():
+                            delivered.set_result(None)
                 yield 'data: {"type": "done"}\n\n'
             finally:
+                if not reached_end and not task.done():
+                    # 先同步记录终态，再取消 worker。这样即使 ASGI 在 yield
+                    # 边界关闭生成器，调用方返回时审计也已收口。
+                    record_client_cancellation()
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+                except RuntimeError as exc:
+                    # Python/ASGI 在异步生成器 athrow 清理边界上可能报告
+                    # “cannot reuse already awaited coroutine”。worker 已取消且
+                    # 终态已同步记录，该清理异常不应形成未取回 Task。
+                    if "cannot reuse already awaited coroutine" not in str(exc):
+                        raise
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -1535,17 +2606,30 @@ def create_app(settings: Settings | None = None,
                            if changed_context else None),
         }
 
+    @app.get("/api/audit/scopes")
+    async def audit_scopes(_user: str = Depends(local_operator)):
+        return {"scopes": [
+            {
+                "id": scope_id,
+                "title": title,
+                "event_count": len(app.state.audit.events(scope_id)),
+            }
+            for scope_id, title in _SYSTEM_AUDIT_SCOPES.items()
+        ]}
+
     @app.get("/api/sessions/{session_id}/events")
     async def session_events(session_id: str,
                              _user: str = Depends(local_operator)):
-        if not app.state.sessions.exists(session_id):
+        if (session_id not in _SYSTEM_AUDIT_SCOPES
+                and not app.state.sessions.exists(session_id)):
             raise HTTPException(404, "会话不存在")
         return {"events": app.state.audit.events(session_id)}
 
     @app.get("/api/sessions/{session_id}/verify")
     async def session_verify(session_id: str,
                              _user: str = Depends(local_operator)):
-        if not app.state.sessions.exists(session_id):
+        if (session_id not in _SYSTEM_AUDIT_SCOPES
+                and not app.state.sessions.exists(session_id)):
             raise HTTPException(404, "会话不存在")
         return {"ok": app.state.audit.verify_chain(session_id)}
 
