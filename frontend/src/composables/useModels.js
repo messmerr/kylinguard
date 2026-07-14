@@ -373,9 +373,11 @@ export async function updateModelDefaults({ agent, reviewer }) {
     const body = await readJson(response)
     if (!response.ok) {
       if (response.status === 409) await loadModelConfig().catch(() => {})
-      throw new Error(detailMessage(
+      const error = new Error(detailMessage(
         body, `默认模型保存失败（HTTP ${response.status}）`,
       ))
+      error.status = response.status
+      throw error
     }
     if (body.providers || body.defaults) applyConfig(body)
     else await loadModelConfig()

@@ -390,6 +390,401 @@ async def test图形化配置API与会话切换且响应不泄漏key(tmp_path):
     assert secret not in audit_text
 
 
+async def test未保存提供商可直接发现模型且不会持久化密钥(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    app = create_app(settings, with_tools=False)
+    secret = "sk-draft-discovery-secret-abcdef"
+    captured = {}
+
+    async def fetch_model_ids_for_connection(**connection):
+        captured.update(connection)
+        return ["model-a", "model-b"]
+
+    monkeypatch.setattr(
+        app.state.llm_runtime,
+        "fetch_model_ids_for_connection",
+        fetch_model_ids_for_connection,
+    )
+    before = app.state.llm_config.public_config()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        response = await client.post("/api/llm/discover-models", json={
+            "adapter": "openai_compatible",
+            "base_url": " https://gateway.example.test/v1 ",
+            "api_key": secret,
+            "allow_insecure_http": False,
+        })
+
+    assert response.status_code == 200
+    assert response.json() == {"models": ["model-a", "model-b"]}
+    assert captured == {
+        "adapter": "openai_compatible",
+        "base_url": "https://gateway.example.test/v1",
+        "api_key": secret,
+        "allow_insecure_http": False,
+    }
+    assert secret not in response.text
+    assert app.state.llm_config.public_config() == before
+    assert list(app.state.llm_config.secrets.directory.iterdir()) == []
+    assert app.state.audit.events("__llm_config__") == []
+    for path in tmp_path.glob("kg.db*"):
+        assert secret.encode() not in path.read_bytes()
+
+
+async def test未保存提供商发现失败不会回显或审计密钥(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    app = create_app(settings, with_tools=False)
+    secret = "sk-draft-error-secret-abcdef"
+
+    async def fail_with_secret(**_connection):
+        raise RuntimeError(f"upstream rejected {secret}")
+
+    monkeypatch.setattr(
+        app.state.llm_runtime,
+        "fetch_model_ids_for_connection",
+        fail_with_secret,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        response = await client.post("/api/llm/discover-models", json={
+            "adapter": "openai_compatible",
+            "base_url": "https://gateway.example.test/v1",
+            "api_key": secret,
+        })
+        invalid = await client.post("/api/llm/discover-models", json={
+            "adapter": "not-an-adapter",
+            "base_url": "https://gateway.example.test/v1",
+            "api_key": secret,
+        })
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "llm_request_failed"
+    assert secret not in response.text
+    assert invalid.status_code == 422
+    assert secret not in invalid.text
+    assert app.state.audit.events("__llm_config__") == []
+    assert list(app.state.llm_config.secrets.directory.iterdir()) == []
+
+
+async def test编辑提供商草稿可复用完全匹配的已保存连接且不写状态(
+    tmp_path, monkeypatch,
+):
+    settings = _settings(tmp_path)
+    app = create_app(settings, with_tools=False)
+    secret = "sk-saved-draft-secret-abcdef"
+    provider = app.state.llm_config.create_provider(
+        name="已保存提供商",
+        adapter="openai_compatible",
+        base_url="https://gateway.example.test/v1",
+        api_key=secret,
+        models=[],
+    )
+    before_config = app.state.llm_config.public_config()
+    before_secrets = {
+        path.name: path.read_bytes()
+        for path in app.state.llm_config.secrets.directory.iterdir()
+    }
+    captured = {}
+
+    async def fetch_remote(connection):
+        captured.update(connection)
+        return ["model-a", "model-b"]
+
+    monkeypatch.setattr(
+        app.state.llm_runtime,
+        "_remote_model_ids_for_connection",
+        fetch_remote,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        response = await client.post("/api/llm/discover-models", json={
+            "provider_id": provider["id"],
+            "version": provider["version"],
+            "adapter": provider["adapter"],
+            "base_url": f" {provider['base_url']}/ ",
+            "allow_insecure_http": provider["allow_insecure_http"],
+        })
+
+    assert response.status_code == 200
+    assert response.json() == {"models": ["model-a", "model-b"]}
+    assert secret not in response.text
+    assert captured["api_key"] == secret
+    assert captured["base_url"] == provider["base_url"]
+    assert app.state.llm_config.public_config() == before_config
+    assert app.state.audit.events("__llm_config__") == []
+    assert {
+        path.name: path.read_bytes()
+        for path in app.state.llm_config.secrets.directory.iterdir()
+    } == before_secrets
+
+
+async def test编辑草稿连接或版本不匹配时不会读取已保存key或外呼(
+    tmp_path, monkeypatch,
+):
+    settings = _settings(tmp_path)
+    app = create_app(settings, with_tools=False)
+    secret = "sk-saved-mismatch-secret-abcdef"
+    provider = app.state.llm_config.create_provider(
+        name="已保存提供商",
+        adapter="openai_compatible",
+        base_url="https://gateway.example.test/v1",
+        api_key=secret,
+        models=[],
+        allow_insecure_http=True,
+    )
+    called = False
+
+    async def must_not_fetch(_connection):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(
+        app.state.llm_runtime,
+        "_remote_model_ids_for_connection",
+        must_not_fetch,
+    )
+    common = {
+        "provider_id": provider["id"],
+        "version": provider["version"],
+        "adapter": provider["adapter"],
+        "base_url": provider["base_url"],
+        "allow_insecure_http": provider["allow_insecure_http"],
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        stale = await client.post(
+            "/api/llm/discover-models", json={**common, "version": 999})
+        adapter_changed = await client.post(
+            "/api/llm/discover-models", json={**common, "adapter": "deepseek"})
+        path_changed = await client.post(
+            "/api/llm/discover-models",
+            json={**common, "base_url": "https://gateway.example.test/v2"},
+        )
+        origin_changed = await client.post(
+            "/api/llm/discover-models",
+            json={**common, "base_url": "https://attacker.example.test/v1"},
+        )
+        insecure_flag_changed = await client.post(
+            "/api/llm/discover-models",
+            json={**common, "allow_insecure_http": False},
+        )
+
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "llm_config_version_conflict"
+    for response in (
+        adapter_changed, path_changed, origin_changed, insecure_flag_changed,
+    ):
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == (
+            "api_key_required_for_connection_change")
+        assert secret not in response.text
+    assert called is False
+    assert app.state.audit.events("__llm_config__") == []
+    assert app.state.llm_config.get_provider(provider["id"])["version"] == (
+        provider["version"])
+
+
+async def test编辑草稿远端错误不会回显或审计已保存key(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    app = create_app(settings, with_tools=False)
+    secret = "sk-saved-remote-error-secret-abcdef"
+    provider = app.state.llm_config.create_provider(
+        name="已保存提供商",
+        adapter="openai_compatible",
+        base_url="https://gateway.example.test/v1",
+        api_key=secret,
+        models=[],
+    )
+    before = app.state.llm_config.public_config()
+
+    async def fail_remote(connection):
+        raise RuntimeError(f"upstream rejected {connection['api_key']}")
+
+    monkeypatch.setattr(
+        app.state.llm_runtime,
+        "_remote_model_ids_for_connection",
+        fail_remote,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        response = await client.post("/api/llm/discover-models", json={
+            "provider_id": provider["id"],
+            "version": provider["version"],
+            "adapter": provider["adapter"],
+            "base_url": provider["base_url"],
+            "allow_insecure_http": provider["allow_insecure_http"],
+        })
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "llm_request_failed"
+    assert secret not in response.text
+    assert app.state.llm_config.public_config() == before
+    assert app.state.audit.events("__llm_config__") == []
+
+
+async def test草稿发现凭据来源必须完整且互斥(tmp_path):
+    settings = _settings(tmp_path)
+    app = create_app(settings, with_tools=False)
+    secret = "sk-mutually-exclusive-secret-abcdef"
+    common = {
+        "adapter": "openai_compatible",
+        "base_url": "https://gateway.example.test/v1",
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        responses = [
+            await client.post("/api/llm/discover-models", json=common),
+            await client.post("/api/llm/discover-models", json={
+                **common, "provider_id": "a" * 32,
+            }),
+            await client.post("/api/llm/discover-models", json={
+                **common, "version": 1,
+            }),
+            await client.post("/api/llm/discover-models", json={
+                **common, "provider_id": "a" * 32, "version": 1,
+                "api_key": secret,
+            }),
+            await client.post("/api/llm/discover-models", json={
+                **common, "api_key": "  ",
+            }),
+        ]
+
+    assert all(response.status_code == 422 for response in responses)
+    assert all(secret not in response.text for response in responses)
+    assert app.state.llm_config.list_providers() == []
+    assert app.state.audit.events("__llm_config__") == []
+    assert list(app.state.llm_config.secrets.directory.iterdir()) == []
+
+
+async def test临时连接发现模型复用安全校验并清洗结果(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    store = LLMConfigStore(settings.db_path, settings)
+    runtime = LLMRuntime(store, settings)
+    captured = {}
+
+    class FakeResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield json.dumps({
+                "data": [
+                    {"id": " model-a "}, {"id": "model-a"},
+                    {"id": "model-b"}, {"id": "bad\nmodel"},
+                ],
+            }).encode()
+
+    class FakeAsyncClient:
+        def __init__(self, **options):
+            captured["options"] = options
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, method, url, *, headers):
+            captured.update(method=method, url=url, headers=headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "kylinguard.llm_config.httpx.AsyncClient", FakeAsyncClient)
+    ids = await runtime.fetch_model_ids_for_connection(
+        adapter="openai_compatible",
+        base_url="https://gateway.example.test/v1/",
+        api_key=" key-only-in-memory ",
+    )
+
+    assert ids == ["model-a", "model-b"]
+    assert captured["method"] == "GET"
+    assert captured["url"] == "https://gateway.example.test/v1/models"
+    assert captured["headers"] == {"Authorization": "Bearer key-only-in-memory"}
+    assert captured["options"]["follow_redirects"] is False
+    assert store.list_providers() == []
+    assert list(store.secrets.directory.iterdir()) == []
+
+    with pytest.raises(LLMConfigError) as insecure:
+        await runtime.fetch_model_ids_for_connection(
+            adapter="openai_compatible",
+            base_url="http://gateway.example.test/v1",
+            api_key="key",
+        )
+    assert insecure.value.code == "insecure_base_url"
+
+    allowed = await runtime.fetch_model_ids_for_connection(
+        adapter="openai_compatible",
+        base_url="http://gateway.example.test/v1",
+        api_key="key",
+        allow_insecure_http=True,
+    )
+    assert allowed == ["model-a", "model-b"]
+    assert captured["url"] == "http://gateway.example.test/v1/models"
+
+    with pytest.raises(LLMConfigError) as empty_key:
+        await runtime.fetch_model_ids_for_connection(
+            adapter="openai_compatible",
+            base_url="https://gateway.example.test/v1",
+            api_key="  ",
+        )
+    assert empty_key.value.code == "api_key_required"
+    with pytest.raises(LLMConfigError) as oversized_key:
+        await runtime.fetch_model_ids_for_connection(
+            adapter="openai_compatible",
+            base_url="https://gateway.example.test/v1",
+            api_key="k" * (16 * 1024 + 1),
+        )
+    assert oversized_key.value.code == "api_key_invalid"
+    store.close()
+
+
+async def test已保存提供商发现接口保持兼容(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    app = create_app(settings, with_tools=False)
+    provider = app.state.llm_config.create_provider(
+        name="已保存提供商",
+        adapter="openai_compatible",
+        base_url="https://gateway.example.test/v1",
+        api_key="saved-key",
+        models=[],
+    )
+
+    async def fetch_model_ids(provider_id):
+        assert provider_id == provider["id"]
+        return ["saved-model"]
+
+    monkeypatch.setattr(app.state.llm_runtime, "fetch_model_ids", fetch_model_ids)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/api/llm/providers/{provider['id']}/discover-models",
+            json={"version": provider["version"]},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["discovered"] == 1
+    assert [model["id"] for model in payload["provider"]["models"]] == [
+        "saved-model",
+    ]
+    events = app.state.audit.events("__llm_config__")
+    assert events[-1]["event_type"] == "llm_models_discovered"
+
+
 async def test未配置图形化模型时拒绝创建任务且不留下会话(tmp_path):
     settings = _settings(tmp_path)
     app = create_app(settings, with_tools=False)
