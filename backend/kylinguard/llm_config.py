@@ -1070,6 +1070,29 @@ class LLMConfigStore:
             provider = self._public_provider_locked(row)
             return {**provider, "api_key": self.secrets.read(row["secret_ref"])}
 
+    def provider_connection_for_draft(
+        self, provider_id: str, *, expected_version: int, adapter: str,
+        base_url: str, allow_insecure_http: bool,
+    ) -> dict:
+        """仅在草稿连接仍与持久化快照一致时读取已保存凭据。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM llm_providers WHERE id=?", (provider_id,)
+            ).fetchone()
+            if row is None:
+                raise LLMConfigError(
+                    "provider_not_found", "模型提供商不存在。", status_code=404)
+            if row["version"] != expected_version:
+                raise LLMConfigVersionConflict()
+            if (row["adapter"] != adapter or row["base_url"] != base_url
+                    or bool(row["allow_insecure_http"]) != allow_insecure_http):
+                raise LLMConfigError(
+                    "api_key_required_for_connection_change",
+                    "连接信息已修改；读取模型前请重新输入 API Key。",
+                )
+            provider = self._public_provider_locked(row)
+            return {**provider, "api_key": self.secrets.read(row["secret_ref"])}
+
     def add_discovered_models(self, provider_id: str, model_ids: list[str],
                               *, expected_version: int | None = None,
                               updated_by: str = "", audit=None) -> dict:
@@ -1268,9 +1291,9 @@ class LLMRuntime:
             raise ValueError("unknown llm role")
         return RoutedLLMClient(self, role)
 
-    async def _remote_model_ids(self, provider_id: str) -> list[str]:
-        connection = self.store.provider_connection(provider_id)
-        if not connection["api_key"].strip():
+    async def _remote_model_ids_for_connection(self, connection: dict) -> list[str]:
+        api_key = connection["api_key"].strip()
+        if not api_key:
             raise LLMConfigError("api_key_required", "尚未配置模型服务 API Key。")
         url = f"{connection['base_url'].rstrip('/')}/models"
         body = bytearray()
@@ -1280,7 +1303,7 @@ class LLMRuntime:
         ) as client:
             async with client.stream(
                 "GET", url,
-                headers={"Authorization": f"Bearer {connection['api_key']}"},
+                headers={"Authorization": f"Bearer {api_key}"},
             ) as response:
                 response.raise_for_status()
                 async for chunk in response.aiter_bytes():
@@ -1306,6 +1329,53 @@ class LLMRuntime:
                     and not any(ord(char) < 32 for char in model_id)):
                 ids.append(model_id)
         return list(dict.fromkeys(ids))
+
+    async def _remote_model_ids(self, provider_id: str) -> list[str]:
+        return await self._remote_model_ids_for_connection(
+            self.store.provider_connection(provider_id))
+
+    async def fetch_model_ids_for_connection(
+        self, *, adapter: str, base_url: str, api_key: str,
+        allow_insecure_http: bool = False,
+    ) -> list[str]:
+        """使用临时连接信息读取模型列表，不触碰配置库或凭据文件。"""
+        if adapter not in ADAPTERS:
+            raise LLMConfigError(
+                "provider_adapter_invalid", "未知的模型协议适配器。")
+        normalized_url = normalize_base_url(
+            base_url, allow_insecure_http=allow_insecure_http)
+        key_bytes = api_key.strip().encode("utf-8")
+        if not key_bytes:
+            raise LLMConfigError("api_key_required", "API Key 不能为空。")
+        if b"\x00" in key_bytes or len(key_bytes) > _MAX_SECRET_BYTES:
+            raise LLMConfigError("api_key_invalid", "API Key 格式或长度无效。")
+        return await self._remote_model_ids_for_connection({
+            "adapter": adapter,
+            "base_url": normalized_url,
+            "api_key": api_key,
+        })
+
+    async def fetch_model_ids_for_provider_draft(
+        self, *, provider_id: str, expected_version: int, adapter: str,
+        base_url: str, allow_insecure_http: bool = False,
+    ) -> list[str]:
+        """使用完全匹配的已保存连接读取模型，不更新测试或配置状态。"""
+        if adapter not in ADAPTERS:
+            raise LLMConfigError(
+                "provider_adapter_invalid", "未知的模型协议适配器。")
+        normalized_url = normalize_base_url(
+            base_url, allow_insecure_http=allow_insecure_http)
+        connection = self.store.provider_connection_for_draft(
+            provider_id,
+            expected_version=expected_version,
+            adapter=adapter,
+            base_url=normalized_url,
+            allow_insecure_http=allow_insecure_http,
+        )
+        ids = await self._remote_model_ids_for_connection(connection)
+        if self.store.get_provider(provider_id)["version"] != expected_version:
+            raise LLMConfigVersionConflict()
+        return ids
 
     async def test_provider(self, provider_id: str) -> dict:
         started = time.monotonic()

@@ -114,16 +114,10 @@
       <div class="composer">
         <div class="composer-shell">
           <div class="composer-box">
-            <el-input v-model="input" type="textarea" :rows="1" autosize
+            <el-input v-model="input" type="textarea" :rows="1"
+                      :autosize="{ minRows: 1, maxRows: 8 }"
                       resize="none" placeholder="描述运维任务…"
                       @keydown.enter.exact.prevent="submit" @keydown.esc="stopTurn" />
-            <button type="button" class="send-btn" :class="{ stop: running }"
-                    :aria-label="running ? '停止等待' : '发送运维指令'"
-                    :disabled="!running && !input.trim()"
-                    @click="running ? stopTurn() : submit()">
-              <span v-if="running" class="stop-square"></span>
-              <KgIcon v-else name="arrowUp" :size="16" />
-            </button>
           </div>
           <div class="composer-footer">
             <div class="composer-meta">
@@ -155,10 +149,19 @@
                 :disabled="running && currentTurn?.status !== 'waiting_user'"
               />
             </div>
-            <button v-if="activeId && items.length" type="button" class="inline-action"
-                    :disabled="running" @click="genReport">
-              <KgIcon name="task" :size="13" />生成运维报告
-            </button>
+            <div class="composer-actions">
+              <button v-if="activeId && items.length" type="button" class="inline-action"
+                      :disabled="running" @click="genReport">
+                <KgIcon name="task" :size="13" />生成运维报告
+              </button>
+              <button type="button" class="send-btn" :class="{ stop: running }"
+                      :aria-label="running ? '停止等待' : '发送运维指令'"
+                      :disabled="!running && !input.trim()"
+                      @click="running ? stopTurn() : submit()">
+                <span v-if="running" class="stop-square"></span>
+                <KgIcon v-else name="arrowUp" :size="16" />
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -590,7 +593,8 @@ function downloadReport(text) {
   font-size: 14px;
 }
 
-.assistant.answer {
+.assistant.answer,
+.assistant.streaming {
   padding: 15px 17px;
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-lg);
@@ -688,13 +692,11 @@ function downloadReport(text) {
   box-shadow: 0 0 0 3px rgb(23 92 255 / 10%), 0 12px 30px rgb(34 52 84 / 12%);
 }
 
-.composer-box { position: relative; padding: 11px 52px 8px 13px; }
-.composer-box :deep(.el-textarea__inner) { max-height: 180px; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--kg-text-primary); font: 14px/1.6 var(--kg-font-ui); }
+.composer-box { padding: 11px 13px 8px; }
+.composer-box :deep(.el-textarea__inner) { padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--kg-text-primary); font: 14px/22px var(--kg-font-ui); }
 
 .send-btn {
-  position: absolute;
-  right: 9px;
-  bottom: 8px;
+  flex: none;
   width: 34px;
   height: 34px;
   display: grid;
@@ -713,12 +715,12 @@ function downloadReport(text) {
 .send-btn:disabled { border-color: var(--kg-border-subtle); background: var(--kg-bg-surface-2); color: var(--kg-text-disabled); cursor: not-allowed; }
 
 .composer-footer {
-  min-height: 30px;
+  min-height: 34px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--kg-space-3);
-  padding: 0 9px 7px 13px;
+  padding: 0 9px 9px 13px;
   color: var(--kg-text-tertiary);
   font-size: 12px;
 }
@@ -728,6 +730,13 @@ function downloadReport(text) {
   display: flex;
   align-items: center;
   gap: 7px;
+}
+
+.composer-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
 }
 
 .composer-separator { width: 1px; height: 14px; background: var(--kg-border-subtle); }
@@ -787,6 +796,9 @@ function downloadReport(text) {
   }
   .hint { min-height: 50px; }
   .composer { padding-right: 12px; padding-left: 12px; }
+  .composer-footer { flex-wrap: wrap; }
+  .composer-meta { width: 100%; }
+  .composer-actions { width: 100%; justify-content: flex-end; }
   .workspace-control { max-width: 92px; }
 }
 </style>

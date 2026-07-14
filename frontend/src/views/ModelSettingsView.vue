@@ -34,7 +34,6 @@
           <el-table-column label="提供商" min-width="150">
             <template #default="{ row }">
               <div class="provider-cell">
-                <span class="provider-state" :class="{ enabled: row.enabled }"></span>
                 <span>
                   <strong>{{ row.name }}</strong>
                   <small>{{ adapterLabel(row.adapter) }}</small>
@@ -72,6 +71,17 @@
               </div>
             </template>
           </el-table-column>
+          <el-table-column label="启用" width="76" align="center">
+            <template #default="{ row }">
+              <el-switch
+                :model-value="row.enabled"
+                :loading="providerToggleId === row.id"
+                :disabled="actionBusy"
+                :aria-label="`${row.enabled ? '停用' : '启用'}提供商 ${row.name}`"
+                @change="toggleProvider(row, $event)"
+              />
+            </template>
+          </el-table-column>
         </el-table>
 
         <div v-else-if="!modelConfigLoading" class="empty-providers">
@@ -85,72 +95,61 @@
         <div v-else class="loading-line"><span class="kg-spinner"></span>正在读取模型配置…</div>
       </section>
 
-      <section class="model-section defaults-section">
-        <div class="section-head">
-          <div>
-            <h2 class="kg-section-title">新任务默认值</h2>
-            <p>只影响之后新建的任务；已有任务继续使用各自保存的模型。</p>
-          </div>
-          <el-button
-            type="primary"
-            :loading="modelConfigSaving"
-            :disabled="!defaultsValid || !defaultsChanged"
-            @click="saveDefaults"
-          >保存默认值</el-button>
-        </div>
+      <template v-if="modelOptions.length">
+        <section class="model-section default-option-section">
+          <h2 class="kg-section-title">新任务默认模型</h2>
+          <el-select
+            v-model="defaultDraft.agent.key"
+            filterable
+            aria-label="新任务默认模型"
+            @change="onDefaultModelChange('agent')"
+          >
+            <el-option-group v-for="group in optionGroups" :key="group.id" :label="group.name">
+              <el-option v-for="model in group.models" :key="model.key" :label="model.label" :value="model.key" />
+            </el-option-group>
+          </el-select>
+          <el-select
+            v-model="defaultDraft.agent.reasoningEffort"
+            aria-label="新任务默认模型推理强度"
+            @change="queueDefaultsSave"
+          >
+            <el-option
+              v-for="effort in defaultEfforts('agent')"
+              :key="effort"
+              :label="effortLabel(effort)"
+              :value="effort"
+            />
+          </el-select>
+        </section>
 
-        <div v-if="modelOptions.length" class="default-editor">
-          <div class="default-row">
-            <div class="default-copy">
-              <strong>Agent 模型</strong>
-              <span>分析请求、规划步骤并整理最终回复。</span>
-            </div>
-            <el-select v-model="defaultDraft.agent.key" filterable @change="onDefaultModelChange('agent')">
-              <el-option-group v-for="group in optionGroups" :key="group.id" :label="group.name">
-                <el-option v-for="model in group.models" :key="model.key" :label="model.label" :value="model.key" />
-              </el-option-group>
-            </el-select>
-            <el-select v-model="defaultDraft.agent.reasoningEffort" aria-label="Agent 推理强度">
-              <el-option
-                v-for="effort in defaultEfforts('agent')"
-                :key="effort"
-                :label="effortLabel(effort)"
-                :value="effort"
-              />
-            </el-select>
-          </div>
-
-          <el-collapse class="reviewer-collapse">
-            <el-collapse-item name="reviewer">
-              <template #title>
-                <span class="reviewer-title">
-                  <strong>安全复核模型</strong>
-                  <span>普通权限模式下复核计划；完全访问模式不会调用。</span>
-                </span>
-              </template>
-              <div class="default-row reviewer-row">
-                <div class="default-copy">
-                  <strong>复核模型</strong>
-                  <span>建议选择稳定、支持结构化输出的模型。</span>
-                </div>
-                <el-select v-model="defaultDraft.reviewer.key" filterable @change="onDefaultModelChange('reviewer')">
-                  <el-option-group v-for="group in optionGroups" :key="group.id" :label="group.name">
-                    <el-option v-for="model in group.models" :key="model.key" :label="model.label" :value="model.key" />
-                  </el-option-group>
-                </el-select>
-                <el-select v-model="defaultDraft.reviewer.reasoningEffort" aria-label="复核模型推理强度">
-                  <el-option
-                    v-for="effort in defaultEfforts('reviewer')"
-                    :key="effort"
-                    :label="effortLabel(effort)"
-                    :value="effort"
-                  />
-                </el-select>
-              </div>
-            </el-collapse-item>
-          </el-collapse>
-        </div>
-        <div v-else class="defaults-unavailable">添加并启用至少一个模型后，才能设置新任务默认值。</div>
+        <section class="model-section default-option-section">
+          <h2 class="kg-section-title">安全复核模型</h2>
+          <el-select
+            v-model="defaultDraft.reviewer.key"
+            filterable
+            aria-label="安全复核模型"
+            @change="onDefaultModelChange('reviewer')"
+          >
+            <el-option-group v-for="group in optionGroups" :key="group.id" :label="group.name">
+              <el-option v-for="model in group.models" :key="model.key" :label="model.label" :value="model.key" />
+            </el-option-group>
+          </el-select>
+          <el-select
+            v-model="defaultDraft.reviewer.reasoningEffort"
+            aria-label="安全复核模型推理强度"
+            @change="queueDefaultsSave"
+          >
+            <el-option
+              v-for="effort in defaultEfforts('reviewer')"
+              :key="effort"
+              :label="effortLabel(effort)"
+              :value="effort"
+            />
+          </el-select>
+        </section>
+      </template>
+      <section v-else class="model-section">
+        <div class="defaults-unavailable">添加并启用至少一个模型后，才能设置新任务默认值。</div>
       </section>
     </div>
 
@@ -161,9 +160,17 @@
       width="min(680px, calc(100vw - 28px))"
       align-center
       destroy-on-close
+      :show-close="!providerSaving && !providerDiscovering"
+      :close-on-click-modal="!providerSaving && !providerDiscovering"
+      :close-on-press-escape="!providerSaving && !providerDiscovering"
       @closed="clearProviderForm"
     >
-      <el-form label-position="top" class="provider-form" @submit.prevent>
+      <el-form
+        label-position="top"
+        class="provider-form"
+        :disabled="providerSaving || providerDiscovering"
+        @submit.prevent
+      >
         <div class="form-grid">
           <el-form-item label="名称">
             <el-input v-model="providerForm.name" maxlength="80" placeholder="例如 DeepSeek" />
@@ -199,7 +206,7 @@
             :disabled="providerForm.clearApiKey"
             @input="providerForm.clearApiKey = false"
           />
-          <span class="field-note">密钥仅随本次保存请求发送，不会显示在提供商列表或浏览器存储中。</span>
+          <span class="field-note">密钥仅用于本次读取或保存请求，不会显示在提供商列表或浏览器存储中。</span>
           <el-checkbox
             v-if="providerForm.id && providerForm.apiKeyConfigured"
             v-model="providerForm.clearApiKey"
@@ -214,6 +221,12 @@
               <span>{{ discoveryEffortHint }}</span>
             </div>
             <div class="models-editor-actions">
+              <el-button
+                size="small"
+                :loading="providerDiscovering"
+                :disabled="providerSaving"
+                @click="discoverProviderFormModels"
+              >读取模型</el-button>
               <el-dropdown trigger="click" @command="applyEffortPreset">
                 <el-button
                   size="small"
@@ -258,26 +271,30 @@
               </el-select>
               <el-checkbox v-model="model.supportsTemperature" class="temperature-capability">温度</el-checkbox>
               <el-switch v-model="model.enabled" aria-label="启用模型" />
-              <button type="button" class="remove-model" aria-label="移除模型" @click="removeModelRow(index)">
+              <button
+                type="button"
+                class="remove-model"
+                aria-label="移除模型"
+                :disabled="providerSaving || providerDiscovering"
+                @click="removeModelRow(index)"
+              >
                 <KgIcon name="close" :size="14" />
               </button>
             </div>
           </div>
-          <div v-else class="no-model-rows">保存后可“读取模型”，也可以现在手动添加。</div>
+          <div v-else class="no-model-rows">填写 Base URL 与 API Key 后可直接读取，也可以手动添加。</div>
         </div>
 
-        <div class="form-enabled">
-          <div>
-            <strong>启用提供商</strong>
-            <span>停用后不会出现在会话模型选择器中。</span>
-          </div>
-          <el-switch v-model="providerForm.enabled" />
-        </div>
       </el-form>
 
       <template #footer>
-        <el-button @click="providerDialogOpen = false">取消</el-button>
-        <el-button type="primary" :loading="providerSaving" @click="saveProvider">保存</el-button>
+        <el-button :disabled="providerSaving || providerDiscovering" @click="providerDialogOpen = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="providerSaving"
+          :disabled="providerDiscovering"
+          @click="saveProvider"
+        >{{ providerForm.id ? '保存更改' : '添加提供商' }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -293,12 +310,15 @@ import {
   effortLabel,
   loadModelConfig,
   modelConfigLoading,
-  modelConfigSaving,
   modelDefaults,
   modelProviders,
   modelSecurity,
   updateModelDefaults,
 } from '../composables/useModels.js'
+import {
+  createLatestSaveQueue,
+  discoveredModelAdditions,
+} from '../utils/modelSettings.js'
 
 const EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const EFFORT_PRESETS = {
@@ -314,11 +334,15 @@ const ADAPTER_DEFAULT_URLS = {
 }
 const providerDialogOpen = ref(false)
 const providerSaving = ref(false)
+const providerDiscovering = ref(false)
+const providerToggleId = ref('')
 const actionBusy = ref(false)
+const defaultsAutoSaving = ref(false)
 let rowCounter = 0
 
 const providerForm = reactive({
-  id: '', version: 0, name: '', adapter: 'openai_compatible', baseUrl: '', originalBaseUrl: '',
+  id: '', version: 0, name: '', adapter: 'openai_compatible',
+  baseUrl: '', originalBaseUrl: '',
   allowInsecureHttp: false,
   apiKey: '', apiKeyConfigured: false, models: [], enabled: true,
   clearApiKey: false,
@@ -347,14 +371,6 @@ const optionGroups = computed(() => availableModelGroups.value.map((group) => ({
 const defaultsValid = computed(() => (
   Boolean(defaultDraft.agent.key) && Boolean(defaultDraft.reviewer.key)
 ))
-const defaultsChanged = computed(() => {
-  const currentAgent = `${modelDefaults.agent.providerId}\u0000${modelDefaults.agent.modelId}`
-  const currentReviewer = `${modelDefaults.reviewer.providerId}\u0000${modelDefaults.reviewer.modelId}`
-  return defaultDraft.agent.key !== currentAgent
-    || defaultDraft.agent.reasoningEffort !== modelDefaults.agent.reasoningEffort
-    || defaultDraft.reviewer.key !== currentReviewer
-    || defaultDraft.reviewer.reasoningEffort !== modelDefaults.reviewer.reasoningEffort
-})
 const nonLocalInsecureHttp = computed(() => {
   try {
     const url = new URL(providerForm.baseUrl)
@@ -380,7 +396,9 @@ watch(() => [
   modelDefaults.reviewer.providerId,
   modelDefaults.reviewer.modelId,
   modelDefaults.reviewer.reasoningEffort,
-].join(':'), syncDefaultDraft, { immediate: true })
+].join(':'), () => {
+  if (!defaultsAutoSaving.value) syncDefaultDraft()
+}, { immediate: true })
 
 onMounted(() => loadModelConfig().catch((error) => {
   ElMessage.error(error.message || '模型配置读取失败')
@@ -429,19 +447,49 @@ function onDefaultModelChange(kind) {
   if (!defaultEfforts(kind).includes(defaultDraft[kind].reasoningEffort)) {
     defaultDraft[kind].reasoningEffort = 'auto'
   }
+  queueDefaultsSave()
 }
 
-async function saveDefaults() {
-  const agent = { ...splitModelKey(defaultDraft.agent.key),
-    reasoningEffort: defaultDraft.agent.reasoningEffort }
-  const reviewer = { ...splitModelKey(defaultDraft.reviewer.key),
-    reasoningEffort: defaultDraft.reviewer.reasoningEffort }
-  try {
-    await updateModelDefaults({ agent, reviewer })
-    ElMessage.success('新任务默认模型已保存')
-  } catch (error) {
-    ElMessage.error(error.message || '默认模型保存失败')
+function defaultDraftSnapshot() {
+  return {
+    agent: {
+      ...splitModelKey(defaultDraft.agent.key),
+      reasoningEffort: defaultDraft.agent.reasoningEffort,
+    },
+    reviewer: {
+      ...splitModelKey(defaultDraft.reviewer.key),
+      reasoningEffort: defaultDraft.reviewer.reasoningEffort,
+    },
   }
+}
+
+async function persistDefaultSnapshot(snapshot) {
+  try {
+    return await updateModelDefaults(snapshot)
+  } catch (error) {
+    // 版本冲突时 useModels 已重新读取最新版本；仅重试一次当前完整快照。
+    if (error.status === 409) return updateModelDefaults(snapshot)
+    throw error
+  }
+}
+
+const defaultsSaveQueue = createLatestSaveQueue(persistDefaultSnapshot, {
+  onBusyChange(value) {
+    defaultsAutoSaving.value = value
+  },
+  onSaved() {
+    syncDefaultDraft()
+    ElMessage.success('默认模型已自动保存')
+  },
+  onError(error) {
+    syncDefaultDraft()
+    ElMessage.error(error.message || '默认模型保存失败')
+  },
+})
+
+function queueDefaultsSave() {
+  if (!defaultsValid.value) return
+  defaultsSaveQueue.enqueue(defaultDraftSnapshot())
 }
 
 function modelFormRow(model = {}) {
@@ -477,7 +525,8 @@ function openProviderDialog(provider = null) {
 
 function clearProviderForm() {
   Object.assign(providerForm, {
-    id: '', version: 0, name: '', adapter: 'openai_compatible', baseUrl: '', originalBaseUrl: '',
+    id: '', version: 0, name: '', adapter: 'openai_compatible',
+    baseUrl: '', originalBaseUrl: '',
     allowInsecureHttp: false,
     apiKey: '', apiKeyConfigured: false, models: [], enabled: true,
     clearApiKey: false,
@@ -520,11 +569,93 @@ function providerPayload() {
   }
 }
 
+function providerListPayload(provider, enabled) {
+  return {
+    name: provider.name,
+    adapter: provider.adapter,
+    base_url: provider.baseUrl,
+    allow_insecure_http: provider.allowInsecureHttp,
+    clear_api_key: false,
+    models: provider.models.map((model) => ({
+      id: model.id,
+      label: model.label || model.id,
+      enabled: model.enabled,
+      supported_efforts: [...model.supportedEfforts],
+      supports_temperature: model.supportsTemperature,
+    })),
+    enabled,
+    version: provider.version,
+  }
+}
+
 async function responseError(response, fallback) {
   const body = await response.json().catch(() => ({}))
   const detail = typeof body.detail === 'string' ? body.detail
     : body.detail?.message || body.message
-  return new Error(detail || `${fallback}（HTTP ${response.status}）`)
+  const error = new Error(detail || `${fallback}（HTTP ${response.status}）`)
+  error.status = response.status
+  return error
+}
+
+async function discoverProviderFormModels() {
+  if (!providerForm.baseUrl.trim()) {
+    ElMessage.warning('请先填写 Base URL')
+    return
+  }
+  if (providerForm.clearApiKey) {
+    ElMessage.warning('移除 API Key 时无法读取模型')
+    return
+  }
+  const canReferenceSavedKey = providerForm.id && providerForm.apiKeyConfigured
+    && !providerForm.apiKey
+  if (!providerForm.apiKey && !canReferenceSavedKey) {
+    ElMessage.warning(
+      providerForm.id ? '请先填写 API Key' : '新增提供商需要先填写 API Key',
+    )
+    return
+  }
+  if (nonLocalInsecureHttp.value && !providerForm.allowInsecureHttp) {
+    ElMessage.warning('此地址使用不安全 HTTP；请改用 HTTPS，或明确允许可信内网 HTTP')
+    return
+  }
+
+  providerDiscovering.value = true
+  try {
+    const response = await apiFetch(
+      '/api/llm/discover-models',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adapter: providerForm.adapter,
+          base_url: providerForm.baseUrl.trim(),
+          allow_insecure_http: providerForm.allowInsecureHttp,
+          ...(providerForm.apiKey ? { api_key: providerForm.apiKey } : {
+            provider_id: providerForm.id,
+            version: providerForm.version,
+          }),
+        }),
+      },
+    )
+    if (!response.ok) throw await responseError(response, '模型列表读取失败')
+    const body = await response.json().catch(() => ({}))
+    const discovered = body.models ?? []
+    const additions = discoveredModelAdditions(
+      providerForm.models, discovered, providerForm.adapter,
+    )
+    providerForm.models.push(...additions.map(modelFormRow))
+
+    const remoteCount = Array.isArray(discovered) ? discovered.length : 0
+    ElMessage.success(
+      additions.length
+        ? `已读取 ${remoteCount} 个模型，新增 ${additions.length} 个`
+        : `已读取 ${remoteCount} 个模型，没有新的模型`,
+    )
+  } catch (error) {
+    ElMessage.error(error.message || '模型列表读取失败')
+  } finally {
+    providerDiscovering.value = false
+  }
 }
 
 async function saveProvider() {
@@ -565,6 +696,30 @@ async function saveProvider() {
     ElMessage.error(error.message || '提供商保存失败')
   } finally {
     providerSaving.value = false
+  }
+}
+
+async function toggleProvider(provider, enabled) {
+  actionBusy.value = true
+  providerToggleId.value = provider.id
+  try {
+    const response = await apiFetch(
+      `/api/llm/providers/${encodeURIComponent(provider.id)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(providerListPayload(provider, enabled)),
+      },
+    )
+    if (!response.ok) throw await responseError(response, '提供商状态更新失败')
+    await loadModelConfig()
+    ElMessage.success(`已${enabled ? '启用' : '停用'}“${provider.name}”`)
+  } catch (error) {
+    await loadModelConfig().catch(() => {})
+    ElMessage.error(error.message || '提供商状态更新失败')
+  } finally {
+    providerToggleId.value = ''
+    actionBusy.value = false
   }
 }
 
@@ -689,8 +844,6 @@ function originChanged() {
 .provider-cell > span:last-child { min-width: 0; display: grid; }
 .provider-cell strong { overflow: hidden; color: var(--kg-text-primary); font-size: 13px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
 .provider-cell small { margin-top: 1px; color: var(--kg-text-tertiary); font-size: 10px; }
-.provider-state { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--kg-text-disabled); }
-.provider-state.enabled { background: var(--kg-success); }
 .endpoint { display: block; overflow: hidden; color: var(--kg-text-secondary); font: 11px/1.45 var(--kg-font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .status-ok { color: var(--kg-success); font-size: 11px; }
 .status-warn { color: var(--kg-warning); font-size: 11px; }
@@ -706,16 +859,10 @@ function originChanged() {
 .empty-providers strong { color: var(--kg-text-primary); font-size: 13px; font-weight: 550; }
 .empty-providers p { margin: 3px 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
 .loading-line { display: flex; align-items: center; gap: 9px; min-height: 72px; color: var(--kg-text-tertiary); font-size: 12px; }
-.default-editor { border-top: 1px solid var(--kg-border-subtle); }
-.default-row { min-height: 78px; display: grid; grid-template-columns: minmax(210px, 1fr) minmax(210px, 320px) 126px; align-items: center; gap: var(--kg-space-4); padding: 12px 0; border-bottom: 1px solid var(--kg-border-subtle); }
-.default-copy strong { display: block; color: var(--kg-text-primary); font-size: 13px; font-weight: 550; }
-.default-copy span { display: block; margin-top: 2px; color: var(--kg-text-tertiary); font-size: 11px; }
-.reviewer-collapse { border-top: 0; }
-.reviewer-title { display: flex; min-width: 0; align-items: baseline; gap: 9px; }
-.reviewer-title strong { color: var(--kg-text-secondary); font-size: 12px; font-weight: 550; }
-.reviewer-title span { overflow: hidden; color: var(--kg-text-tertiary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.reviewer-row { padding-right: 1px; border-bottom: 0; }
-.defaults-unavailable { min-height: 62px; display: flex; align-items: center; border-top: 1px solid var(--kg-border-subtle); color: var(--kg-text-tertiary); font-size: 12px; }
+.default-option-section { display: grid; min-height: 58px; grid-template-columns: minmax(180px, 1fr) minmax(240px, 360px) 126px; align-items: center; gap: var(--kg-space-4); padding-bottom: var(--kg-space-3); border-bottom: 1px solid var(--kg-border-subtle); }
+.default-option-section .kg-section-title { margin: 0; }
+.default-option-section :deep(.el-select) { width: 100%; }
+.defaults-unavailable { min-height: 62px; display: flex; align-items: center; border-bottom: 1px solid var(--kg-border-subtle); color: var(--kg-text-tertiary); font-size: 12px; }
 .provider-form :deep(.el-form-item) { margin-bottom: 17px; }
 .provider-form :deep(.el-form-item__label) { margin-bottom: 6px; color: var(--kg-text-secondary); font-size: 12px; line-height: 18px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--kg-space-4); }
@@ -729,7 +876,7 @@ function originChanged() {
 .models-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .models-editor-head strong { display: block; color: var(--kg-text-secondary); font-size: 12px; font-weight: 550; }
 .models-editor-head span { display: block; margin-top: 1px; color: var(--kg-text-tertiary); font-size: 11px; }
-.models-editor-actions { display: flex; flex: none; align-items: center; gap: 7px; }
+.models-editor-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 7px; }
 .models-editor-actions :deep(.el-button .kg-icon) { margin-left: 5px; }
 .model-rows { display: grid; gap: 7px; margin-top: 10px; }
 .model-row { display: grid; grid-template-columns: minmax(110px, 1.1fr) minmax(105px, 1fr) minmax(120px, .9fr) 50px 34px 28px; align-items: center; gap: 7px; }
@@ -737,10 +884,8 @@ function originChanged() {
 .temperature-capability :deep(.el-checkbox__label) { padding-left: 4px; color: var(--kg-text-tertiary); font-size: 10px; }
 .remove-model { width: 28px; height: 28px; display: grid; padding: 0; place-items: center; border: 0; border-radius: var(--kg-radius-sm); background: transparent; color: var(--kg-text-tertiary); cursor: pointer; }
 .remove-model:hover { background: var(--kg-danger-soft); color: var(--kg-danger); }
+.remove-model:disabled { background: transparent; color: var(--kg-text-disabled); cursor: not-allowed; }
 .no-model-rows { padding: 12px 0 2px; color: var(--kg-text-tertiary); font-size: 11px; }
-.form-enabled { display: flex; align-items: center; justify-content: space-between; gap: var(--kg-space-5); min-height: 54px; padding: 9px 12px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-1); }
-.form-enabled strong { display: block; color: var(--kg-text-secondary); font-size: 12px; font-weight: 550; }
-.form-enabled span { display: block; margin-top: 2px; color: var(--kg-text-tertiary); font-size: 11px; }
 :global(.provider-dialog .el-dialog__body) { max-height: calc(100vh - 180px); overflow-y: auto; }
 
 @media (max-width: 1080px) {
@@ -758,7 +903,7 @@ function originChanged() {
   .section-head p { display: none; }
   .provider-table :deep(.el-table__cell:nth-child(5)) { display: none; }
   .row-actions :deep(.el-button) { padding-right: 3px; padding-left: 3px; font-size: 11px; }
-  .default-row { grid-template-columns: 1fr; gap: 8px; padding: 14px 0; }
+  .default-option-section { grid-template-columns: 1fr; gap: 8px; padding-bottom: 14px; }
   .form-grid { grid-template-columns: 1fr; gap: 0; }
   .models-editor-head { align-items: flex-start; flex-direction: column; }
   .models-editor-actions { width: 100%; }

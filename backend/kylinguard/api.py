@@ -215,6 +215,42 @@ class LLMProviderActionRequest(BaseModel):
     version: int = Field(ge=1)
 
 
+class LLMModelDiscoveryRequest(BaseModel):
+    """使用尚未保存的提供商连接信息读取远端模型列表。"""
+
+    adapter: ProviderAdapter
+    base_url: str = Field(min_length=1, max_length=2048)
+    api_key: SecretStr | None = None
+    provider_id: str = Field(default="", max_length=64)
+    version: int | None = Field(default=None, ge=1)
+    allow_insecure_http: bool = False
+
+    @field_validator("base_url")
+    @classmethod
+    def strip_base_url(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("provider_id")
+    @classmethod
+    def strip_provider_id(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_connection_source(self):
+        has_provider = bool(self.provider_id)
+        has_version = self.version is not None
+        if has_provider != has_version:
+            raise ValueError("provider_id 与 version 必须同时提供")
+        if has_provider and self.api_key is not None:
+            raise ValueError("已有提供商不能同时提交 API Key")
+        if not has_provider and self.api_key is None:
+            raise ValueError("新连接必须提供 API Key")
+        if (self.api_key is not None
+                and not self.api_key.get_secret_value().strip()):
+            raise ValueError("API Key 不能为空")
+        return self
+
+
 class PermissionUpdateRequest(BaseModel):
     mode: PermissionMode
     version: int = Field(ge=1)
@@ -725,6 +761,33 @@ def create_app(settings: Settings | None = None,
         error = public_error_from_exception(exc)
         status = 503 if error.retryable else 400
         return HTTPException(status, detail=error.to_dict())
+
+    @app.post("/api/llm/discover-models")
+    async def discover_draft_llm_models(
+        req: LLMModelDiscoveryRequest, _user: str = Depends(local_operator),
+    ):
+        """不保存表单或 API Key，直接读取当前连接可用的模型 ID。"""
+        try:
+            if req.provider_id:
+                assert req.version is not None
+                ids = await app.state.llm_runtime.fetch_model_ids_for_provider_draft(
+                    provider_id=req.provider_id,
+                    expected_version=req.version,
+                    adapter=req.adapter,
+                    base_url=req.base_url,
+                    allow_insecure_http=req.allow_insecure_http,
+                )
+            else:
+                assert req.api_key is not None
+                ids = await app.state.llm_runtime.fetch_model_ids_for_connection(
+                    adapter=req.adapter,
+                    base_url=req.base_url,
+                    api_key=req.api_key.get_secret_value(),
+                    allow_insecure_http=req.allow_insecure_http,
+                )
+        except Exception as exc:
+            raise provider_action_error(exc) from exc
+        return {"models": ids}
 
     @app.post("/api/llm/providers/{provider_id}/test")
     async def test_llm_provider(
