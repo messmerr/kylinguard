@@ -24,7 +24,30 @@
           <template v-for="(it, i) in items" :key="i">
             <article v-if="it.kind === 'user'" class="user-prompt">
               <span class="user-chevron">›</span>
-              <div class="user-text">{{ it.text }}</div>
+              <div class="user-content">
+                <div class="user-text">
+                  <template v-for="(node, nodeIndex) in historyNodes(it)" :key="nodeIndex">
+                    <span v-if="node.type === 'text'">{{ node.text }}</span>
+                    <span
+                      v-else
+                      class="user-inline-context"
+                      :class="node.type"
+                      :title="node.type === 'file' ? node.relativePath : node.id"
+                    >
+                      <KgIcon :name="node.type === 'skill' ? 'skill' : 'log'" :size="11" />
+                      @{{ node.label }}
+                    </span>
+                  </template>
+                </div>
+                <div v-if="showHistoryMetadata(it)" class="user-context">
+                  <span v-if="showHistorySkillMetadata(it)" class="user-skill" :class="`is-${it.skillMode}`">
+                    <KgIcon name="skill" :size="11" />{{ historySkillLabel(it) }}
+                  </span>
+                  <span v-for="file in legacyHistoryFiles(it)" :key="file.path" class="user-file" :title="file.path">
+                    <KgIcon name="log" :size="11" />{{ file.relativePath || file.name }}
+                  </span>
+                </div>
+              </div>
             </article>
 
             <section v-else-if="it.kind === 'snapshot'" class="snapshot-block">
@@ -113,11 +136,67 @@
 
       <div class="composer">
         <div class="composer-shell">
+          <div v-if="mentionOpen" ref="mentionMenuRef" class="mention-menu" role="listbox" aria-label="@ 上下文候选">
+            <div class="mention-head">
+              <strong>添加到本轮任务</strong>
+              <span><kbd>↑↓</kbd> 选择　<kbd>Enter</kbd>/<kbd>Tab</kbd> 确认　<kbd>Esc</kbd> 关闭</span>
+            </div>
+            <section v-if="skillCandidates.length" class="mention-group">
+              <h3>Skills</h3>
+              <button
+                v-for="(candidate, index) in skillCandidates"
+                :key="candidate.key"
+                type="button"
+                role="option"
+                :data-candidate-index="index"
+                :aria-selected="activeIndex === index"
+                :aria-disabled="candidate.disabled"
+                :disabled="candidate.disabled"
+                :class="{ active: activeIndex === index }"
+                @mouseenter="activeIndex = index"
+                @mousedown.prevent="chooseMention(candidate)"
+              >
+                <span class="mention-icon"><KgIcon name="skill" :size="14" /></span>
+                <span class="mention-copy"><strong>{{ candidate.title }}</strong><small>{{ candidate.detail }}</small></span>
+              </button>
+              <div v-if="skillsLimitReached" class="mention-status">本轮最多指定 4 个 Skill</div>
+            </section>
+            <section class="mention-group">
+              <h3>服务器文件</h3>
+              <button
+                v-for="(candidate, index) in fileCandidates"
+                :key="candidate.key"
+                type="button"
+                role="option"
+                :data-candidate-index="skillCandidates.length + index"
+                :aria-selected="activeIndex === skillCandidates.length + index"
+                :aria-disabled="candidate.disabled"
+                :disabled="candidate.disabled"
+                :class="{ active: activeIndex === skillCandidates.length + index }"
+                @mouseenter="activeIndex = skillCandidates.length + index"
+                @mousedown.prevent="chooseMention(candidate)"
+              >
+                <span class="mention-icon file"><KgIcon name="log" :size="14" /></span>
+                <span class="mention-copy"><strong>{{ candidate.title }}</strong><small>{{ candidate.detail }}</small></span>
+              </button>
+              <div v-if="filesLoading" class="mention-status"><span class="kg-spinner"></span>正在检索服务器工作目录…</div>
+              <div v-else-if="filesLimitReached" class="mention-status">本轮最多引用 8 个服务器文件</div>
+              <div v-else-if="filesError" class="mention-status error">服务器文件暂不可用：{{ filesError }}</div>
+              <div v-else-if="!fileCandidates.length" class="mention-status">没有匹配的服务器文件</div>
+            </section>
+            <div v-if="!allCandidates.length && !filesLoading" class="mention-empty">没有匹配“{{ mentionQuery }}”的候选项</div>
+          </div>
           <div class="composer-box">
-            <el-input v-model="input" type="textarea" :rows="1"
-                      :autosize="{ minRows: 1, maxRows: 8 }"
-                      resize="none" placeholder="描述运维任务…"
-                      @keydown.enter.exact.prevent="submit" @keydown.esc="stopTurn" />
+            <InlineMentionEditor
+              ref="composerEditorRef"
+              v-model="editorNodes"
+              :disabled="running"
+              placeholder="描述运维任务…"
+              @query-change="handleMentionQuery"
+              @mention-keydown="onMentionKeydown"
+              @submit="submit"
+              @escape="stopTurn"
+            />
           </div>
           <div class="composer-footer">
             <div class="composer-meta">
@@ -139,6 +218,17 @@
                 <KgIcon :name="activeId ? 'lock' : 'chevron'" :size="11" class="workspace-state" />
               </button>
               <span class="composer-separator" aria-hidden="true"></span>
+              <button
+                type="button"
+                class="context-trigger"
+                :disabled="running"
+                title="输入 @ 可指定 Skill 或引用服务器工作目录中的文件"
+                @click="insertMentionTrigger"
+              >
+                <span class="at-mark">@</span>
+                <span>添加上下文</span>
+              </button>
+              <span class="composer-separator" aria-hidden="true"></span>
               <ModelSelector
                 :disabled="running"
                 :has-history="Boolean(items.length)"
@@ -156,7 +246,7 @@
               </button>
               <button type="button" class="send-btn" :class="{ stop: running }"
                       :aria-label="running ? '停止等待' : '发送运维指令'"
-                      :disabled="!running && !input.trim()"
+                      :disabled="!running && !canSubmit"
                       @click="running ? stopTurn() : submit()">
                 <span v-if="running" class="stop-square"></span>
                 <KgIcon v-else name="arrowUp" :size="16" />
@@ -173,6 +263,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import ConfirmCard from '../components/ConfirmCard.vue'
+import InlineMentionEditor from '../components/InlineMentionEditor.vue'
 import KgIcon from '../components/KgIcon.vue'
 import KgLogo from '../components/KgLogo.vue'
 import RichMessage from '../components/RichMessage.vue'
@@ -188,12 +279,14 @@ import {
   permissionContext,
   setDraftWorkspaceRoot,
 } from '../composables/usePermissions.js'
+import { useComposerMentions } from '../composables/useComposerMentions.js'
 import { effortLabel } from '../composables/useModels.js'
 import {
   planningProgressCount,
   planningProgressText,
 } from '../utils/progressPresentation.js'
 import { formatCollectionAge } from '../utils/relativeTime.js'
+import { editorPlainText } from '../utils/contextMention.js'
 
 const WELCOME_HINTS = [
   { icon: 'disk', title: '检查磁盘使用', description: '只读取状态', text: '查看磁盘使用情况' },
@@ -201,13 +294,39 @@ const WELCOME_HINTS = [
   { icon: 'activity', title: '检查失败服务', description: '只读取状态', text: '检查失败的服务' },
 ]
 
-const emit = defineEmits(['open-model-settings'])
+const emit = defineEmits(['open-model-settings', 'open-extensions'])
 
-const input = ref('')
+const editorNodes = ref([{ type: 'text', text: '' }])
+const composerEditorRef = ref(null)
+const mentionMenuRef = ref(null)
 const chatRef = ref(null)
+const canSubmit = computed(() => Boolean(editorPlainText(editorNodes.value).trim()))
 const workspaceDisplay = computed(() => (
   permissionContext.workspaceRoot || '服务器默认目录'
 ))
+const mentionWorkspaceRoot = computed(() => permissionContext.workspaceRoot || '')
+const {
+  activeIndex,
+  allCandidates,
+  chooseCandidate,
+  fileCandidates,
+  filesError,
+  filesLimitReached,
+  filesLoading,
+  handleMentionKeydown,
+  handleQueryChange: handleMentionQuery,
+  insertTrigger: insertMentionTrigger,
+  mentionOpen,
+  mentionQuery,
+  skillCandidates,
+  skillsLimitReached,
+  takeDraftContext,
+} = useComposerMentions({
+  nodes: editorNodes,
+  editorRef: composerEditorRef,
+  workspaceRoot: mentionWorkspaceRoot,
+  disabled: running,
+})
 
 const snapshotClock = ref(Date.now())
 let snapshotClockTimer = null
@@ -335,13 +454,24 @@ watch(() => [
   currentActivity.value?.generatedBytes,
 ].join(':'),
   scrollToBottom)
+watch(activeIndex, (index) => {
+  nextTick(() => mentionMenuRef.value
+    ?.querySelector(`[data-candidate-index="${index}"]`)
+    ?.scrollIntoView({ block: 'nearest' }))
+})
+
+function chooseMention(candidate) {
+  chooseCandidate(candidate)
+}
+
+function onMentionKeydown(payload) {
+  handleMentionKeydown(payload)
+}
 
 async function submit() {
-  if (running.value) return
-  const text = input.value.trim()
-  if (!text) return
-  input.value = ''
-  await sendMessage(text, { onUpdate: scrollToBottom })
+  if (running.value || !canSubmit.value) return
+  const snapshot = takeDraftContext()
+  await sendMessage(snapshot.message, { onUpdate: scrollToBottom, ...snapshot })
 }
 
 async function chooseWorkspaceRoot() {
@@ -373,7 +503,15 @@ function stopTurn() {
 }
 
 async function retryTask(item) {
-  await retryMessage(item.prompt, { onUpdate: scrollToBottom })
+  await retryMessage(item.prompt, {
+    onUpdate: scrollToBottom,
+    skillId: item.skillId || '',
+    skillIds: item.skillIds || [],
+    skillMode: item.skillMode || 'auto',
+    contextFiles: item.contextFiles || [],
+    contextMentions: item.contextMentions || [],
+    contentNodes: item.contentNodes || [],
+  })
 }
 
 async function sendHint(text) {
@@ -393,6 +531,43 @@ function downloadReport(text) {
   link.download = `运维报告_${date}.md`
   link.click()
   URL.revokeObjectURL(link.href)
+}
+
+function historySkillLabel(item) {
+  if (item.skillMode === 'none') return 'Skill · 未使用'
+  if (item.skillMode === 'manual') {
+    const names = item.skillNames?.filter(Boolean).join('、')
+      || item.skillIds?.join('、') || item.skillName || item.skillId
+    return `手动 · ${names || '指定 Skill'}`
+  }
+  const routedId = item.routedSkillId || item.skillId
+  const routedName = item.routedSkillName || item.skillName
+  return routedId
+    ? `自动 · ${routedName || routedId}`
+    : item.skillResolved ? '自动 · 未使用 Skill' : 'Skill · 自动匹配'
+}
+
+function historyNodes(item) {
+  return Array.isArray(item.contentNodes) && item.contentNodes.length
+    ? item.contentNodes : [{ type: 'text', text: item.text || '' }]
+}
+
+function showHistorySkillMetadata(item) {
+  if (item.skillMode === 'auto' || item.skillMode === 'none') return true
+  return item.skillMode === 'manual'
+    && !item.contextMentions?.length
+    && Boolean(item.skillId || item.skillIds?.length)
+}
+
+function showHistoryMetadata(item) {
+  return showHistorySkillMetadata(item) || Boolean(legacyHistoryFiles(item).length)
+}
+
+function legacyHistoryFiles(item) {
+  const inlinePaths = new Set((item.contextMentions || [])
+    .filter((mention) => mention.type === 'file')
+    .map((mention) => mention.relativePath))
+  return (item.contextFiles || []).filter((file) => !inlinePaths.has(file.relativePath))
 }
 </script>
 
@@ -522,9 +697,10 @@ function downloadReport(text) {
 }
 
 .user-chevron { display: none; }
+.user-content { max-width: min(78%, 680px); display: grid; justify-items: end; gap: 4px; }
 
 .user-text {
-  max-width: min(78%, 680px);
+  max-width: 100%;
   padding: 9px 13px;
   border: 1px solid #c9d9ff;
   border-radius: var(--kg-radius-lg) var(--kg-radius-lg) var(--kg-radius-xs) var(--kg-radius-lg);
@@ -535,6 +711,25 @@ function downloadReport(text) {
   line-height: 1.6;
   white-space: pre-wrap;
 }
+.user-inline-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin: 0 2px;
+  padding: 1px 5px;
+  border: 1px solid #bfd1ff;
+  border-radius: 5px;
+  background: #fff;
+  color: var(--kg-accent);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 20px;
+  vertical-align: baseline;
+}
+.user-inline-context.file { border-color: var(--kg-border-default); color: var(--kg-text-secondary); }
+.user-context { max-width: 100%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.user-skill, .user-file { max-width: 260px; display: inline-flex; align-items: center; gap: 4px; overflow: hidden; color: var(--kg-text-tertiary); font: 10px/1.4 var(--kg-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.user-skill.is-manual { color: var(--kg-accent); }
 
 .snapshot-block { margin: 5px 0; }
 
@@ -678,6 +873,7 @@ function downloadReport(text) {
 }
 
 .composer-shell {
+  position: relative;
   width: min(100%, var(--kg-thread-max));
   margin: 0 auto;
   border: 1px solid var(--kg-border-default);
@@ -692,8 +888,41 @@ function downloadReport(text) {
   box-shadow: 0 0 0 3px rgb(23 92 255 / 10%), 0 12px 30px rgb(34 52 84 / 12%);
 }
 
-.composer-box { padding: 11px 13px 8px; }
-.composer-box :deep(.el-textarea__inner) { padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--kg-text-primary); font: 14px/22px var(--kg-font-ui); }
+.mention-menu {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: min(540px, 100%);
+  max-height: min(430px, 58vh);
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--kg-border-default);
+  border-radius: var(--kg-radius-lg);
+  background: var(--kg-bg-surface-1);
+  box-shadow: 0 16px 40px rgb(25 42 72 / 18%);
+}
+.mention-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 8px 8px; border-bottom: 1px solid var(--kg-border-subtle); }
+.mention-head strong { color: var(--kg-text-primary); font-size: 12px; font-weight: 600; }
+.mention-head span { color: var(--kg-text-tertiary); font-size: 10px; white-space: nowrap; }
+.mention-head kbd { padding: 1px 4px; border: 1px solid var(--kg-border-subtle); border-radius: 3px; background: var(--kg-bg-surface-2); font: 9px/1.4 var(--kg-font-mono); }
+.mention-group { padding-top: 5px; }
+.mention-group + .mention-group { margin-top: 3px; border-top: 1px solid var(--kg-border-subtle); }
+.mention-group h3 { margin: 0; padding: 4px 8px; color: var(--kg-text-tertiary); font-size: 10px; font-weight: 550; letter-spacing: .04em; text-transform: uppercase; }
+.mention-group > button { width: 100%; min-height: 43px; display: flex; align-items: center; gap: 9px; padding: 6px 8px; border: 0; border-radius: var(--kg-radius-sm); background: transparent; color: var(--kg-text-tertiary); text-align: left; cursor: pointer; }
+.mention-group > button.active, .mention-group > button:hover { background: var(--kg-selection); color: var(--kg-accent); }
+.mention-group > button:disabled { background: transparent; color: var(--kg-text-disabled); cursor: default; opacity: .62; }
+.mention-icon { width: 28px; height: 28px; display: grid; flex: none; place-items: center; border-radius: var(--kg-radius-sm); background: var(--kg-accent-soft); color: var(--kg-accent); }
+.mention-icon.file { background: var(--kg-bg-surface-3); color: var(--kg-text-secondary); }
+.mention-copy { min-width: 0; display: grid; flex: 1; gap: 2px; }
+.mention-copy strong, .mention-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-copy strong { color: var(--kg-text-primary); font-size: 12px; font-weight: 550; }
+.mention-copy small { color: var(--kg-text-tertiary); font: 10px/1.4 var(--kg-font-mono); }
+.mention-status, .mention-empty { min-height: 34px; display: flex; align-items: center; gap: 7px; padding: 6px 9px; color: var(--kg-text-tertiary); font-size: 11px; }
+.mention-status.error { color: var(--kg-danger); }
+.mention-empty { border-top: 1px solid var(--kg-border-subtle); }
+
+.composer-box { padding: 9px 13px 5px; }
 
 .send-btn {
   flex: none;
@@ -740,6 +969,12 @@ function downloadReport(text) {
 }
 
 .composer-separator { width: 1px; height: 14px; background: var(--kg-border-subtle); }
+
+.context-trigger { min-width: 0; max-width: 150px; height: 26px; display: inline-flex; align-items: center; gap: 6px; padding: 0 7px; border: 1px solid transparent; border-radius: var(--kg-radius-sm); background: transparent; color: var(--kg-text-tertiary); font-size: 11px; cursor: pointer; }
+.context-trigger > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-trigger:hover:not(:disabled) { border-color: var(--kg-border-default); background: var(--kg-bg-surface-2); color: var(--kg-text-primary); }
+.context-trigger:disabled { color: var(--kg-text-disabled); cursor: not-allowed; }
+.at-mark { font: 600 13px/1 var(--kg-font-mono); }
 
 .workspace-control {
   min-width: 0;
@@ -800,5 +1035,8 @@ function downloadReport(text) {
   .composer-meta { width: 100%; }
   .composer-actions { width: 100%; justify-content: flex-end; }
   .workspace-control { max-width: 92px; }
+  .context-trigger { max-width: 100px; }
+  .mention-menu { width: 100%; }
+  .mention-head span { display: none; }
 }
 </style>

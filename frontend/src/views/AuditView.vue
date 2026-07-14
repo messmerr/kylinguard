@@ -3,7 +3,7 @@
     <div class="kg-page-inner audit-inner">
       <header class="page-head">
         <div>
-          <p class="page-description">按任务查看操作、确认与执行记录。</p>
+          <p class="page-description">按任务或系统配置范围查看可校验审计链。</p>
         </div>
         <el-button :disabled="!selectedId || !events.length" @click="exportReport">
           <KgIcon name="download" :size="15" />
@@ -13,7 +13,7 @@
 
       <div class="audit-toolbar">
         <label class="session-picker">
-          <span>任务</span>
+          <span>范围</span>
           <el-select
             :model-value="selectedId"
             filterable
@@ -21,7 +21,7 @@
             @change="select"
           >
             <el-option
-              v-for="session in sessions"
+              v-for="session in auditTargets"
               :key="session.id"
               :label="session.title"
               :value="session.id"
@@ -148,6 +148,7 @@ import { apiFetch } from '../composables/useApi.js'
 import { refreshSessions, sessions } from '../composables/useChat.js'
 
 const selectedId = ref('')
+const systemScopes = ref([])
 const events = ref([])
 const chainOk = ref(null)
 const loading = ref(false)
@@ -162,6 +163,7 @@ const pagedEvents = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
   return events.value.slice(start, start + pageSize.value)
 })
+const auditTargets = computed(() => [...systemScopes.value, ...sessions.value])
 
 const TYPE_LABELS = {
   user_query: '管理员指令',
@@ -185,6 +187,30 @@ const TYPE_LABELS = {
   task_error: '任务错误',
   execution: '执行结果',
   final_answer: '最终回复',
+  skill_selected: '已选 Skill',
+  mcp_server_create_requested: '请求添加 MCP',
+  mcp_server_created: '已添加 MCP',
+  mcp_server_update_requested: '请求修改 MCP',
+  mcp_server_updated: '已修改 MCP',
+  mcp_server_test_requested: '请求测试 MCP',
+  mcp_server_tested: 'MCP 测试结果',
+  mcp_server_enable_requested: '请求启用 MCP',
+  mcp_server_disable_requested: '请求停用 MCP',
+  mcp_server_enabled: '已启用 MCP',
+  mcp_server_disabled: '已停用 MCP',
+  mcp_server_enable_failed: 'MCP 启用失败',
+  mcp_server_delete_requested: '请求删除 MCP',
+  mcp_server_deleted: '已删除 MCP',
+  skill_create_requested: '请求添加 Skill',
+  skill_created: '已添加 Skill',
+  skill_update_requested: '请求修改 Skill',
+  skill_updated: '已修改 Skill',
+  skill_enable_requested: '请求启用 Skill',
+  skill_disable_requested: '请求停用 Skill',
+  skill_enabled: '已启用 Skill',
+  skill_disabled: '已停用 Skill',
+  skill_delete_requested: '请求删除 Skill',
+  skill_deleted: '已删除 Skill',
 }
 
 const ACTION_LABELS = {
@@ -231,6 +257,7 @@ function eventIcon(type) {
     execution_authorized: 'shield', execution_authorization_failed: 'warning',
     task_error: 'warning',
     final_answer: 'info',
+    skill_selected: 'skill',
   }[type] || 'audit'
 }
 
@@ -284,6 +311,7 @@ function brief(ev) {
     case 'task_error': return compactText(p.error?.message || '任务未能完成', 72)
     case 'execution': return `${p.step?.tool || '执行操作'} · ${durationText(p.duration_ms)}`
     case 'final_answer': return compactText(p.answer || '', 72) || '已生成回复'
+    case 'skill_selected': return `${p.name || p.id || 'Skill'} · v${p.version || '未标注'}`
     default: return '—'
   }
 }
@@ -499,7 +527,18 @@ function exportReport() {
   URL.revokeObjectURL(anchor.href)
 }
 
-onMounted(refreshSessions)
+async function loadAuditTargets() {
+  const [scopeResponse] = await Promise.all([
+    apiFetch('/api/audit/scopes'),
+    refreshSessions(),
+  ])
+  if (scopeResponse.ok) {
+    const body = await scopeResponse.json()
+    systemScopes.value = Array.isArray(body.scopes) ? body.scopes : []
+  }
+}
+
+onMounted(() => { loadAuditTargets().catch(() => {}) })
 </script>
 
 <style scoped>

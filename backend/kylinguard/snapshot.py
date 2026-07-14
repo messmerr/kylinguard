@@ -14,6 +14,7 @@ import uuid
 from kylinguard.executor import run_command
 
 _IS_WINDOWS = sys.platform == "win32"
+_IS_DARWIN = sys.platform == "darwin"
 
 # Windows 下用 argv 列表避免 shlex.split 破坏 PowerShell 脚本
 _PS = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]
@@ -66,9 +67,34 @@ _SNAPSHOT_COMMANDS_LINUX: dict[str, str] = {
     "recent_errors": "journalctl -p err -n 20 --no-pager",
 }
 
-_SNAPSHOT_COMMANDS: dict = (
-    _SNAPSHOT_COMMANDS_WINDOWS if _IS_WINDOWS else _SNAPSHOT_COMMANDS_LINUX
-)
+_SNAPSHOT_COMMANDS_DARWIN: dict[str, list[str]] = {
+    "uptime_load": ["/usr/bin/top", "-l", "1", "-n", "0"],
+    "memory": ["/usr/bin/memory_pressure"],
+    "disk": ["/bin/df", "-Pk"],
+    "top_cpu": [
+        "/bin/ps", "-Ao", "pid,ppid,user,state,%cpu,%mem,comm", "-r",
+    ],
+    "recent_errors": [
+        "/usr/bin/log", "show", "--last", "10m", "--predicate",
+        "messageType == error OR messageType == fault", "--style", "compact",
+    ],
+}
+
+if _IS_WINDOWS:
+    _SNAPSHOT_COMMANDS: dict = _SNAPSHOT_COMMANDS_WINDOWS
+    _STATIC_SNAPSHOT: dict[str, str] = {}
+elif _IS_DARWIN:
+    _SNAPSHOT_COMMANDS = _SNAPSHOT_COMMANDS_DARWIN
+    _STATIC_SNAPSHOT = {
+        "failed_units": "[平台不支持] macOS 不提供 systemd 失败服务列表",
+    }
+else:
+    _SNAPSHOT_COMMANDS = _SNAPSHOT_COMMANDS_LINUX
+    _STATIC_SNAPSHOT = {}
+
+_PSEUDO_FILESYSTEMS = {
+    "devfs", "devtmpfs", "tmpfs", "proc", "sysfs", "map",
+}
 
 _TITLES = {
     "uptime_load": "运行时长与负载", "memory": "内存(MB)", "disk": "磁盘",
@@ -90,7 +116,7 @@ async def _collect_one(key: str, cmd: str | list[str]) -> tuple[str, str]:
 async def collect_snapshot() -> dict[str, str]:
     pairs = await asyncio.gather(
         *(_collect_one(k, c) for k, c in _SNAPSHOT_COMMANDS.items()))
-    return dict(pairs)
+    return {**dict(pairs), **_STATIC_SNAPSHOT}
 
 
 def format_snapshot(snapshot: dict[str, str], per_item: int = 2000) -> str:
@@ -115,13 +141,15 @@ def _parse_disk_pcts(snapshot: dict[str, str]) -> list[tuple[str, int]]:
                 if total > 0:
                     results.append((m.group(1) + "盘", int(used / total * 100)))
     else:
-        # Linux: "df -h" 输出，最后一列为使用率%，第6列为挂载点
+        # POSIX df 的容量使用率位于第 5 列，挂载点位于最后一列。
+        # macOS 的非 -P 输出还会带 inode 百分比，因此不能搜索任意百分号。
         for line in raw.splitlines()[1:]:
             parts = line.split()
-            if len(parts) >= 6:
-                pct_str = parts[4].rstrip('%')
-                if pct_str.isdigit():
-                    results.append((parts[5], int(pct_str)))
+            if len(parts) < 6 or parts[0].casefold() in _PSEUDO_FILESYSTEMS:
+                continue
+            pct_str = parts[4].rstrip('%')
+            if pct_str.isdigit():
+                results.append((parts[-1], int(pct_str)))
     return results
 
 
@@ -133,6 +161,12 @@ def _parse_memory_pct(snapshot: dict[str, str]) -> int | None:
         if m and int(m.group(1)) > 0:
             return int(int(m.group(2)) / int(m.group(1)) * 100)
     else:
+        free = re.search(
+            r'System-wide memory free percentage:\s*(\d+(?:\.\d+)?)%', raw,
+            re.IGNORECASE,
+        )
+        if free:
+            return max(0, min(100, round(100 - float(free.group(1)))))
         m = re.search(r'Mem:\s+(\d+)\s+(\d+)', raw)
         if m and int(m.group(1)) > 0:
             return int(int(m.group(2)) / int(m.group(1)) * 100)
@@ -142,21 +176,21 @@ def _parse_memory_pct(snapshot: dict[str, str]) -> int | None:
 def _parse_cpu_pct(snapshot: dict[str, str]) -> int | None:
     """解析 CPU 负载，返回百分比，解析失败返回 None。"""
     raw = snapshot.get("uptime_load", "")
-    if _IS_WINDOWS:
-        m = re.search(r'CPU:\s*(\d+)%', raw)
-        if m:
-            return int(m.group(1))
-    else:
-        m = re.search(r'load average[s]?:\s*([\d.]+)', raw)
-        if m:
-            # 简单用 load 值估算（单核满载=1.0，多核类推）
-            return min(int(float(m.group(1)) * 100), 100)
+    explicit = re.search(r'CPU:\s*(\d+(?:\.\d+)?)%', raw, re.IGNORECASE)
+    if explicit:
+        return max(0, min(100, round(float(explicit.group(1)))))
+    idle = re.search(
+        r'(\d+(?:\.\d+)?)\s*%?\s*(?:id|idle)\b', raw, re.IGNORECASE,
+    )
+    if idle:
+        return max(0, min(100, round(100 - float(idle.group(1)))))
+    # load average 是调度队列长度，不是 CPU 使用率，不能换算成百分比。
     return None
 
 
 def _has_failed_units(snapshot: dict[str, str]) -> bool:
     raw = snapshot.get("failed_units", "")
-    if raw.startswith("[采集失败]"):
+    if raw.startswith(("[采集失败]", "[平台不支持]")):
         return False
     if _IS_WINDOWS:
         lines = [l for l in raw.splitlines() if l.strip()

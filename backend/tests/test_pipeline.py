@@ -116,6 +116,15 @@ class CatalogTools(FakeTools):
         }
 
 
+class MutableCatalogTools(FakeTools):
+    def __init__(self):
+        super().__init__()
+        self.extra = ""
+
+    def describe(self):
+        return super().describe() + self.extra
+
+
 class FailingPlanner:
     async def next_actions(self, conversation, on_delta=None,
                            on_progress=None):
@@ -217,6 +226,21 @@ async def _collect(pipeline, query="帮我看下磁盘", on_event=None):
     return events
 
 
+async def test_老会话每轮刷新热加载工具目录(tmp_path):
+    tools = MutableCatalogTools()
+    planner = FakePlanner([FINAL, FINAL])
+    pipeline, _audit, _tools = _pipeline(
+        tmp_path, [], tools=tools, planner=planner,
+    )
+
+    await _collect(pipeline, "第一轮")
+    tools.extra = "\n- custom.lookup() [risk=high, custom]: 自定义查询"
+    await _collect(pipeline, "第二轮")
+
+    assert "custom.lookup" not in planner.received[0][0]["content"]
+    assert "custom.lookup" in planner.received[1][0]["content"]
+
+
 def _types(events):
     return [e["type"] for e in events]
 
@@ -247,8 +271,11 @@ async def test_只读步骤全自动端到端(tmp_path):
         tmp_path, [_plan("sysinfo.disk_usage", {}, "low"), FINAL])
     events = await _collect(p)
     audited = [t for t in _types(events) if t not in {"phase", "progress"}]
-    assert audited == ["user_query", "snapshot", "plan", "verification",
-                       "execution", "plan", "final_answer"]
+    assert audited == [
+        "user_query", "skill_routing_catalog", "skill_routing_decision",
+        "skill_not_selected", "snapshot", "plan", "verification",
+        "execution", "plan", "final_answer",
+    ]
     assert tools.calls == [("sysinfo", "disk_usage", {})]
     assert events[-1]["answer"] == "磁盘使用正常。"
     assert audit.verify_chain("s1") is True

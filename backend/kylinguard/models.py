@@ -112,6 +112,12 @@ class PlannerOutput(BaseModel):
     thought: str = ""
     steps: list[PlanStep] = Field(default_factory=list)
     final_answer: str | None = None
+    # 只在独立的 Skill 路由阶段消费；普通规划阶段出现时按协议错误处理。
+    selected_skill_id: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$",
+    )
 
 
 class RuleDecision(str, Enum):

@@ -213,6 +213,53 @@ def test_递归删除控制面祖先目录也被拒绝(tmp_path):
     assert "控制面" in action.hard_block_reason
 
 
+@pytest.mark.parametrize("field,relative", [
+    ("llm_secrets_dir", "provider-secrets/key"),
+    ("mcp_secrets_dir", "mcp-secrets/token"),
+    ("skills_dir", "skills/demo/SKILL.md"),
+    ("skills_state_path", "skills-state.json"),
+])
+def test_结构化文件工具不能读写扩展与凭据状态(
+    tmp_path, field, relative,
+):
+    target = tmp_path / relative
+    configured = target if field == "skills_state_path" else target.parent
+    settings = Settings(
+        _env_file=None,
+        db_path=str(tmp_path / "control.db"),
+        **{field: str(configured)},
+    )
+
+    read = _file_action(
+        tmp_path, tool="read_file", path=str(target), settings=settings,
+    )
+    write = _file_action(
+        tmp_path, tool="write_file", path=str(target), settings=settings,
+    )
+
+    assert "控制面" in read.hard_block_reason
+    assert "控制面" in write.hard_block_reason
+
+
+@pytest.mark.parametrize("relative", [
+    "mcp-secrets/token",
+    "skills/demo/SKILL.md",
+    "skills-state.json",
+])
+def test_未显式配置时也保护数据库旁的默认扩展路径(
+    tmp_path, relative,
+):
+    settings = Settings(
+        _env_file=None, db_path=str(tmp_path / "state" / "control.db"),
+    )
+    action = _file_action(
+        tmp_path, tool="read_file",
+        path=str(tmp_path / "state" / relative), settings=settings,
+    )
+
+    assert "控制面" in action.hard_block_reason
+
+
 def test_服务能力按具体动作区分(tmp_path):
     settings = Settings(_env_file=None, db_path=str(tmp_path / "control.db"))
     meta = ToolMeta(server="services", tool="restart_service",

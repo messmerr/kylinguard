@@ -49,6 +49,51 @@
                 </div>
               </div>
 
+              <div v-if="status" class="capability-summary">
+                <div class="capability-head">
+                  <strong>已启用能力</strong>
+                  <span>系统自带与自定义</span>
+                </div>
+                <div class="capability-row">
+                  <span class="capability-label">
+                    <KgIcon name="server" :size="14" />MCP
+                    <b>{{ enabledMcpServers.length }}</b>
+                  </span>
+                  <div class="capability-items">
+                    <span
+                      v-for="server in enabledMcpServers"
+                      :key="server.id"
+                      class="capability-chip"
+                      :class="{ unavailable: !server.available }"
+                      :title="`${server.source === 'builtin' ? '系统自带' : '第三方'} · ${server.toolCount} 个工具${server.available ? '' : ' · 当前不可用'}`"
+                    >
+                      {{ server.name }}
+                      <small v-if="server.source !== 'builtin'">第三方</small>
+                    </span>
+                    <span v-if="!enabledMcpServers.length" class="capability-empty">暂无已启用 MCP</span>
+                  </div>
+                </div>
+                <div class="capability-row">
+                  <span class="capability-label">
+                    <KgIcon name="skill" :size="14" />Skill
+                    <b>{{ enabledSkillSummaries.length }}</b>
+                  </span>
+                  <div class="capability-items">
+                    <span
+                      v-for="skill in enabledSkillSummaries"
+                      :key="skill.id"
+                      class="capability-chip"
+                      :class="{ unavailable: !skill.available }"
+                      :title="`${skill.source === 'builtin' ? '系统自带' : '自定义'}${skill.available ? '' : ' · 当前不可用'}`"
+                    >
+                      {{ skill.name }}
+                      <small v-if="skill.source !== 'builtin'">自定义</small>
+                    </span>
+                    <span v-if="!enabledSkillSummaries.length" class="capability-empty">暂无已启用 Skill</span>
+                  </div>
+                </div>
+              </div>
+
               <div v-else class="panel-loading">
                 <span class="kg-spinner"></span>
                 正在读取系统状态
@@ -99,7 +144,7 @@
                 <template #title>
                   <div class="collapse-title">
                     <span>{{ metric.title }}</span>
-                    <span v-if="metric.unavailable" class="unavailable">采集失败</span>
+                    <span v-if="metric.unavailable" class="unavailable">{{ metric.unavailableLabel }}</span>
                     <span v-else class="collapse-summary">{{ metric.summary }}</span>
                   </div>
                 </template>
@@ -123,6 +168,19 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import EChartCanvas from '../components/EChartCanvas.vue'
 import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useApi.js'
+import {
+  enabledMcpServers,
+  extensionSkills,
+  loadExtensions,
+} from '../composables/useExtensions.js'
+import {
+  cpuUsagePercent,
+  diskUsagePercent as diskPercent,
+  isMetricUnavailable as isUnavailable,
+  isMetricUnsupported,
+  loadAverage,
+  memoryUsagePercent as memoryPercent,
+} from '../utils/systemMetrics.js'
 
 const stats = ref(null)
 const status = ref(null)
@@ -204,6 +262,9 @@ const summaryStats = computed(() => [
 ])
 
 const activeAlertCount = computed(() => alerts.value?.length || 0)
+const enabledSkillSummaries = computed(() => (
+  extensionSkills.value.filter(skill => skill.enabled)
+))
 
 const alertSummary = computed(() => {
   if (alerts.value == null) return { note: '正在读取当前风险', tone: 'info' }
@@ -249,21 +310,23 @@ const rawMetrics = computed(() => {
     raw,
     title: TITLES[key] || key,
     unavailable: isUnavailable(raw),
+    unavailableLabel: isMetricUnsupported(raw) ? '当前平台不支持' : '采集失败',
     summary: metricSummary(key, raw),
   }))
 })
 
 function loadMetric(raw = '') {
   if (!raw || isUnavailable(raw)) {
-    return unavailableMetric('uptime_load', '系统负载', 'activity')
+    return unavailableMetric('uptime_load', '系统负载', 'activity', raw)
   }
-  const cpu = raw.match(/CPU:\s*(\d+(?:\.\d+)?)%/i)
-  if (cpu) return percentMetric('uptime_load', 'CPU', 'cpu', Number(cpu[1]), raw)
+  const cpu = cpuUsagePercent(raw)
+  if (cpu != null) return percentMetric('uptime_load', 'CPU', 'cpu', cpu, raw)
 
-  const load = raw.match(/load average[s]?:\s*([\d.]+)/i)
-  if (load) {
+  const load = loadAverage(raw)
+  if (load != null) {
     return {
-      ...percentMetric('uptime_load', '系统负载', 'activity', Number(load[1]) * 100, raw),
+      key: 'uptime_load', label: '系统负载', icon: 'activity',
+      value: String(load), percent: null, tone: 'neutral',
       note: '最近 1 分钟平均负载',
     }
   }
@@ -276,7 +339,7 @@ function loadMetric(raw = '') {
 
 function percentMetric(key, label, icon, percent, raw = '') {
   if (percent == null || Number.isNaN(percent) || isUnavailable(raw)) {
-    return unavailableMetric(key, label, icon)
+    return unavailableMetric(key, label, icon, raw)
   }
   const safePercent = Math.max(0, Math.min(100, Math.round(percent)))
   return {
@@ -286,7 +349,7 @@ function percentMetric(key, label, icon, percent, raw = '') {
 }
 
 function failedMetric(raw = '') {
-  if (!raw || isUnavailable(raw)) return unavailableMetric('failed_units', '失败服务', 'warning')
+  if (!raw || isUnavailable(raw)) return unavailableMetric('failed_units', '失败服务', 'warning', raw)
   const count = statusRows(raw, 'failed_units').length
   return {
     key: 'failed_units', label: '失败服务', icon: count ? 'warning' : 'check',
@@ -296,33 +359,12 @@ function failedMetric(raw = '') {
   }
 }
 
-function unavailableMetric(key, label, icon) {
-  return { key, label, icon, value: '不可用', percent: null, note: '本次采集未返回有效数据', tone: 'disabled' }
-}
-
-function memoryPercent(raw = '') {
-  if (!raw) return null
-  const linux = raw.match(/Mem:\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)/i)
-  if (linux && Number(linux[1]) > 0) return Number(linux[2]) / Number(linux[1]) * 100
-  const windows = raw.match(/total=(\d+(?:\.\d+)?)MB\s+used=(\d+(?:\.\d+)?)MB/i)
-  if (windows && Number(windows[1]) > 0) return Number(windows[2]) / Number(windows[1]) * 100
-  const explicit = raw.match(/(\d+(?:\.\d+)?)%/)
-  return explicit ? Number(explicit[1]) : null
-}
-
-function diskPercent(raw = '') {
-  if (!raw) return null
-  let highest = null
-  for (const line of meaningfulLines(raw)) {
-    const explicit = line.match(/(\d+(?:\.\d+)?)%/)
-    if (explicit) highest = Math.max(highest ?? 0, Number(explicit[1]))
-
-    const windows = line.match(/total=([\d.]+)G\s+used=([\d.]+)G/i)
-    if (windows && Number(windows[1]) > 0) {
-      highest = Math.max(highest ?? 0, Number(windows[2]) / Number(windows[1]) * 100)
-    }
+function unavailableMetric(key, label, icon, raw = '') {
+  return {
+    key, label, icon, value: '不可用', percent: null,
+    note: isMetricUnsupported(raw) ? '当前平台不支持' : '本次采集未返回有效数据',
+    tone: 'disabled',
   }
-  return highest
 }
 
 function usageTone(percent) {
@@ -376,13 +418,10 @@ function statusRows(raw = '', kind) {
   })
 }
 
-function isUnavailable(raw) {
-  return typeof raw !== 'string' || raw.startsWith('[采集失败]')
-}
-
 async function poll() {
   if (refreshing.value) return
   refreshing.value = true
+  const extensionsRequest = loadExtensions().catch(() => {})
   try {
     const [statusResponse, statsResponse, alertsResponse] = await Promise.all([
       apiFetch('/api/status'),
@@ -396,6 +435,7 @@ async function poll() {
     }
     if (statsResponse.ok) stats.value = await statsResponse.json()
     if (alertsResponse.ok) alerts.value = (await alertsResponse.json()).alerts || []
+    await extensionsRequest
   } catch {
     // 保留上一次成功结果，等待下一轮刷新。
   } finally {
@@ -546,6 +586,99 @@ onUnmounted(() => {
 .metric-ring-core strong.disabled { color: var(--kg-text-disabled); }
 .metric-ring-core span { margin-top: 4px; color: var(--kg-text-tertiary); font-size: 11px; }
 .health-metric .metric-note { width: 100%; text-align: center; }
+
+.capability-summary {
+  display: grid;
+  gap: 10px;
+  margin-top: var(--kg-space-5);
+  padding-top: var(--kg-space-4);
+  border-top: 1px solid var(--kg-border-subtle);
+}
+
+.capability-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--kg-space-2);
+}
+
+.capability-head strong {
+  color: var(--kg-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.capability-head span {
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+}
+
+.capability-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--kg-space-3);
+}
+
+.capability-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 25px;
+  color: var(--kg-text-secondary);
+  font-size: 11px;
+}
+
+.capability-label .kg-icon { color: var(--kg-accent); }
+
+.capability-label b {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: var(--kg-radius-pill);
+  background: var(--kg-bg-surface-3);
+  color: var(--kg-text-tertiary);
+  font: 600 10px/1.5 var(--kg-font-mono);
+  text-align: center;
+}
+
+.capability-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.capability-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 25px;
+  padding: 3px 8px;
+  border: 1px solid #dce6f6;
+  border-radius: var(--kg-radius-pill);
+  background: #f7faff;
+  color: var(--kg-text-secondary);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.capability-chip small {
+  color: var(--kg-accent);
+  font-size: 9px;
+}
+
+.capability-chip.unavailable {
+  border-color: #eadfca;
+  background: #fffaf0;
+  color: var(--kg-warning);
+}
+
+.capability-empty {
+  display: inline-flex;
+  align-items: center;
+  min-height: 25px;
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+}
 
 .health-row {
   display: grid;
@@ -756,5 +889,6 @@ onUnmounted(() => {
   .refresh-state .kg-meta { display: none; }
   .health-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-ring { width: 96px; height: 96px; }
+  .capability-row { grid-template-columns: 1fr; gap: 5px; }
 }
 </style>

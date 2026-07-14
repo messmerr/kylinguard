@@ -93,6 +93,7 @@ globalThis.fetch = async (url, options = {}) => {
 const chat = await import('../src/composables/useChat.js')
 const models = await import('../src/composables/useModels.js')
 const permissions = await import('../src/composables/usePermissions.js')
+const extensions = await import('../src/composables/useExtensions.js')
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 function controlledSse() {
@@ -119,6 +120,12 @@ function controlledSse() {
   }
 }
 
+function httpResponse(status, body) {
+  return {
+    connect() { return Response.json(body, { status }) },
+  }
+}
+
 function reset() {
   assert.equal(chat.running.value, false)
   chat.newSession()
@@ -137,7 +144,208 @@ function reset() {
   chat.sessions.value = []
   permissions._resetPermissionStateForTests()
   models._resetModelStateForTests()
+  extensions._resetExtensionStateForTests()
 }
+
+test('多 Skill 与行内服务器文件按有序 context_mentions 发送且不会扩展权限参数', async () => {
+  reset()
+  const sse = controlledSse()
+  chatResponses.push(sse)
+
+  const request = chat.sendMessage('检查磁盘', {
+    contentNodes: [
+      { type: 'text', text: '检查 ' },
+      { type: 'skill', id: 'disk-diagnosis', label: '磁盘诊断' },
+      { type: 'text', text: ' 和 ' },
+      { type: 'skill', id: 'log-review', label: '日志排查' },
+      { type: 'text', text: '，参考 ' },
+      {
+        type: 'file', path: '/srv/work/logs/system.log',
+        relativePath: 'logs/system.log', label: 'system.log',
+      },
+      { type: 'text', text: ' 的错误' },
+    ],
+  })
+  await tick()
+  assert.equal(chatBodies[0].message, '检查 @磁盘诊断 和 @日志排查，参考 @system.log 的错误')
+  assert.equal(chatBodies[0].skill_id, 'disk-diagnosis')
+  assert.deepEqual(chatBodies[0].skill_ids, ['disk-diagnosis', 'log-review'])
+  assert.equal(chatBodies[0].skill_mode, 'manual')
+  assert.deepEqual(chatBodies[0].context_files, ['logs/system.log'])
+  assert.deepEqual(chatBodies[0].context_mentions, [
+    { type: 'skill', offset: 3, skill_id: 'disk-diagnosis' },
+    { type: 'skill', offset: 11, skill_id: 'log-review' },
+    { type: 'file', offset: 20, path: 'logs/system.log' },
+  ])
+  assert.equal(chatBodies[0].permission_mode, 'ask')
+
+  sse.event({ type: 'final_answer', answer: '完成', aborted: false,
+    outcome: 'completed', elapsed_ms: 5 })
+  sse.event({ type: 'done' })
+  sse.close()
+  await request
+})
+
+test('没有显式 Skill 时发送 auto，自动路由结果只作为元信息', async () => {
+  reset()
+  const automatic = controlledSse()
+  chatResponses.push(automatic)
+  const automaticRequest = chat.sendMessage('自动处理')
+  await tick()
+  assert.equal(chatBodies[0].skill_mode, 'auto')
+  assert.equal(chatBodies[0].skill_id, '')
+  assert.deepEqual(chatBodies[0].skill_ids, [])
+  assert.deepEqual(chatBodies[0].context_files, [])
+  assert.deepEqual(chatBodies[0].context_mentions, [])
+  automatic.event({ type: 'skill_not_selected', skill_mode: 'auto', reason: 'model_declined' })
+  await tick()
+  const automaticUser = chat.items.value.find((item) => item.kind === 'user')
+  assert.equal(automaticUser.skillResolved, true)
+  assert.equal(automaticUser.skillId, '')
+  automatic.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
+  automatic.event({ type: 'done' })
+  automatic.close()
+  await automaticRequest
+})
+
+test('旧 none 回合重试保留禁用自动 Skill 的兼容语义', async () => {
+  reset()
+  const sse = controlledSse()
+  chatResponses.push(sse)
+  const request = chat.sendMessage('兼容旧回合', {
+    skillMode: 'none',
+    contentNodes: [{ type: 'text', text: '兼容旧回合' }],
+  })
+  await tick()
+  assert.equal(chatBodies[0].skill_mode, 'none')
+  assert.deepEqual(chatBodies[0].skill_ids, [])
+  sse.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
+  sse.event({ type: 'done' })
+  sse.close()
+  await request
+})
+
+test('无行内标签的旧 manual 回合重试仍保留结构化 Skill', async () => {
+  reset()
+  const sse = controlledSse()
+  chatResponses.push(sse)
+  const request = chat.sendMessage('兼容旧手动 Skill', {
+    skillMode: 'manual',
+    skillIds: ['legacy-review'],
+    contentNodes: [{ type: 'text', text: '兼容旧手动 Skill' }],
+  })
+  await tick()
+  assert.equal(chatBodies[0].skill_mode, 'manual')
+  assert.deepEqual(chatBodies[0].skill_ids, ['legacy-review'])
+  sse.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
+  sse.event({ type: 'done' })
+  sse.close()
+  await request
+})
+
+test('确定性的 chat 4xx 保留服务端错误码且不建议重试', async () => {
+  reset()
+  chatResponses.push(httpResponse(409, {
+    detail: {
+      code: 'skill_required_tools_missing',
+      message: '所选 Skill 缺少依赖工具。',
+      retryable: false,
+    },
+  }))
+
+  await chat.sendMessage('检查配置')
+
+  const errorItem = chat.items.value.find((item) => item.kind === 'task_error')
+  assert.equal(errorItem.error.code, 'skill_required_tools_missing')
+  assert.equal(errorItem.error.retryable, false)
+  assert.equal(errorItem.error.httpStatus, 409)
+})
+
+test('显式 Skill 和 context_mentions 在断流重试时保持不变', async () => {
+  reset()
+  const broken = controlledSse()
+  chatResponses.push(broken)
+
+  const firstRequest = chat.sendMessage('检查磁盘', {
+    contentNodes: [
+      { type: 'text', text: '用 ' },
+      { type: 'skill', id: 'disk-diagnosis', label: '磁盘诊断' },
+      { type: 'text', text: ' 检查 ' },
+      { type: 'file', relativePath: 'logs/system.log', label: 'system.log' },
+    ],
+  })
+  await tick()
+  broken.close()
+  await firstRequest
+
+  const errorItem = chat.items.value.find((item) => item.kind === 'task_error')
+  assert.equal(errorItem.skillId, 'disk-diagnosis')
+  assert.deepEqual(errorItem.skillIds, ['disk-diagnosis'])
+  assert.equal(errorItem.skillMode, 'manual')
+  assert.equal(errorItem.contextFiles[0].relativePath, 'logs/system.log')
+  assert.equal(errorItem.contextMentions.length, 2)
+
+  const retry = controlledSse()
+  chatResponses.push(retry)
+  const retryRequest = chat.retryMessage(errorItem.prompt, {
+    skillId: errorItem.skillId,
+    skillIds: errorItem.skillIds,
+    skillMode: errorItem.skillMode,
+    contextFiles: errorItem.contextFiles,
+    contextMentions: errorItem.contextMentions,
+    contentNodes: errorItem.contentNodes,
+  })
+  await tick()
+  assert.equal(chatBodies[1].skill_id, 'disk-diagnosis')
+  assert.deepEqual(chatBodies[1].skill_ids, ['disk-diagnosis'])
+  assert.equal(chatBodies[1].skill_mode, 'manual')
+  assert.deepEqual(chatBodies[1].context_files, ['logs/system.log'])
+  assert.deepEqual(chatBodies[1].context_mentions, chatBodies[0].context_mentions)
+  assert.equal(chatBodies[1].message, chatBodies[0].message)
+  retry.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
+  retry.event({ type: 'done' })
+  retry.close()
+  await retryRequest
+})
+
+test('自动 Skill 回合重试会重新路由而不是变成人工指定', async () => {
+  reset()
+  const broken = controlledSse()
+  chatResponses.push(broken)
+
+  const firstRequest = chat.sendMessage('检查磁盘')
+  await tick()
+  broken.event({
+    type: 'skill_selected', skill_id: 'disk-diagnosis',
+    name: '磁盘诊断', skill_mode: 'auto',
+  })
+  broken.close()
+  await firstRequest
+
+  const errorItem = chat.items.value.find((item) => item.kind === 'task_error')
+  assert.equal(errorItem.skillId, 'disk-diagnosis')
+  assert.equal(errorItem.skillMode, 'auto')
+
+  const retry = controlledSse()
+  chatResponses.push(retry)
+  const retryRequest = chat.retryMessage(errorItem.prompt, {
+    skillId: errorItem.skillId,
+    skillIds: errorItem.skillIds,
+    skillMode: errorItem.skillMode,
+    contextFiles: errorItem.contextFiles,
+    contextMentions: errorItem.contextMentions,
+    contentNodes: errorItem.contentNodes,
+  })
+  await tick()
+  assert.equal(chatBodies[1].skill_mode, 'auto')
+  assert.equal(chatBodies[1].skill_id, '')
+  assert.deepEqual(chatBodies[1].skill_ids, [])
+
+  retry.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
+  retry.event({ type: 'done' })
+  retry.close()
+  await retryRequest
+})
 
 test('业务终态到 done 之间仍禁止开启新回合', async () => {
   reset()
@@ -473,6 +681,63 @@ test('历史多轮切换模型时每条回复保留各自模型快照', async ()
   assert.equal(answers[0].model.reasoningEffort, 'low')
   assert.equal(answers[1].model.modelId, 'model-b')
   assert.equal(answers[1].model.reasoningEffort, 'high')
+})
+
+test('历史 user_query 用有序 context_mentions 还原行内 Skill 和文件', async () => {
+  reset()
+  sessionEventsFixture = { events: [{
+    event_type: 'user_query', payload: {
+      query: '请用 @磁盘诊断 看😀 @a.log',
+      skill_mode: 'manual',
+      requested_skill_ids: ['disk-diagnosis'],
+      context_files: ['logs/a.log'],
+      context_mentions: [
+        { type: 'skill', offset: 3, skill_id: 'disk-diagnosis', name: '磁盘诊断' },
+        { type: 'file', offset: 12, path: 'logs/a.log', name: 'a.log' },
+      ],
+    },
+  }] }
+  permissionFixture = { mode: 'ask', version: 1 }
+
+  await chat.loadSession('history-context')
+
+  const user = chat.items.value.find((item) => item.kind === 'user')
+  assert.deepEqual(user.skillIds, ['disk-diagnosis'])
+  assert.deepEqual(user.contentNodes, [
+    { type: 'text', text: '请用 ' },
+    { type: 'skill', id: 'disk-diagnosis', label: '磁盘诊断' },
+    { type: 'text', text: ' 看😀 ' },
+    { type: 'file', relativePath: 'logs/a.log', label: 'a.log' },
+  ])
+  assert.deepEqual(user.contextFiles.map((file) => file.relativePath), ['logs/a.log'])
+})
+
+test('无行内 mention 的多 Skill 历史保留每个服务端名称', async () => {
+  reset()
+  sessionEventsFixture = { events: [{
+    event_type: 'user_query', payload: {
+      query: '执行旧版复合工作流',
+      skill_mode: 'manual',
+      skill_ids: ['disk-diagnosis', 'log-review'],
+    },
+  }, {
+    event_type: 'skill_selected', payload: {
+      id: 'disk-diagnosis', name: '磁盘诊断', skill_mode: 'manual',
+      position: 1, count: 2,
+    },
+  }, {
+    event_type: 'skill_selected', payload: {
+      id: 'log-review', name: '日志排查', skill_mode: 'manual',
+      position: 2, count: 2,
+    },
+  }] }
+  permissionFixture = { mode: 'ask', version: 1 }
+
+  await chat.loadSession('history-multi-skill')
+
+  const user = chat.items.value.find((item) => item.kind === 'user')
+  assert.deepEqual(user.skillIds, ['disk-diagnosis', 'log-review'])
+  assert.deepEqual(user.skillNames, ['磁盘诊断', '日志排查'])
 })
 
 test('权限与服务器工作目录只随首轮 chat 创建会话，后续消息不重复更新', async () => {

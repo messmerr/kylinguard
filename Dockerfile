@@ -8,10 +8,14 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
+# read_only 容器中的第三方运行时不能写 /nonexistent 或镜像层；
+# HOME/TMPDIR 只指向 compose 提供的临时 tmpfs，不承载持久秘密。
 FROM python:3.13-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    HOME=/tmp/kylinguard-home \
+    TMPDIR=/tmp \
     KG_DB_PATH=/app/data/kylinguard.db
 
 WORKDIR /app/backend
