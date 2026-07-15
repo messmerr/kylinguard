@@ -66,4 +66,5 @@ def get_meta(server: str, tool: str) -> ToolMeta:
     if key in TOOL_REGISTRY:
         return TOOL_REGISTRY[key]
     return ToolMeta(server=server, tool=tool, risk=RiskLevel.HIGH,
-                    description="未注册工具，按最高危处理")
+                    description="未注册工具，按最高危处理",
+                    custom=True, risk_source="platform_default")

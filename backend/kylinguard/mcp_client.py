@@ -23,11 +23,13 @@ from kylinguard.mcp_config import (
     MCPConfigError,
     MCPConfigStore,
     MCPServerConfig,
+    apply_tool_policies,
     make_stdio_server_config,
     normalize_discovered_tools,
     redact_discovered_tool_secrets,
     redact_mcp_error,
 )
+from kylinguard.models import RiskLevel, ToolMeta
 from kylinguard.registry import get_meta
 from kylinguard.subprocess_env import agent_subprocess_env, safe_subprocess_env
 
@@ -239,6 +241,7 @@ def custom_server_parameters(
         args=config.args,
         env=config.env,
         secret_env=config.secret_env,
+        tool_policies=config.tool_policies,
         enabled=config.enabled,
         version=config.version,
     )
@@ -275,15 +278,26 @@ class _ManagedServer:
     tools: list[dict]
     custom: bool
     config_version: int = 0
+    tool_risks: dict[str, str] = field(default_factory=dict)
     secret_values: tuple[str, ...] = field(default=(), repr=False)
     instance_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     active_calls: int = 0
     idle: asyncio.Event = field(default_factory=asyncio.Event)
     stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
     owner_task: asyncio.Task | None = field(default=None, repr=False)
+    retirement_task: asyncio.Task | None = field(default=None, repr=False)
+    catalog_stale: bool = False
 
     def __post_init__(self):
         self.idle.set()
+
+    def invalidate_tool_catalog(self) -> None:
+        """使本连接缓存的工具目录、分级和所有既有 identity 立即失效。"""
+        if self.catalog_stale:
+            return
+        self.catalog_stale = True
+        self.tool_risks.clear()
+        self.instance_id = uuid.uuid4().hex
 
 
 def _tool_payloads(
@@ -294,9 +308,29 @@ def _tool_payloads(
             "name": tool.name,
             "description": tool.description or "",
             "input_schema": tool.inputSchema,
+            "annotations": tool.annotations,
         }
         for tool in response.tools
     ], secret_values)
+
+
+def _verified_tool_risks(
+    tools: list[dict], tool_policies: dict | None,
+) -> dict[str, str]:
+    """只采纳与本次运行实例实际工具定义摘要匹配的管理员策略。"""
+    return {
+        tool["name"]: tool["effective_risk"]
+        for tool in apply_tool_policies(tools, tool_policies)
+        if (isinstance(tool.get("name"), str)
+            and tool.get("risk_source") == "administrator")
+    }
+
+
+def _is_tool_catalog_changed(message) -> bool:
+    """识别 SDK RootModel 包装后的 tools/list_changed 通知。"""
+    notification = getattr(message, "root", message)
+    return (getattr(notification, "method", "")
+            == "notifications/tools/list_changed")
 
 
 async def _open_stdio_server(
@@ -305,7 +339,9 @@ async def _open_stdio_server(
     *,
     custom: bool,
     config_version: int = 0,
+    tool_policies: dict | None = None,
     secret_values: tuple[str, ...] = (),
+    on_tools_changed=None,
     timeout: float = 15.0,
 ) -> _ManagedServer:
     """在专属任务中拥有 stdio 上下文，允许其他请求任务安全触发关闭。
@@ -320,6 +356,20 @@ async def _open_stdio_server(
     async def own_session() -> None:
         stack = AsyncExitStack()
         handle = None
+        catalog_changed_during_start = asyncio.Event()
+
+        async def message_handler(message) -> None:
+            if not _is_tool_catalog_changed(message):
+                # 与 SDK 默认 handler 一样让出调度点；其余通知无需业务处理。
+                await asyncio.sleep(0)
+                return
+            if handle is None:
+                catalog_changed_during_start.set()
+                return
+            handle.invalidate_tool_catalog()
+            if on_tools_changed is not None:
+                await on_tools_changed(handle)
+
         try:
             # 第三方进程可能把传入凭据打印到 stderr；控制面不转发该流。
             read, write = await stack.enter_async_context(
@@ -328,17 +378,24 @@ async def _open_stdio_server(
                     errlog=(subprocess.DEVNULL if custom else sys.stderr),
                 )
             )
-            session = await stack.enter_async_context(ClientSession(read, write))
+            session = await stack.enter_async_context(ClientSession(
+                read, write, message_handler=message_handler,
+            ))
             await session.initialize()
             tools = _tool_payloads(
                 await session.list_tools(), secret_values,
             )
+            if catalog_changed_during_start.is_set():
+                raise MCPConnectionError(
+                    "MCP 工具目录在发现过程中发生变化，请重新测试。"
+                )
             handle = _ManagedServer(
                 name=name,
                 session=session,
                 tools=tools,
                 custom=custom,
                 config_version=config_version,
+                tool_risks=_verified_tool_risks(tools, tool_policies),
                 secret_values=secret_values,
                 stop_requested=stop_requested,
                 owner_task=asyncio.current_task(),
@@ -414,20 +471,24 @@ async def discover_stdio_tools(
             custom_server_parameters(config, exec_user=exec_user),
             custom=True,
             config_version=config.version,
+            tool_policies=config.tool_policies,
             secret_values=tuple(config.secret_env.values()),
             timeout=timeout,
         )
     except Exception as exc:
         raise MCPConnectionError(
             redact_mcp_error(exc, list(config.secret_env.values()))) from exc
+    tools = handle.tools
     try:
-        return handle.tools
-    finally:
-        try:
-            await _close_managed_server(handle)
-        except Exception as exc:
-            raise MCPConnectionError(
-                redact_mcp_error(exc, list(config.secret_env.values()))) from exc
+        await _close_managed_server(handle)
+    except Exception as exc:
+        raise MCPConnectionError(
+            redact_mcp_error(exc, list(config.secret_env.values()))) from exc
+    if handle.catalog_stale:
+        raise MCPConnectionError(
+            "MCP 工具目录在发现过程中发生变化，请重新测试。"
+        )
+    return tools
 
 
 async def test_stdio_server(
@@ -509,12 +570,46 @@ class ToolManager:
         self._started = False
 
     @staticmethod
-    def _lines_for(handle: _ManagedServer) -> list[str]:
+    def _meta_for_handle(handle: _ManagedServer, tool: dict) -> ToolMeta:
+        if handle.catalog_stale:
+            return ToolMeta(
+                server=handle.name,
+                tool=tool["name"],
+                risk=RiskLevel.HIGH,
+                description="工具目录运行中已变化，必须重新发现并审核",
+                custom=handle.custom,
+                risk_source="platform_default",
+            )
+        if not handle.custom:
+            meta = get_meta(handle.name, tool["name"])
+            if meta.custom:
+                # 运行实例明确属于内置服务；漏登记仍按最高风险收敛，但不能
+                # 在界面上伪装成第三方 MCP。
+                return meta.model_copy(update={
+                    "custom": False,
+                    "description": "未登记的内置工具，按最高危处理",
+                })
+            return meta
+        configured = handle.tool_risks.get(tool["name"])
+        risk = RiskLevel(configured) if configured else RiskLevel.HIGH
+        return ToolMeta(
+            server=handle.name,
+            tool=tool["name"],
+            risk=risk,
+            description=tool.get("description", ""),
+            custom=True,
+            risk_source=("administrator" if configured else "platform_default"),
+        )
+
+    def _lines_for(self, handle: _ManagedServer) -> list[str]:
         lines: list[str] = []
         for tool in handle.tools:
-            meta = get_meta(handle.name, tool["name"])
+            meta = self._meta_for_handle(handle, tool)
             qualified = f"{handle.name}.{tool['name']}"
-            source = ", custom" if handle.custom else ""
+            source = ""
+            if handle.custom:
+                source = (", custom, admin" if meta.risk_source == "administrator"
+                          else ", custom, default")
             lines.append(
                 f"- {qualified} [risk={meta.risk.value}{source}"
                 f"{', 需提权' if meta.needs_sudo else ''}]: "
@@ -538,6 +633,10 @@ class ToolManager:
 
     async def _install_builtin(self, handle: _ManagedServer) -> None:
         async with self._state_lock:
+            if handle.catalog_stale:
+                raise MCPConnectionError(
+                    "内置 MCP 工具目录在启动过程中发生变化。"
+                )
             self._handles[handle.name] = handle
             self._sessions[handle.name] = handle.session
             self._catalog_lines[handle.name] = self._lines_for(handle)
@@ -551,13 +650,39 @@ class ToolManager:
             pass
 
     def _schedule_retirement(self, handle: _ManagedServer) -> asyncio.Task:
+        if handle.retirement_task is not None:
+            return handle.retirement_task
         task = asyncio.create_task(
             self._retire_safely(handle),
             name=f"mcp-retire-{handle.name}",
         )
         self._retirement_tasks.add(task)
+        handle.retirement_task = task
         task.add_done_callback(self._retirement_tasks.discard)
         return task
+
+    async def _on_tools_changed(self, handle: _ManagedServer) -> None:
+        """收到 MCP list_changed 后立即摘除路由，旧授权与新调用均失效。"""
+        handle.invalidate_tool_catalog()
+        detached = False
+        async with self._state_lock:
+            if self._handles.get(handle.name) is handle:
+                self._handles.pop(handle.name, None)
+                self._sessions.pop(handle.name, None)
+                self._catalog_lines.pop(handle.name, None)
+                self._custom_ids.discard(handle.name)
+                self._rebuild_catalog()
+                detached = True
+        if detached:
+            if handle.custom:
+                self._record_runtime_test(
+                    handle.name,
+                    ok=False,
+                    error=("MCP 服务通知工具目录已变化；运行时已摘除，"
+                           "请重新测试并审核风险分级。"),
+                    expected_version=handle.config_version,
+                )
+            self._schedule_retirement(handle)
 
     def _record_runtime_test(self, server_id: str, **kwargs) -> str:
         """尽力保存健康状态；返回非空文本表示状态库写入失败。"""
@@ -591,7 +716,9 @@ class ToolManager:
                         privileged_helper=settings.privileged_helper,
                     )
                     handle = await _open_stdio_server(
-                        name, params, custom=False, timeout=30.0)
+                        name, params, custom=False,
+                        on_tools_changed=self._on_tools_changed,
+                        timeout=30.0)
                     opened.append(handle)
                     await self._install_builtin(handle)
             except BaseException:
@@ -653,6 +780,7 @@ class ToolManager:
         created_handles: list[_ManagedServer] = []
         loaded: list[str] = []
         warnings: dict[str, str] = {}
+        stale_next: dict[str, _ManagedServer] = {}
         swapped = False
         try:
             for config in enabled:
@@ -672,7 +800,9 @@ class ToolManager:
                         ),
                         custom=True,
                         config_version=config.version,
+                        tool_policies=config.tool_policies,
                         secret_values=tuple(config.secret_env.values()),
+                        on_tools_changed=self._on_tools_changed,
                         timeout=self._custom_start_timeout,
                     )
                 except Exception as exc:
@@ -697,6 +827,18 @@ class ToolManager:
                     warnings[config.id] = warning
 
             async with self._state_lock:
+                stale_next = {
+                    server_id: handle
+                    for server_id, handle in next_handles.items()
+                    if handle.catalog_stale
+                }
+                for server_id in stale_next:
+                    next_handles.pop(server_id, None)
+                    if server_id in loaded:
+                        loaded.remove(server_id)
+                    failures[server_id] = (
+                        "MCP 工具目录在启动过程中发生变化，请重新测试。"
+                    )
                 retired = [
                     handle for server_id, handle in existing.items()
                     if (handle is not None
@@ -718,8 +860,26 @@ class ToolManager:
                 for handle in created_handles:
                     self._schedule_retirement(handle)
 
+        for server_id, handle in stale_next.items():
+            if handle.custom:
+                warning = self._record_runtime_test(
+                    server_id,
+                    ok=False,
+                    error=("MCP 工具目录在启动过程中发生变化；"
+                           "请重新测试并审核风险分级。"),
+                    expected_version=handle.config_version,
+                )
+                if warning:
+                    warnings[server_id] = warning
+
+        retirement_handles = [*retired]
+        retirement_handles.extend(
+            handle for handle in created_handles
+            if (handle.catalog_stale
+                and all(handle is not item for item in retirement_handles))
+        )
         retirement_tasks = [self._schedule_retirement(handle)
-                            for handle in retired]
+                            for handle in retirement_handles]
         if retirement_tasks:
             # 若发起热加载的 HTTP 请求被取消，shield 让旧进程仍会在在途调用
             # 结束后回收，避免从路由表消失却遗留孤儿进程。
@@ -801,6 +961,39 @@ class ToolManager:
         """工具名必须与启动时 MCP 清单中的限定名完全一致。"""
         return qualified in self._tool_names
 
+    def tool_meta(self, qualified: str) -> ToolMeta:
+        """返回当前运行实例绑定的有效风险元数据。"""
+        server, tool_name = split_qualified(qualified)
+        handle = self._handles.get(server)
+        if handle is None:
+            return get_meta(server, tool_name)
+        tool = next(
+            (item for item in handle.tools if item["name"] == tool_name), None,
+        )
+        return (self._meta_for_handle(handle, tool)
+                if tool is not None else get_meta(server, tool_name))
+
+    def tool_security_context(self, qualified: str) -> tuple[ToolMeta, str]:
+        """从同一运行实例原子取得风险基线与执行身份。
+
+        本方法不 await，因此事件循环不会在读取 handle、风险与 identity 之间
+        切换到热加载任务。之后若实例发生变化，call_checked 的 identity 比对
+        会拒绝旧授权。缺失工具返回非空哨兵，避免稍后同名工具出现时绕过比对。
+        """
+        server, tool_name = split_qualified(qualified)
+        handle = self._handles.get(server)
+        if handle is None:
+            return get_meta(server, tool_name), f"unavailable:{qualified}"
+        tool = next(
+            (item for item in handle.tools if item["name"] == tool_name), None,
+        )
+        if tool is None:
+            return get_meta(server, tool_name), f"unavailable:{qualified}"
+        return (
+            self._meta_for_handle(handle, tool),
+            self._tool_identity_for(handle, tool_name),
+        )
+
     @staticmethod
     def _tool_identity_for(handle: _ManagedServer, tool: str) -> str:
         metadata = next(
@@ -813,7 +1006,14 @@ class ToolManager:
             "custom": handle.custom,
             "config_version": handle.config_version,
             "instance_id": handle.instance_id,
+            "catalog_stale": handle.catalog_stale,
             "tool": metadata,
+            "effective_risk": (
+                ToolManager._meta_for_handle(handle, metadata).risk.value
+            ),
+            "risk_source": (
+                ToolManager._meta_for_handle(handle, metadata).risk_source
+            ),
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -838,6 +1038,10 @@ class ToolManager:
         async with self._state_lock:
             session = self._sessions.get(server)
             handle = self._handles.get(server)
+            if handle is not None and handle.catalog_stale:
+                raise ToolCallError(
+                    "MCP 工具目录在运行中已变化，本次未执行；请重新测试并审核。"
+                )
             if (expected_identity and (
                     handle is None
                     or self._tool_identity_for(handle, tool)

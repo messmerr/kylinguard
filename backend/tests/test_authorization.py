@@ -7,6 +7,7 @@ from kylinguard.authorization import (
     describe_action,
     trusted_workspace_allows,
 )
+from kylinguard.mcp_config import default_mcp_secrets_directory
 from kylinguard.config import Settings
 from kylinguard.models import (
     GateAction,
@@ -242,7 +243,6 @@ def test_结构化文件工具不能读写扩展与凭据状态(
 
 
 @pytest.mark.parametrize("relative", [
-    "mcp-secrets/token",
     "skills/demo/SKILL.md",
     "skills-state.json",
 ])
@@ -255,6 +255,21 @@ def test_未显式配置时也保护数据库旁的默认扩展路径(
     action = _file_action(
         tmp_path, tool="read_file",
         path=str(tmp_path / "state" / relative), settings=settings,
+    )
+
+    assert "控制面" in action.hard_block_reason
+
+
+def test_未显式配置时保护用户状态目录中的默认MCP凭据(tmp_path, monkeypatch):
+    state_home = tmp_path / "state-home"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    settings = Settings(
+        _env_file=None, db_path=str(tmp_path / "state" / "control.db"),
+    )
+    target = default_mcp_secrets_directory(settings.db_path) / "token"
+
+    action = _file_action(
+        tmp_path, tool="read_file", path=str(target), settings=settings,
     )
 
     assert "控制面" in action.hard_block_reason

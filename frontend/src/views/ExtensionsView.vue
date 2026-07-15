@@ -10,6 +10,14 @@
         <span>{{ extensionError }}</span>
         <el-button text :loading="extensionsLoading" @click="reloadExtensions">重试</el-button>
       </div>
+      <div
+        v-else-if="extensionsLoading && !mcpServers.length && !extensionSkills.length"
+        class="extension-loading"
+        role="status"
+      >
+        <span class="kg-spinner" aria-hidden="true"></span>
+        <span><strong>正在同步扩展配置…</strong><small>完成后会分别显示 MCP 与 Skills</small></span>
+      </div>
       <div v-if="extensionSkillIssues.length" class="skill-issues" role="alert">
         <KgIcon name="warning" :size="15" />
         <div>
@@ -27,7 +35,9 @@
             <p>添加你信任的本机 stdio MCP。这里不包含系统自带 MCP。</p>
           </div>
           <div class="section-meta">
-            <span class="section-count">{{ mcpServers.length }} 个第三方服务</span>
+            <span class="section-count">{{ extensionsLoading && mcpServers.length
+              ? `正在同步 · ${mcpServers.length} 个` : extensionError && !mcpServers.length
+                ? '状态未同步' : `${mcpServers.length} 个第三方服务` }}</span>
             <el-button size="small" type="primary" @click="openMcpImportDialog">
               <KgIcon name="plus" :size="14" />添加 MCP
             </el-button>
@@ -75,7 +85,7 @@
           <el-table-column label="" width="218" align="right">
             <template #default="{ row }">
               <div class="row-actions">
-                <el-button text :disabled="!row.tools.length" @click="openMcpDetail(row)">详情</el-button>
+                <el-button text :disabled="!mcpDetailAvailable(row)" @click="openMcpDetail(row)">详情</el-button>
                 <el-button
                   text
                   :loading="extensionActionBusy('mcp:test', row.id)"
@@ -89,8 +99,7 @@
           </el-table-column>
         </el-table>
 
-        <div v-else-if="extensionsLoading" class="loading-line"><span class="kg-spinner"></span>正在读取 MCP 服务…</div>
-        <div v-else class="empty-state">
+        <div v-else-if="!extensionsLoading && !extensionError" class="empty-state">
           <span class="empty-mark"><KgIcon name="server" :size="20" /></span>
           <div><strong>还没有第三方 MCP</strong><p>点击添加后，可以粘贴现有配置，也可以手动填写。</p></div>
           <el-button type="primary" @click="openMcpImportDialog"><KgIcon name="plus" :size="14" />添加 MCP</el-button>
@@ -104,7 +113,9 @@
             <p>Skill 提供任务方法与工作流程；启用后模型可以自动匹配，也可以通过 @ 明确指定。</p>
           </div>
           <div class="section-meta">
-            <span class="section-count">{{ extensionSkills.length }} 个 Skill</span>
+            <span class="section-count">{{ extensionsLoading && extensionSkills.length
+              ? `正在同步 · ${extensionSkills.length} 个` : extensionError && !extensionSkills.length
+                ? '状态未同步' : `${extensionSkills.length} 个 Skill` }}</span>
             <el-button size="small" type="primary" @click="openSkillImportDialog">
               <KgIcon name="plus" :size="14" />添加 Skill
             </el-button>
@@ -163,8 +174,7 @@
           </el-table-column>
         </el-table>
 
-        <div v-else-if="extensionsLoading" class="loading-line"><span class="kg-spinner"></span>正在读取 Skills…</div>
-        <div v-else class="empty-state">
+        <div v-else-if="!extensionsLoading && !extensionError" class="empty-state">
           <span class="empty-mark"><KgIcon name="task" :size="20" /></span>
           <div><strong>还没有 Skill</strong><p>点击添加后，可以选择 SKILL.md，也可以手动创建。</p></div>
           <el-button type="primary" @click="openSkillImportDialog"><KgIcon name="plus" :size="14" />添加 Skill</el-button>
@@ -299,16 +309,47 @@
           <span class="skill-mark large"><KgIcon name="server" :size="17" /></span>
           <div><strong>{{ selectedMcp.name }}</strong><span>{{ selectedMcp.id }} · {{ selectedMcp.toolCount }} 个工具</span></div>
         </div>
-        <div class="safety-note detail-safety"><KgIcon name="warning" :size="15" /><span>第三方工具默认按高风险处理。</span></div>
+        <div class="safety-note detail-safety"><KgIcon name="warning" :size="15" /><span>未由管理员分级的第三方工具仍按高风险处理。MCP 服务自述仅供参考，不会自动获得权限。</span></div>
+        <div v-if="selectedMcp.enabled" class="scope-warning mcp-policy-warning">
+          <KgIcon name="warning" :size="15" />
+          <span>风险分级会改变自动执行与确认范围；请先停用该 MCP，再修改分级。</span>
+        </div>
         <div class="mcp-tool-list">
           <article v-for="tool in selectedMcp.tools" :key="tool.name" class="mcp-tool-detail">
-            <code>{{ selectedMcp.id }}.{{ tool.name }}</code>
+            <div class="mcp-tool-title">
+              <code>{{ selectedMcp.id }}.{{ tool.name }}</code>
+              <el-select
+                v-model="mcpToolRiskDraft[tool.name]"
+                size="small"
+                :disabled="selectedMcp.enabled || mcpPolicySaving"
+                aria-label="管理员风险分级"
+              >
+                <el-option label="平台默认（高风险）" value="default" />
+                <el-option label="低风险（只读）" value="low" />
+                <el-option label="中风险（可逆变更）" value="medium" />
+                <el-option label="高风险（二次确认）" value="high" />
+              </el-select>
+            </div>
+            <div class="mcp-risk-summary">
+              <span :class="`risk-${tool.effectiveRisk}`">{{ effectiveRiskLabel(tool) }}</span>
+              <small v-if="tool.policyStatus === 'stale'">工具定义已变化，旧分级已失效</small>
+              <small v-if="annotationSummary(tool)">服务自述：{{ annotationSummary(tool) }}（不自动采纳）</small>
+            </div>
             <p>{{ tool.description || '无说明' }}</p>
             <pre>{{ JSON.stringify(tool.inputSchema, null, 2) }}</pre>
           </article>
         </div>
       </template>
-      <template #footer><el-button @click="mcpDetailOpen = false">关闭</el-button></template>
+      <template #footer>
+        <el-button :disabled="mcpPolicySaving" @click="mcpDetailOpen = false">关闭</el-button>
+        <el-button
+          v-if="mcpDetailAvailable(selectedMcp)"
+          type="primary"
+          :loading="mcpPolicySaving"
+          :disabled="selectedMcp?.enabled"
+          @click="saveMcpToolPolicies"
+        >{{ selectedMcp?.tools.length ? '保存风险分级' : '清空风险分级' }}</el-button>
+      </template>
     </el-dialog>
 
     <el-dialog
@@ -381,6 +422,7 @@ import {
   loadExtensions,
   mcpServers,
   setMcpServerEnabled,
+  setMcpToolPolicies,
   setSkillEnabled,
   testMcpServer,
   updateMcpServer,
@@ -406,6 +448,8 @@ const mcpDialogOpen = ref(false)
 const mcpDetailOpen = ref(false)
 const selectedMcp = ref(null)
 const mcpSaving = ref(false)
+const mcpPolicySaving = ref(false)
+const mcpToolRiskDraft = reactive({})
 const skillDialogOpen = ref(false)
 const skillSaving = ref(false)
 const skillDetailOpen = ref(false)
@@ -444,8 +488,12 @@ function sourceLabel(source) {
 }
 
 function rowActionBusy(id) {
-  return ['mcp:enabled', 'mcp:test', 'mcp:update', 'mcp:delete']
+  return ['mcp:enabled', 'mcp:test', 'mcp:update', 'mcp:delete', 'mcp:policies']
     .some((kind) => extensionActionBusy(kind, id))
+}
+
+function mcpDetailAvailable(server) {
+  return Boolean(server?.tools?.length || Object.keys(server?.toolPolicies || {}).length)
 }
 
 function skillActionBusy(id) {
@@ -533,8 +581,56 @@ function openMcpDialog(server = null) {
 }
 
 function openMcpDetail(server) {
+  for (const key of Object.keys(mcpToolRiskDraft)) delete mcpToolRiskDraft[key]
+  for (const tool of server.tools) {
+    mcpToolRiskDraft[tool.name] = (
+      tool.policyStatus === 'active' && tool.riskSource === 'administrator'
+        ? tool.effectiveRisk : 'default'
+    )
+  }
   selectedMcp.value = server
   mcpDetailOpen.value = true
+}
+
+function effectiveRiskLabel(tool) {
+  const level = { low: '低风险', medium: '中风险', high: '高风险' }[tool.effectiveRisk] || '高风险'
+  const source = tool.riskSource === 'administrator' ? '管理员设置' : '平台默认'
+  return `${level} · ${source}`
+}
+
+function annotationSummary(tool) {
+  const value = tool.annotations || {}
+  const labels = []
+  if (value.readOnlyHint === true) labels.push('声称只读')
+  if (value.destructiveHint === true) labels.push('可能破坏数据')
+  if (value.idempotentHint === true) labels.push('声称幂等')
+  if (value.openWorldHint === true) labels.push('可能访问外部系统')
+  return labels.join('、')
+}
+
+async function saveMcpToolPolicies() {
+  const server = selectedMcp.value
+  if (!server || server.enabled) return
+  const policies = {}
+  for (const tool of server.tools) {
+    const risk = mcpToolRiskDraft[tool.name]
+    if (risk && risk !== 'default') {
+      policies[tool.name] = {
+        risk,
+        definition_sha256: tool.definitionSha256,
+      }
+    }
+  }
+  mcpPolicySaving.value = true
+  try {
+    await setMcpToolPolicies(server.id, server.version, policies)
+    mcpDetailOpen.value = false
+    ElMessage.success('MCP 工具风险分级已保存')
+  } catch (error) {
+    ElMessage.error(error.message || 'MCP 工具风险分级保存失败')
+  } finally {
+    mcpPolicySaving.value = false
+  }
 }
 
 async function saveMcp() {
@@ -753,6 +849,10 @@ async function removeSkill(skill) {
 .page-description { margin: 0; color: var(--kg-text-tertiary); font-size: 13px; }
 .extension-error { min-height: 40px; display: flex; align-items: center; gap: 8px; margin-top: var(--kg-space-4); padding: 7px 10px; border: 1px solid var(--kg-danger-border); border-radius: var(--kg-radius-sm); background: var(--kg-danger-soft); color: var(--kg-danger); font-size: 12px; }
 .extension-error > span { min-width: 0; flex: 1; }
+.extension-loading { min-height: 48px; display: flex; align-items: center; gap: 10px; margin-top: var(--kg-space-4); padding: 8px 11px; border: 1px solid var(--kg-info-border); border-radius: var(--kg-radius-sm); background: var(--kg-info-soft); color: var(--kg-info); }
+.extension-loading > span:last-child { display: grid; gap: 2px; }
+.extension-loading strong { color: var(--kg-text-secondary); font-size: 12px; font-weight: 550; }
+.extension-loading small { color: var(--kg-text-tertiary); font-size: 11px; }
 .skill-issues { display: flex; align-items: flex-start; gap: 8px; margin-top: var(--kg-space-3); padding: 9px 11px; border: 1px solid var(--kg-warning-border); border-radius: var(--kg-radius-sm); background: var(--kg-warning-soft); color: var(--kg-warning); font-size: 11px; }
 .skill-issues > div { display: grid; gap: 3px; }
 .skill-issues strong { color: var(--kg-text-primary); font-size: 12px; }
@@ -826,9 +926,19 @@ async function removeSkill(skill) {
 .instructions > strong { color: var(--kg-text-primary); font-size: 12px; }
 .instructions pre { max-height: 260px; margin: 7px 0 0; padding: 11px; overflow: auto; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-sm); background: var(--kg-bg-surface-2); color: var(--kg-text-secondary); font: 11px/1.6 var(--kg-font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .detail-safety { margin-top: 14px; }
+.mcp-policy-warning { margin: 10px 0 0; }
 .mcp-tool-list { display: grid; gap: 10px; max-height: 430px; margin-top: 12px; overflow-y: auto; }
 .mcp-tool-detail { padding: 10px 11px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-sm); background: var(--kg-bg-surface-1); }
 .mcp-tool-detail code { color: var(--kg-accent); font: 11px/1.4 var(--kg-font-mono); }
+.mcp-tool-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.mcp-tool-title code { min-width: 0; overflow-wrap: anywhere; }
+.mcp-tool-title :deep(.el-select) { width: 190px; flex: none; }
+.mcp-risk-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; margin-top: 7px; }
+.mcp-risk-summary > span { padding: 1px 6px; border-radius: var(--kg-radius-xs); font-size: 10px; }
+.mcp-risk-summary .risk-low { background: var(--kg-success-soft); color: var(--kg-success); }
+.mcp-risk-summary .risk-medium { background: var(--kg-warning-soft); color: var(--kg-warning); }
+.mcp-risk-summary .risk-high { background: var(--kg-danger-soft); color: var(--kg-danger); }
+.mcp-risk-summary small { color: var(--kg-text-tertiary); font-size: 10px; }
 .mcp-tool-detail p { margin: 5px 0; color: var(--kg-text-secondary); font-size: 11px; line-height: 1.5; }
 .mcp-tool-detail pre { max-height: 150px; margin: 6px 0 0; padding: 8px; overflow: auto; border-radius: var(--kg-radius-xs); background: var(--kg-bg-surface-2); color: var(--kg-text-tertiary); font: 10px/1.5 var(--kg-font-mono); }
 

@@ -35,14 +35,29 @@
         <h4>安全检查</h4>
         <template v-if="step.verification">
           <div class="check-row">
+            <span class="detail-label">规划自评</span>
+            <span class="check-result" :class="plannerRiskClass">{{ plannerRiskLabel }}</span>
+            <span class="check-reason">由规划模型提供，仅作为综合风险的一项输入</span>
+          </div>
+          <div v-if="step.verification.toolRisk" class="check-row">
+            <span class="detail-label">工具基线</span>
+            <span class="check-result" :class="toolRiskView.tone">{{ toolRiskView.label }}</span>
+            <span class="check-reason">{{ toolRiskView.reason }}</span>
+          </div>
+          <div class="check-row">
             <span class="detail-label">规则检查</span>
             <span class="check-result" :class="ruleClass">{{ ruleLabel }}</span>
             <span class="check-reason">{{ step.verification.rule.reason }}</span>
           </div>
           <div class="check-row">
-            <span class="detail-label">模型复核</span>
+            <span class="detail-label">Reviewer</span>
             <span class="check-result" :class="reviewClass">{{ reviewLabel }}</span>
             <span class="check-reason">{{ step.verification.review.reason }}</span>
+          </div>
+          <div class="check-row">
+            <span class="detail-label">最终风险</span>
+            <span class="check-result" :class="finalRiskClass">{{ riskLabel }}</span>
+            <span class="check-reason">综合工具基线、规则、Reviewer 与规划自评后确定</span>
           </div>
           <div class="check-row">
             <span class="detail-label">处理方式</span>
@@ -52,7 +67,7 @@
         </template>
         <div v-else class="check-pending">
           <span class="node-spinner" aria-hidden="true"></span>
-          <span>正在检查操作风险…</span>
+          <span>正在进行安全检查…</span>
         </div>
       </section>
 
@@ -69,6 +84,62 @@
   </article>
 </template>
 
+<script>
+const RISK_LABELS = Object.freeze({
+  low: '低风险',
+  medium: '中风险',
+  high: '高风险',
+})
+
+export function riskLabelFor(level) {
+  return RISK_LABELS[level] || '待检查'
+}
+
+export function riskToneFor(level) {
+  return ({ low: 'success', medium: 'warning', high: 'danger' })[level] || 'info'
+}
+
+export function effectiveRiskForStep(step = {}) {
+  return step.verification?.decision?.risk || step.risk || 'low'
+}
+
+export function rulePresentation(rule = {}) {
+  if (rule.decision === 'allow') return { label: '通过', tone: 'success' }
+  if (rule.decision === 'deny' && rule.hard === false) {
+    return { label: '需授权', tone: 'warning' }
+  }
+  if (rule.decision === 'deny') return { label: '未通过', tone: 'danger' }
+  if (rule.decision === 'review') return { label: '交由复核', tone: 'info' }
+  return { label: '待检查', tone: 'info' }
+}
+
+export function reviewerPresentation(review = {}) {
+  const passed = review.safe === true && review.matches_intent === true
+  const risk = riskLabelFor(review.risk)
+  return {
+    label: `${passed ? '通过' : '告警'} · ${risk}`,
+    tone: passed ? riskToneFor(review.risk) : 'danger',
+  }
+}
+
+export function toolRiskPresentation(toolRisk = {}) {
+  const level = toolRisk.baseline || 'high'
+  const source = toolRisk.source || 'platform_default'
+  const reasons = {
+    administrator: '管理员按当前工具定义设置；定义变化后该设置会自动失效',
+    platform_default: toolRisk.custom
+      ? '第三方 MCP 未设置或设置已失效，平台默认按高风险处理'
+      : '工具未登记风险，平台默认按高风险处理',
+    registry: '由内置工具注册表定义',
+  }
+  return {
+    label: riskLabelFor(level),
+    tone: riskToneFor(level),
+    reason: reasons[source] || '由平台工具策略确定',
+  }
+}
+</script>
+
 <script setup>
 import { computed } from 'vue'
 import KgIcon from './KgIcon.vue'
@@ -82,15 +153,12 @@ const argsText = computed(() => {
   return entries.length ? JSON.stringify(step.args) : ''
 })
 
-const riskClass = computed(() => {
-  return step.verification?.decision.risk || step.risk || 'low'
-})
-
-const riskLabel = computed(() => {
-  return ({
-    low: '低风险', medium: '中风险', high: '高风险',
-  }[riskClass.value] || '待检查')
-})
+const riskClass = computed(() => effectiveRiskForStep(step))
+const riskLabel = computed(() => riskLabelFor(riskClass.value))
+const finalRiskClass = computed(() => riskToneFor(riskClass.value))
+const plannerRiskLabel = computed(() => riskLabelFor(step.risk))
+const plannerRiskClass = computed(() => riskToneFor(step.risk))
+const toolRiskView = computed(() => toolRiskPresentation(step.verification?.toolRisk))
 
 const isActive = computed(() => ['reviewing', 'running'].includes(step.status))
 const statusIcon = computed(() => {
@@ -102,10 +170,10 @@ const statusIcon = computed(() => {
 
 const statusText = computed(() => {
   switch (step.status) {
-    case 'queued': return '等待检查'
+    case 'queued': return '待安全检查'
     case 'reviewing': return '复核中'
     case 'ready': return '待执行'
-    case 'waiting': return '等待确认'
+    case 'waiting': return '需你确认'
     case 'running': return '执行中'
     case 'done': return step.autoAllowed ? '自动执行' : '已执行'
     case 'failed': return step.failureStage === 'planning' ? '工具无效' : '执行失败'
@@ -136,25 +204,16 @@ const errorText = computed(() => {
   return step.error.message || step.error.detail || '操作未能完成。'
 })
 
-const ruleLabel = computed(() => {
-  const decision = step.verification?.rule?.decision
-  if (decision === 'deny') return '未通过'
-  if (decision === 'allow') return '通过'
-  return '需复核'
-})
-const ruleClass = computed(() => (
-  step.verification?.rule?.decision === 'deny' ? 'danger'
-    : step.verification?.rule?.decision === 'allow' ? 'success' : 'info'
-))
+const ruleView = computed(() => rulePresentation(step.verification?.rule))
+const ruleLabel = computed(() => ruleView.value.label)
+const ruleClass = computed(() => ruleView.value.tone)
 
-const reviewLabel = computed(() => (
-  step.verification?.review?.safe && step.verification?.review?.matches_intent
-    ? '通过' : '未通过'
-))
-const reviewClass = computed(() => (reviewLabel.value === '通过' ? 'success' : 'danger'))
+const reviewView = computed(() => reviewerPresentation(step.verification?.review))
+const reviewLabel = computed(() => reviewView.value.label)
+const reviewClass = computed(() => reviewView.value.tone)
 
 const decisionLabel = computed(() => ({
-  auto: '自动执行', confirm: '需要确认', double_confirm: '再次确认', deny: '已阻止',
+  auto: '自动执行', confirm: '需要确认', double_confirm: '需要双重确认', deny: '已阻止',
 }[step.verification?.decision?.action] || '待确定'))
 const decisionClass = computed(() => ({
   auto: 'success', confirm: 'warning', double_confirm: 'danger', deny: 'danger',

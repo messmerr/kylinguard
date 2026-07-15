@@ -1,7 +1,11 @@
 import pytest
 
 from kylinguard.models import RuleDecision
-from kylinguard.rules import check_argv, check_command
+from kylinguard.rules import (
+    check_argv,
+    check_command,
+    parse_readonly_shell_sequence,
+)
 
 
 @pytest.mark.parametrize("cmd", [
@@ -59,6 +63,63 @@ def test_完整shell语法进入权限复核而非能力拒绝(cmd):
 ])
 def test_只读白名单放行(cmd):
     assert check_command(cmd).decision == RuleDecision.ALLOW
+
+
+@pytest.mark.parametrize(("command", "commands", "operators"), [
+    (
+        "ps aux && uptime",
+        (("ps", "aux"), ("uptime",)),
+        ("&&",),
+    ),
+    (
+        "grep 'a&b' report.txt || echo 'not found'",
+        (("grep", "a&b", "report.txt"), ("echo", "not found")),
+        ("||",),
+    ),
+    (
+        "pwd; free -m",
+        (("pwd",), ("free", "-m")),
+        (";",),
+    ),
+])
+def test_纯只读命令链可结构化为无shell批处理(
+    command, commands, operators,
+):
+    verdict = check_command(command)
+    sequence = parse_readonly_shell_sequence(command)
+
+    assert verdict.decision == RuleDecision.ALLOW
+    assert verdict.matched_rule == "readonly_shell_sequence"
+    assert sequence is not None
+    assert sequence.commands == commands
+    assert sequence.operators == operators
+
+
+@pytest.mark.parametrize("command", [
+    'echo "a&b"',
+    "echo 'a&b'",
+    r"echo a\&b",
+    "grep 'a|b' 'report(1).txt'",
+    "echo 'https://example.test/search?q=a&lang=zh'",
+])
+def test_引号或转义内元字符按字面argv放行(command):
+    verdict = check_command(command)
+    sequence = parse_readonly_shell_sequence(command)
+
+    assert verdict.decision == RuleDecision.ALLOW
+    assert sequence is not None
+    assert len(sequence.commands) == 1
+    assert sequence.operators == ()
+
+
+def test_引号内url_query不再冒充shell表达式但curl仍需权限():
+    verdict = check_command(
+        "curl 'https://example.test/search?q=a&lang=zh'"
+    )
+
+    assert verdict.decision == RuleDecision.DENY
+    assert verdict.matched_rule == "payload_executor"
+    assert verdict.hard is False
 
 
 @pytest.mark.parametrize("cmd", [
@@ -263,6 +324,43 @@ def test_管理员自定义规则要求显式权限但不伪装成shell沙箱():
 ])
 def test_shell展开不会被误判为可自动执行的简单只读命令(command):
     verdict = check_command(command)
-    assert verdict.decision == RuleDecision.DENY
+    assert verdict.decision == RuleDecision.REVIEW
     assert verdict.matched_rule == "shell_expression"
+    assert verdict.hard is False
+
+
+@pytest.mark.parametrize("command", [
+    "ps aux &",
+    "ps aux & uptime",
+    "ps aux | grep root",
+    "echo \"$HOME&suffix\"",
+    "echo https://example.test/search?q=a&lang=zh",
+])
+def test_后台管道展开及未引用url仍进入权限复核(command):
+    verdict = check_command(command)
+
+    assert verdict.decision == RuleDecision.REVIEW
+    assert verdict.matched_rule == "shell_expression"
+    assert verdict.hard is False
+    assert parse_readonly_shell_sequence(command) is None
+
+
+def test_复合命令必须每一段都证明为只读():
+    verdict = check_command("pwd && rm /tmp/old.txt")
+
+    assert verdict.decision == RuleDecision.DENY
+    assert verdict.matched_rule == "mutating_command"
+    assert parse_readonly_shell_sequence("pwd && rm /tmp/old.txt") is None
+
+
+@pytest.mark.parametrize("command", [
+    "pwd & rm /tmp/old.txt",
+    "pwd | rm /tmp/old.txt",
+    "pwd & echo ok ; curl https://example.test/payload",
+])
+def test_不支持改写的shell表达式仍保守识别危险后续段(command):
+    verdict = check_command(command)
+
+    assert verdict.decision == RuleDecision.DENY
+    assert verdict.matched_rule == "shell_dangerous_segment"
     assert verdict.hard is False

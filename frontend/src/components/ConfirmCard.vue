@@ -3,7 +3,7 @@
     <header class="confirm-head">
       <span class="confirm-icon"><KgIcon name="warning" :size="18" /></span>
       <div>
-        <h3>{{ isHigh ? '确认高风险操作' : '需要你的允许' }}</h3>
+        <h3>{{ headingText }}</h3>
         <p>{{ impactText }}</p>
       </div>
       <span class="risk-label">{{ riskLabel }}</span>
@@ -35,9 +35,19 @@
     </div>
 
     <footer class="confirm-actions">
-      <span class="audit-note">你的选择会写入审计记录</span>
+      <span class="audit-note" role="status">
+        <template v-if="resolving">
+          <span class="kg-spinner" aria-hidden="true"></span>正在提交你的选择…
+        </template>
+        <template v-else>{{ auditNote }}</template>
+      </span>
       <div class="action-buttons">
-        <el-button size="small" :disabled="resolving" @click="act('deny')">不允许</el-button>
+        <el-button
+          size="small"
+          :loading="resolving === 'deny'"
+          :disabled="Boolean(resolving)"
+          @click="act('deny')"
+        >不允许</el-button>
         <el-button
           :type="isHigh ? 'danger' : 'warning'"
           size="small"
@@ -51,7 +61,12 @@
           :disabled="Boolean(resolving)"
           @command="act"
         >
-          <el-button size="small" :disabled="Boolean(resolving)" aria-label="更多授权方式">
+          <el-button
+            size="small"
+            :loading="Boolean(resolving) && !['deny', 'allow_once'].includes(resolving)"
+            :disabled="Boolean(resolving)"
+            aria-label="更多授权方式"
+          >
             更多<KgIcon name="chevron" :size="11" class="more-chevron" />
           </el-button>
           <template #dropdown>
@@ -74,6 +89,59 @@
   </section>
 </template>
 
+<script>
+const CARD_RISK_LABELS = Object.freeze({
+  low: '低风险',
+  medium: '中风险',
+  high: '高风险',
+})
+
+export function effectiveRiskForCard(card = {}) {
+  const decision = card.decision
+  if (decision && typeof decision === 'object') {
+    if (CARD_RISK_LABELS[decision.risk]) return decision.risk
+    if (decision.action === 'double_confirm' || decision.action === 'deny') return 'high'
+    if (decision.action === 'confirm') return 'medium'
+    if (decision.action === 'auto') return 'low'
+    return 'medium'
+  }
+  return CARD_RISK_LABELS[card.step?.risk] ? card.step.risk : 'medium'
+}
+
+export function isHighRiskCard(card = {}) {
+  const decision = card.decision
+  if (decision && typeof decision === 'object') {
+    return decision.action === 'double_confirm' || decision.risk === 'high'
+  }
+  return card.step?.risk === 'high'
+}
+
+export function riskLabelForCard(card = {}) {
+  return CARD_RISK_LABELS[effectiveRiskForCard(card)] || '需授权'
+}
+
+export function confirmationChoicesForCard(card = {}, hasTarget = false) {
+  const raw = Array.isArray(card.choices) && card.choices.length
+    ? card.choices
+    : [
+      { id: 'allow_once', label: '仅允许这一步' },
+      { id: 'allow_session', label: '本次会话允许同类操作' },
+      ...(hasTarget ? [{ id: 'trust_path', label: '信任这个目录' }] : []),
+    ]
+  const normalized = raw.map((choice) => {
+    if (typeof choice === 'string') return { id: choice, label: '', description: '' }
+    return {
+      id: choice.id || choice.value || choice.decision,
+      label: choice.label || '',
+      description: choice.description || '',
+    }
+  })
+  return isHighRiskCard(card)
+    ? normalized.filter((choice) => ['deny', 'allow_once'].includes(choice.id))
+    : normalized
+}
+</script>
+
 <script setup>
 import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -83,13 +151,15 @@ import { resolveConfirm } from '../composables/useChat.js'
 const props = defineProps({ card: { type: Object, required: true } })
 const resolving = ref('')
 
-const isHigh = computed(() => (
-  props.card.decision?.action === 'double_confirm'
-  || props.card.decision?.risk === 'high'
-  || props.card.step?.risk === 'high'
-))
+const isHigh = computed(() => isHighRiskCard(props.card))
 
-const riskLabel = computed(() => (isHigh.value ? '高风险' : '会修改系统'))
+const riskLabel = computed(() => riskLabelForCard(props.card))
+const headingText = computed(() => (
+  isHigh.value ? '高风险操作 · 第 1/2 步' : '需要你的允许'
+))
+const auditNote = computed(() => (
+  isHigh.value ? '高风险操作仅授权当前一步；你的选择会写入审计记录' : '你的选择会写入审计记录'
+))
 const operationSummary = computed(() => (
   props.card.operation?.summary
   || props.card.step?.purpose
@@ -126,12 +196,12 @@ const argsText = computed(() => JSON.stringify(
 ))
 
 const impactText = computed(() => {
-  if (isHigh.value) return '请确认目标和影响范围后再继续'
+  if (isHigh.value) return '请先核对目标和影响范围，再进行最终确认'
   if (targetPath.value) return '这一步会修改服务器上的内容'
   return '这一步会改变系统当前状态'
 })
 
-const primaryActionLabel = computed(() => {
+const operationActionLabel = computed(() => {
   const tool = String(props.card.step?.tool || props.card.operation?.tool || '')
   if (effects.value.includes('delete') || tool.includes('clean') || tool.includes('delete')) return '允许删除'
   if (tool.includes('restart')) return '允许重启'
@@ -140,24 +210,12 @@ const primaryActionLabel = computed(() => {
   if (effects.value.includes('modify') || effects.value.includes('write')) return '允许修改'
   return '仅允许这一步'
 })
+const primaryActionLabel = computed(() => (
+  isHigh.value ? '继续最终确认' : operationActionLabel.value
+))
 
 function normalizedChoices() {
-  const raw = props.card.choices
-  if (!Array.isArray(raw) || !raw.length) {
-    return [
-      { id: 'allow_once', label: '仅允许这一步' },
-      { id: 'allow_session', label: '本次会话允许同类操作' },
-      ...(targetPath.value ? [{ id: 'trust_path', label: '信任这个目录' }] : []),
-    ]
-  }
-  return raw.map((choice) => {
-    if (typeof choice === 'string') return { id: choice, label: '' }
-    return {
-      id: choice.id || choice.value || choice.decision,
-      label: choice.label || '',
-      description: choice.description || '',
-    }
-  })
+  return confirmationChoicesForCard(props.card, Boolean(targetPath.value))
 }
 
 const moreChoices = computed(() => normalizedChoices()
@@ -198,10 +256,10 @@ function decisionScope(decision) {
 
 async function confirmHighRisk() {
   await ElMessageBox.confirm(
-    `${operationSummary.value}${targetPath.value ? `\n目标：${targetPath.value}` : ''}`,
-    '确认执行高风险操作',
+    `${operationSummary.value}${targetPath.value ? `\n目标：${targetPath.value}` : ''}\n本次仅授权当前动作。`,
+    '高风险操作 · 第 2/2 步',
     {
-      confirmButtonText: primaryActionLabel.value,
+      confirmButtonText: operationActionLabel.value,
       cancelButtonText: '返回检查',
       type: 'warning',
       distinguishCancelAndClose: true,
@@ -320,7 +378,8 @@ async function act(decision) {
   border-top: 1px solid var(--kg-border-subtle);
 }
 
-.audit-note { color: var(--kg-text-tertiary); font-size: 11px; }
+.audit-note { display: inline-flex; align-items: center; gap: 6px; color: var(--kg-text-tertiary); font-size: 11px; }
+.audit-note .kg-spinner { width: 11px; height: 11px; border-width: 1px; }
 .action-buttons { display: flex; align-items: center; gap: 8px; flex: none; }
 .more-chevron { display: inline-block; margin-left: 5px; transform: rotate(90deg); }
 .choice-copy { display: grid; gap: 2px; padding: 3px 0; }

@@ -23,6 +23,14 @@ class ExtraPolicies:
     readonly: frozenset = frozenset()               # 命令名集合
     protected: tuple = ()                           # 路径前缀
 
+
+@dataclass(frozen=True)
+class ReadonlyShellSequence:
+    """可语义受限地改写为 ``run_batch`` 的简单只读命令链。"""
+
+    commands: tuple[tuple[str, ...], ...]
+    operators: tuple[str, ...] = ()
+
 # --- 内置灾难性模式：提升为高风险，但可由显式权限模式授权 ---
 _BLACKLIST: list[tuple[str, str]] = [
     (r"\bdd\b.*\bof=/dev/", "直接写块设备"),
@@ -36,6 +44,7 @@ _BLACKLIST: list[tuple[str, str]] = [
 _METACHARS = re.compile(
     r"[;&|`<>\r\n*?\[\]{}$~#()]"
 )
+_NON_LIST_METACHARS = frozenset("`<>\r\n*?[]{}$~#()")
 
 # --- 提权/子 shell：按高风险或需复核分类，不再永久禁用 ---
 _PRIVILEGE_ESCALATORS = {
@@ -241,6 +250,176 @@ def _is_system_mutation(argv: list[str]) -> bool:
     return False
 
 
+def _shell_review(signal: str, reason: str | None = None) -> RuleVerdict:
+    detail = reason or (
+        f"命令使用完整 shell 语法 {signal!r}，需要显式权限；"
+        "该语法本身仍由终端完整支持"
+    )
+    return RuleVerdict(
+        decision=RuleDecision.REVIEW,
+        reason=detail,
+        matched_rule="shell_expression",
+        hard=False,
+    )
+
+
+def _split_simple_shell_sequence(
+    text: str,
+) -> tuple[ReadonlyShellSequence | None, str | None]:
+    """按 Bash 引号/转义边界拆分简单的 ``;/&&/||`` 命令链。
+
+    这里只识别可被 ``run_batch`` 精确表达的列表运算符。后台 ``&``、管道、
+    重定向、展开等其余 shell 能力返回风险信号，绝不尝试降级执行。每一段
+    仍由 :func:`check_command` 的 argv 规则独立证明是否只读。
+    """
+    commands: list[tuple[str, ...]] = []
+    operators: list[str] = []
+    segment_start = 0
+    quote = ""
+    index = 0
+
+    def append_segment(end: int, operator: str | None = None) -> bool:
+        raw = text[segment_start:end]
+        try:
+            values = shlex.split(raw)
+        except ValueError:
+            return False
+        if not values:
+            return False
+        commands.append(tuple(values))
+        if operator is not None:
+            operators.append(operator)
+        return True
+
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            index += 1
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = ""
+                index += 1
+                continue
+            if char == "\\":
+                if index + 1 < len(text):
+                    if text[index + 1] in "\r\n":
+                        return None, repr(text[index + 1])
+                    index += 2
+                else:
+                    index += 1
+                continue
+            # 单引号内全部按字面处理；双引号内仍会执行变量/命令替换。
+            if char in {"$", "`"}:
+                return None, char
+            index += 1
+            continue
+
+        if char == "\\":
+            if index + 1 < len(text):
+                if text[index + 1] in "\r\n":
+                    return None, repr(text[index + 1])
+                index += 2
+            else:
+                index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char in _NON_LIST_METACHARS:
+            return None, char
+
+        operator = ""
+        if text.startswith("&&", index):
+            operator = "&&"
+        elif text.startswith("||", index):
+            operator = "||"
+        elif char == ";":
+            operator = ";"
+        elif char in {"&", "|"}:
+            # 单个 & 是后台运算符；单个 | 是管道。run_batch 均无法等价表达。
+            return None, char
+
+        if operator:
+            if not append_segment(index, operator):
+                return None, operator
+            index += len(operator)
+            segment_start = index
+            continue
+        index += 1
+
+    if quote or not append_segment(len(text)):
+        return None, "未闭合引号或不完整命令列表"
+    if len(operators) != len(commands) - 1:
+        return None, "不完整命令列表"
+    return ReadonlyShellSequence(
+        commands=tuple(commands), operators=tuple(operators),
+    ), None
+
+
+def _sequence_verdicts(
+    sequence: ReadonlyShellSequence,
+    extra: ExtraPolicies | None,
+) -> tuple[RuleVerdict, ...]:
+    # ``_scan_shell_syntax=False`` 很关键：分段后的 argv 中引号内元字符已经是
+    # 确定的字面参数，不能再次被当成 shell 运算符。
+    return tuple(
+        check_command(
+            shlex.join(list(argv)), extra=extra, _scan_shell_syntax=False,
+        )
+        for argv in sequence.commands
+    )
+
+
+def _dangerous_shell_segment(
+    text: str, extra: ExtraPolicies | None,
+) -> RuleVerdict | None:
+    """保守检查不支持自动改写的 shell 表达式中是否藏有危险后续段。"""
+    try:
+        lexer = shlex.shlex(
+            text, posix=True, punctuation_chars="();<>|&",
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return None
+
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token and set(token) <= set("();<>|&"):
+            if ">" in token:
+                return RuleVerdict(
+                    decision=RuleDecision.DENY,
+                    reason="复合 shell 表达式包含输出重定向，需要高风险授权",
+                    matched_rule="shell_dangerous_segment",
+                    hard=False,
+                )
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+
+    for index, argv in enumerate(segments):
+        verdict = check_argv(argv, extra=extra)
+        if verdict.decision == RuleDecision.DENY:
+            return RuleVerdict(
+                decision=RuleDecision.DENY,
+                reason=(f"复合 shell 表达式第 {index + 1} 段包含高风险能力："
+                        f"{verdict.reason}"),
+                matched_rule="shell_dangerous_segment",
+                hard=False,
+            )
+    return None
+
+
 def check_command(
     command: str,
     extra: ExtraPolicies | None = None,
@@ -293,16 +472,99 @@ def check_command(
             "dangerous_command", hard=False,
         )
 
-    # ④ 完整 shell 程序不能靠首个 argv 证明只读。允许执行，但至少进入
-    #    Reviewer/权限层；这覆盖管道、重定向、变量、替换、串联和 heredoc。
-    m = _METACHARS.search(text) if _scan_shell_syntax else None
-    if m:
-        return _deny(
-            (f"命令使用完整 shell 语法 {m.group()!r}，"
-             "需要显式权限；该语法本身仍由终端完整支持"),
-            "shell_expression",
-            hard=False,
-        )
+    protected = _PROTECTED_PREFIXES + (extra.protected if extra else ())
+    writes = argv[0] in _WRITE_COMMANDS or (
+        argv[0] in _INPLACE_EDITORS
+        and any(t == "-i" or t.startswith("-i.") or t == "--in-place"
+                for t in argv[1:])
+    )
+    touches = any(arg.startswith(protected) for arg in argv[1:])
+    # 只读自动通道只信任固定系统 PATH 中的裸命令名。显式 /tmp/ps、./cat
+    # 或同名 symlink 不能因为 basename 命中白名单就获得自动执行资格。
+    builtin_whitelisted = (
+        not executable_has_path and _is_readonly_whitelisted(argv)
+    )
+    custom_declared_readonly = (
+        extra is not None and argv[0] in extra.readonly
+    )
+
+    # ④ 仅把能够无损改写为 run_batch 的简单只读命令链降权。词法扫描理解
+    #    Bash 的单/双引号与反斜杠边界，避免把参数里的 ``&``、URL query 等
+    #    字面内容误报为 shell 运算符。后台、管道、重定向与展开仍进入权限复核。
+    if _scan_shell_syntax:
+        sequence, shell_signal = _split_simple_shell_sequence(text)
+        if shell_signal is not None:
+            # shell 语法本身只是需复核信号，但首个命令已经能确定的提权、载荷、
+            # 写入或控制动作仍保留原有高风险分类，不能被一个元字符降成 REVIEW。
+            if argv[0] in _PRIVILEGE_ESCALATORS:
+                return _deny(
+                    f"{argv[0]!r} 会提权或启动二级 shell，需要高权限授权",
+                    "privilege_escalator", hard=False,
+                )
+            if argv[0] in _PAYLOAD_EXECUTORS:
+                return _deny(
+                    (f"{argv[0]!r} 可执行脚本、远端操作或二级命令，"
+                     "需要显式权限"),
+                    "payload_executor", hard=False,
+                )
+            if writes and touches:
+                return _deny(
+                    "疑似修改关键系统配置，需要显式高权限授权",
+                    "protected_path", hard=False,
+                )
+            if shell_signal == ">":
+                return _deny(
+                    "输出重定向会创建或覆盖内容，需要显式权限",
+                    "mutating_command", hard=False,
+                )
+            if writes:
+                return _deny(
+                    f"命令 {argv[0]!r} 可能修改文件，需要显式权限",
+                    "mutating_command", hard=False,
+                )
+            if (argv[0] in _CONTROL_COMMANDS
+                    or _is_systemctl_mutation(argv)
+                    or _is_system_mutation(argv)):
+                return _deny(
+                    f"命令 {argv[0]!r} 会控制系统或进程，需要高权限授权",
+                    "control_command", hard=False,
+                )
+            if shell_signal in {"&", "|"}:
+                dangerous_segment = _dangerous_shell_segment(text, extra)
+                if dangerous_segment is not None:
+                    return dangerous_segment
+            return _shell_review(shell_signal)
+        if sequence is not None and sequence.operators:
+            verdicts = _sequence_verdicts(sequence, extra)
+            constrained = next(
+                (verdict for verdict in verdicts
+                 if verdict.decision == RuleDecision.DENY),
+                None,
+            )
+            if constrained is not None:
+                index = verdicts.index(constrained) + 1
+                return constrained.model_copy(update={
+                    "reason": f"复合命令第 {index} 段需要权限：{constrained.reason}",
+                })
+            review = next(
+                (verdict for verdict in verdicts
+                 if verdict.decision == RuleDecision.REVIEW),
+                None,
+            )
+            if review is not None:
+                index = verdicts.index(review) + 1
+                return RuleVerdict(
+                    decision=RuleDecision.REVIEW,
+                    reason=f"复合命令第 {index} 段无法证明只读：{review.reason}",
+                    matched_rule=review.matched_rule or "shell_expression",
+                    hard=False,
+                )
+            return RuleVerdict(
+                decision=RuleDecision.ALLOW,
+                reason="复合命令每一段均命中只读白名单，可改用无 shell 批处理",
+                matched_rule="readonly_shell_sequence",
+                hard=False,
+            )
 
     # ⑤ 提权/子 shell 是高风险能力，但不是永久禁用的能力。
     if argv[0] in _PRIVILEGE_ESCALATORS:
@@ -320,21 +582,6 @@ def check_command(
         )
 
     # ⑤ 保护路径写操作：安全红线（自定义保护路径合并）
-    protected = _PROTECTED_PREFIXES + (extra.protected if extra else ())
-    writes = argv[0] in _WRITE_COMMANDS or (
-        argv[0] in _INPLACE_EDITORS
-        and any(t == "-i" or t.startswith("-i.") or t == "--in-place"
-                for t in argv[1:])
-    )
-    touches = any(arg.startswith(protected) for arg in argv[1:])
-    # 只读自动通道只信任固定系统 PATH 中的裸命令名。显式 /tmp/ps、./cat
-    # 或同名 symlink 不能因为 basename 命中白名单就获得自动执行资格。
-    builtin_whitelisted = (
-        not executable_has_path and _is_readonly_whitelisted(argv)
-    )
-    custom_declared_readonly = (
-        extra is not None and argv[0] in extra.readonly
-    )
     if writes and touches:
         return _deny(
             "疑似修改关键系统配置，需要显式高权限授权",
@@ -394,6 +641,25 @@ def check_command(
         matched_rule="unknown_command",
         hard=False,
     )
+
+
+def parse_readonly_shell_sequence(
+    command: str,
+    extra: ExtraPolicies | None = None,
+) -> ReadonlyShellSequence | None:
+    """返回已被完整规则证明为只读、可交给 ``run_batch`` 的命令链。"""
+    if not isinstance(command, str):
+        return None
+    text = command.strip()
+    if not text or "\x00" in text:
+        return None
+    verdict = check_command(text, extra=extra)
+    if verdict.decision != RuleDecision.ALLOW:
+        return None
+    sequence, signal = _split_simple_shell_sequence(text)
+    if signal is not None or sequence is None:
+        return None
+    return sequence
 
 
 def check_argv(

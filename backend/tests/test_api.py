@@ -1,5 +1,7 @@
 import asyncio
 import json
+import stat
+from pathlib import Path
 
 import httpx
 import pytest
@@ -293,6 +295,41 @@ async def test_公开会话列表隐藏草稿但草稿仍可回放(app):
     assert [event["event_type"] for event in replayed.json()["events"]] == [
         "permission_changed",
     ]
+
+
+def test_全新数据目录启动时MCP凭据不会落入数据库旁(tmp_path, monkeypatch):
+    state_home = tmp_path / "state-home"
+    database_dir = tmp_path / "windows-mounted-workspace" / "data"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    settings = Settings(
+        _env_file=None, db_path=str(database_dir / "kylinguard.db"),
+    )
+
+    value = create_app(settings, with_tools=False)
+
+    actual = Path(settings.mcp_secrets_dir)
+    assert actual == value.state.mcp_config.secrets.directory
+    assert actual.is_relative_to(state_home)
+    assert actual.parent.name == "mcp-secrets"
+    assert stat.S_IMODE(actual.stat().st_mode) == 0o700
+    assert not (database_dir / "mcp-secrets").exists()
+
+
+def test_显式MCP凭据目录保持原路径用于部署持久卷(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state-home"))
+    explicit = tmp_path / "persistent-volume" / "mcp-secrets"
+    settings = Settings(
+        _env_file=None,
+        db_path=str(tmp_path / "data" / "kylinguard.db"),
+        mcp_secrets_dir=str(explicit),
+    )
+
+    value = create_app(settings, with_tools=False)
+
+    assert value.state.mcp_config.secrets.directory == explicit
+    assert Path(settings.mcp_secrets_dir) == explicit
+    assert stat.S_IMODE(explicit.stat().st_mode) == 0o700
+    assert not (tmp_path / "state-home" / "kylinguard" / "mcp-secrets").exists()
 
 
 async def test_未知会话回放404(app):

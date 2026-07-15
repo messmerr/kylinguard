@@ -99,6 +99,10 @@ class ToolMeta(BaseModel):
     needs_sudo: bool = False
     dynamic: bool = False  # True = run_command 类，风险随命令内容动态判定
     description: str = ""
+    custom: bool = False
+    # registry=内置声明；administrator=管理员按定义摘要设置；
+    # platform_default=第三方工具尚未分级，按最高风险收敛。
+    risk_source: str = "registry"
 
 
 class PlanStep(BaseModel):

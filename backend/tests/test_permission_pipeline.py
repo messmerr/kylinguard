@@ -12,6 +12,7 @@ from kylinguard.models import (
     PlannerOutput,
     ReviewVerdict,
     RiskLevel,
+    ToolMeta,
 )
 from kylinguard.permissions import PermissionRequests
 from kylinguard.pipeline import Confirmations, Pipeline
@@ -71,7 +72,7 @@ async def snapshot():
 
 
 def make_pipeline(tmp_path, outputs, mode=PermissionMode.ASK, roots=None,
-                  reviewer=None, settings=None, workspace_root=""):
+                  reviewer=None, settings=None, workspace_root="", tools=None):
     db = str(tmp_path / "kg.db")
     settings = settings or Settings(
         _env_file=None, db_path=db, confirm_timeout=2)
@@ -87,7 +88,7 @@ def make_pipeline(tmp_path, outputs, mode=PermissionMode.ASK, roots=None,
         updated_by="admin",
     )
     requests = PermissionRequests()
-    tools = Tools()
+    tools = tools or Tools()
     pipeline = Pipeline(
         settings=settings, audit=audit, tools=tools,
         planner=Planner(outputs), reviewer=reviewer or Reviewer(),
@@ -95,6 +96,26 @@ def make_pipeline(tmp_path, outputs, mode=PermissionMode.ASK, roots=None,
         session_store=sessions, permission_requests=requests,
     )
     return pipeline, tools, requests, sessions, audit
+
+
+class CustomRiskTools(Tools):
+    def __init__(self, risk=RiskLevel.LOW, source="administrator"):
+        super().__init__()
+        self.meta = ToolMeta(
+            server="external", tool="lookup", risk=risk,
+            custom=True, risk_source=source,
+            description="第三方查询工具",
+        )
+
+    def tool_security_context(self, qualified):
+        assert qualified == "external.lookup"
+        return self.meta, f"sha256:{self.meta.risk.value}"
+
+    async def call_checked(
+        self, server, tool, arguments, *, expected_identity="",
+    ):
+        assert expected_identity == f"sha256:{self.meta.risk.value}"
+        return await self.call(server, tool, arguments)
 
 
 def test_流水线kill_switch会把遗留完全访问视为确认模式(tmp_path):
@@ -127,6 +148,51 @@ async def collect(pipeline, on_event=None):
 
     await pipeline.handle("s1", "请在指定目录写一份文档", emit)
     return events
+
+
+async def test_管理员低风险mcp分级可在只读模式自动执行并解释来源(tmp_path):
+    tools = CustomRiskTools()
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path,
+        [plan("external.lookup", {"query": "status"}, risk="low",
+              purpose="读取第三方状态"), FINAL],
+        mode=PermissionMode.READ_ONLY,
+        tools=tools,
+    )
+
+    events = await collect(pipeline)
+    verification = next(
+        event for event in events if event["type"] == "verification"
+    )
+
+    assert verification["decision"]["action"] == "auto"
+    assert verification["tool_risk"] == {
+        "baseline": "low", "source": "administrator", "custom": True,
+    }
+    assert tools.calls == [("external", "lookup", {"query": "status"})]
+
+
+async def test_未分级mcp在只读模式保持平台默认高风险(tmp_path):
+    tools = CustomRiskTools(
+        risk=RiskLevel.HIGH, source="platform_default",
+    )
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path,
+        [plan("external.lookup", {"query": "status"}, risk="low",
+              purpose="读取第三方状态"), FINAL],
+        mode=PermissionMode.READ_ONLY,
+        tools=tools,
+    )
+
+    events = await collect(pipeline)
+    verification = next(
+        event for event in events if event["type"] == "verification"
+    )
+
+    assert verification["decision"]["action"] == "deny"
+    assert verification["decision"]["risk"] == "high"
+    assert verification["tool_risk"]["source"] == "platform_default"
+    assert tools.calls == []
 
 
 async def test_默认模式文件写入请求权限且允许后执行(tmp_path):
@@ -410,6 +476,139 @@ async def test_只读白名单命令自动改走无shell的精确argv(tmp_path):
     assert tools.calls == [("run_command", "run_batch", {
         "commands": [["pwd"]], "cwd": str(tmp_path),
     })]
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    (
+        "ps aux && uptime",
+        {
+            "commands": [["ps", "aux"], ["uptime"]],
+            "operators": ["&&"],
+        },
+    ),
+    (
+        "grep 'a&b' report.txt || echo 'not found'",
+        {
+            "commands": [
+                ["grep", "a&b", "report.txt"],
+                ["echo", "not found"],
+            ],
+            "operators": ["||"],
+        },
+    ),
+    (
+        "pwd; free -m",
+        {
+            "commands": [["pwd"], ["free", "-m"]],
+            "operators": [";"],
+        },
+    ),
+    (
+        "echo 'https://example.test/search?q=a&lang=zh'",
+        {
+            "commands": [[
+                "echo", "https://example.test/search?q=a&lang=zh",
+            ]],
+        },
+    ),
+])
+async def test_只读命令链与引号内元字符自动改写为run_batch(
+    tmp_path, command, expected,
+):
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_command", {
+            "command": command,
+        }, risk="low", purpose="读取系统状态"), FINAL],
+        mode=PermissionMode.READ_ONLY,
+    )
+
+    events = await collect(pipeline)
+
+    rewrite = next(event for event in events if event["type"] == "step_rewrite")
+    assert rewrite["outcome"] == "readonly_argv"
+    assert tools.calls == [("run_command", "run_batch", expected)]
+
+
+async def test_单个后台运算符仍请求权限且不会改写为run_batch(tmp_path):
+    pipeline, tools, requests, _, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_command", {
+            "command": "ps aux &",
+        }, risk="low", purpose="后台查看进程"), FINAL],
+        mode=PermissionMode.ASK,
+    )
+
+    async def deny(event):
+        if event["type"] != "permission_request":
+            return
+        requests.resolve(PermissionResolution(
+            request_id=event["request_id"],
+            decision=PermissionDecision.DENY,
+            operator="admin",
+            context_version=event["context_version"],
+        ))
+
+    events = await collect(pipeline, deny)
+    verification = next(
+        event for event in events if event["type"] == "verification"
+    )
+
+    assert verification["rule"]["decision"] == "review"
+    assert verification["rule"]["matched_rule"] == "shell_expression"
+    assert verification["decision"]["action"] == "confirm"
+    assert "permission_request" in {event["type"] for event in events}
+    assert "step_rewrite" not in {event["type"] for event in events}
+    assert tools.calls == []
+
+
+async def test_含写操作的命令链不会因首段只读而自动改写(tmp_path):
+    pipeline, tools, _, _, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_command", {
+            "command": "pwd && rm /tmp/old.txt",
+        }, risk="low", purpose="读取后清理"), FINAL],
+        mode=PermissionMode.READ_ONLY,
+    )
+
+    events = await collect(pipeline)
+    verification = next(
+        event for event in events if event["type"] == "verification"
+    )
+
+    assert verification["decision"]["action"] == "deny"
+    assert "step_rewrite" not in {event["type"] for event in events}
+    assert tools.calls == []
+
+
+async def test_后台运算符后的危险命令提升为高风险双确认(tmp_path):
+    pipeline, tools, requests, _, _ = make_pipeline(
+        tmp_path,
+        [plan("run_command.run_command", {
+            "command": "pwd & rm /tmp/old.txt",
+        }, risk="low", purpose="读取后删除"), FINAL],
+        mode=PermissionMode.ASK,
+    )
+
+    async def deny(event):
+        if event["type"] != "permission_request":
+            return
+        requests.resolve(PermissionResolution(
+            request_id=event["request_id"],
+            decision=PermissionDecision.DENY,
+            operator="admin",
+            context_version=event["context_version"],
+        ))
+
+    events = await collect(pipeline, deny)
+    verification = next(
+        event for event in events if event["type"] == "verification"
+    )
+
+    assert verification["rule"]["matched_rule"] == "shell_dangerous_segment"
+    assert verification["decision"]["risk"] == "high"
+    assert verification["decision"]["action"] == "double_confirm"
+    assert tools.calls == []
 
 
 @pytest.mark.parametrize("command", [

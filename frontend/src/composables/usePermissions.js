@@ -47,7 +47,7 @@ const DEFAULT_CONTEXT = Object.freeze({
   sessionId: '',
   mode: 'ask',
   version: 0,
-  executorIdentity: '等待服务器返回',
+  executorIdentity: '将在任务创建后确认',
   executorIdentitySource: 'unknown',
   workspaceRoot: '',
   defaultWorkspaceRoot: '',
@@ -70,6 +70,7 @@ const DEFAULT_CONTEXT = Object.freeze({
 export const permissionContext = reactive({ ...DEFAULT_CONTEXT })
 export const permissionGrants = ref([])
 export const permissionLoading = ref(false)
+export const permissionLoadError = ref('')
 export const permissionError = ref('')
 
 export const permissionMode = computed(() => permissionContext.mode)
@@ -308,6 +309,7 @@ export function beginNewPermissionSession() {
   permissionContext.draftTtlSeconds = null
   permissionContext.workspaceRoot = permissionContext.defaultWorkspaceRoot
   permissionContext.synced = false
+  permissionLoadError.value = ''
   permissionError.value = ''
   // 授权属于会话；新任务从干净的 ask 模式开始。
   permissionGrants.value = []
@@ -361,6 +363,7 @@ export async function loadPermissionContext(sessionId = permissionContext.sessio
   bindPermissionSession(sessionId)
   if (!permissionContext.sessionId) return { supported: false, reason: 'draft' }
   permissionLoading.value = true
+  permissionLoadError.value = ''
   permissionError.value = ''
   try {
     const response = await apiFetch(
@@ -389,7 +392,8 @@ export async function loadPermissionContext(sessionId = permissionContext.sessio
     }
     return { supported: true }
   } catch (error) {
-    permissionError.value = error.message || '无法读取权限设置'
+    permissionLoadError.value = error.message || '无法读取权限设置'
+    permissionError.value = permissionLoadError.value
     throw error
   } finally {
     permissionLoading.value = false
@@ -506,24 +510,29 @@ export async function setPermissionMode(mode, options = {}) {
   try {
     const result = await persistPermissionMode(normalized, options)
     if (!result.supported) {
-      // 首条消息会把草稿模式交给后端；旧后端仅对非 full 模式做视觉兼容。
+      // 只有新任务草稿可以留在前端并随首条消息提交。已有任务若后端
+      // 不支持该协议，不能仅改变页面状态，否则显示权限会与实际执行不一致。
       if (normalized === 'full_access') {
         throw new Error('当前后端尚未支持完全访问，未开启该模式')
       }
-      permissionContext.mode = normalized
-      permissionContext.expiresAt = null
-      if (normalized === 'trusted_workspace') {
-        permissionContext.trustedRoots = [...new Set(
-          (options.trustedRoots || trustedRoots.value).map(normalizePath),
-        )]
-        permissionContext.draftTtlSeconds = Math.min(
-          options.ttlSeconds ?? (options.durationMinutes || 30) * 60,
-          permissionContext.permissionMaxTtl,
-        )
-      } else {
-        permissionContext.draftTtlSeconds = null
+      if (result.reason === 'draft') {
+        permissionContext.mode = normalized
+        permissionContext.expiresAt = null
+        if (normalized === 'trusted_workspace') {
+          permissionContext.trustedRoots = [...new Set(
+            (options.trustedRoots || trustedRoots.value).map(normalizePath),
+          )]
+          permissionContext.draftTtlSeconds = Math.min(
+            options.ttlSeconds ?? (options.durationMinutes || 30) * 60,
+            permissionContext.permissionMaxTtl,
+          )
+        } else {
+          permissionContext.draftTtlSeconds = null
+        }
+        permissionContext.synced = false
       }
-      permissionContext.synced = false
+    } else {
+      permissionLoadError.value = ''
     }
     return result
   } catch (error) {
@@ -701,5 +710,6 @@ export function _resetPermissionStateForTests() {
   Object.assign(permissionContext, DEFAULT_CONTEXT)
   permissionGrants.value = []
   permissionLoading.value = false
+  permissionLoadError.value = ''
   permissionError.value = ''
 }

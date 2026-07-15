@@ -24,6 +24,34 @@ test('MCP 配置规范化时只读取敏感变量名称', () => {
   assert.equal(JSON.stringify(server).includes('must-not-enter-state'), false)
   assert.equal(server.toolCount, 1)
   assert.equal(server.cwd, '/workspace/tools')
+  assert.deepEqual(server.toolPolicies, {})
+})
+
+test('MCP 工具规范化保留有效风险来源与不受信任的自述注解', () => {
+  const server = normalizeMcpServer({
+    id: 'files',
+    tools: [{
+      name: 'files.read', description: 'read files',
+      input_schema: { type: 'object' },
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      definition_sha256: 'a'.repeat(64), effective_risk: 'low',
+      risk_source: 'administrator', policy_status: 'active',
+    }],
+    tool_policies: {
+      'files.read': { risk: 'low', definition_sha256: 'a'.repeat(64) },
+    },
+  })
+
+  assert.deepEqual(server.tools[0], {
+    name: 'files.read', description: 'read files',
+    inputSchema: { type: 'object' },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    definitionSha256: 'a'.repeat(64), effectiveRisk: 'low',
+    riskSource: 'administrator', policyStatus: 'active',
+  })
+  assert.deepEqual(server.toolPolicies, {
+    'files.read': { risk: 'low', definition_sha256: 'a'.repeat(64) },
+  })
 })
 
 test('MCP 表单区分普通与敏感环境变量且新建固定停用', () => {

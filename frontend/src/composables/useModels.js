@@ -29,6 +29,7 @@ export const sessionModel = reactive({
 })
 export const modelConfigLoading = ref(false)
 export const modelConfigSaving = ref(false)
+export const modelConfigLoadError = ref('')
 export const modelError = ref('')
 
 let draftDirty = false
@@ -184,6 +185,7 @@ function applyConfig(raw = {}) {
 
 export async function loadModelConfig() {
   modelConfigLoading.value = true
+  modelConfigLoadError.value = ''
   modelError.value = ''
   try {
     const response = await apiFetch('/api/llm/config')
@@ -196,7 +198,8 @@ export async function loadModelConfig() {
     applyConfig(body)
     return body
   } catch (error) {
-    modelError.value = error.message || '模型配置读取失败'
+    modelConfigLoadError.value = error.message || '模型配置读取失败'
+    modelError.value = modelConfigLoadError.value
     throw error
   } finally {
     modelConfigLoading.value = false
@@ -379,8 +382,10 @@ export async function updateModelDefaults({ agent, reviewer }) {
       error.status = response.status
       throw error
     }
-    if (body.providers || body.defaults) applyConfig(body)
-    else await loadModelConfig()
+    if (body.providers || body.defaults) {
+      applyConfig(body)
+      modelConfigLoadError.value = ''
+    } else await loadModelConfig()
     return body
   } catch (error) {
     modelError.value = error.message || '默认模型保存失败'
@@ -403,6 +408,7 @@ export function _resetModelStateForTests() {
   })
   modelConfigLoading.value = false
   modelConfigSaving.value = false
+  modelConfigLoadError.value = ''
   modelError.value = ''
   draftDirty = false
 }

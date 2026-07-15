@@ -11,11 +11,11 @@
       class="permission-trigger"
       :class="[`is-${permissionModeMeta.tone}`, { active: fullAccessActive }]"
       :disabled="disabled || changing"
-      :aria-label="`当前权限：${permissionModeMeta.label}`"
+      :aria-label="changing ? '正在更新权限' : `当前权限：${permissionModeMeta.label}`"
     >
       <span v-if="changing" class="kg-spinner" aria-hidden="true"></span>
       <KgIcon v-else :name="fullAccessActive ? 'warning' : 'shield'" :size="13" />
-      <span>权限：{{ permissionModeMeta.label }}</span>
+      <span>{{ changing ? '正在更新权限…' : `权限：${permissionModeMeta.label}` }}</span>
       <span v-if="fullAccessActive && permissionContext.grantsRoot" class="root-badge">ROOT</span>
       <KgIcon name="chevron" :size="11" class="select-chevron" />
     </button>
@@ -94,6 +94,10 @@ async function chooseMode(mode) {
     if (mode === 'trusted_workspace' && !trustedRoots.value.length) {
       const path = await requestTrustedRoot()
       result = await addTrustedRoot(path)
+      if (!result.supported && permissionContext.sessionId) {
+        ElMessage.warning('当前后端未保存可信目录，任务权限未更改')
+        return
+      }
     }
     if (permissionMode.value !== mode) {
       result = await setChatPermissionMode(mode, {
@@ -101,7 +105,7 @@ async function chooseMode(mode) {
       })
     }
     if (!result.supported && permissionContext.sessionId) {
-      ElMessage.warning('当前后端尚未保存该设置；新协议接入后会自动同步')
+      ElMessage.warning('当前后端未保存此设置，任务权限未更改')
     } else {
       ElMessage.success(mode === 'full_access'
         ? `完整执行能力已开启，将在 ${fullAccessDurationMinutes.value} 分钟后收回`

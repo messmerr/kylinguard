@@ -63,7 +63,12 @@ from kylinguard.mcp_client import (
     ToolManager,
     test_configured_stdio_server,
 )
-from kylinguard.mcp_config import MCPConfigError, MCPConfigStore, redact_mcp_error
+from kylinguard.mcp_config import (
+    MCP_TOOL_NAME_PATTERN,
+    MCPConfigError,
+    MCPConfigStore,
+    redact_mcp_error,
+)
 from kylinguard.models import (
     PermissionDecision,
     PermissionGrantScope,
@@ -464,6 +469,23 @@ class MCPEnabledRequest(MCPVersionRequest):
     enabled: bool
 
 
+class MCPToolPolicyValue(BaseModel):
+    risk: Literal["low", "medium", "high"]
+    definition_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+MCPToolPolicyName = Annotated[
+    str, Field(min_length=1, max_length=128,
+               pattern=rf"^{MCP_TOOL_NAME_PATTERN}$"),
+]
+
+
+class MCPToolPoliciesRequest(MCPVersionRequest):
+    policies: dict[MCPToolPolicyName, MCPToolPolicyValue] = Field(
+        default_factory=dict, max_length=256,
+    )
+
+
 class SkillRequest(BaseModel):
     id: str = Field(default="", max_length=64)
     name: str = Field(min_length=1, max_length=100)
@@ -509,7 +531,9 @@ def create_app(settings: Settings | None = None,
     data_root = Path(settings.db_path).expanduser().resolve().parent
     mcp_config = MCPConfigStore(
         settings.db_path,
-        secrets_dir=(settings.mcp_secrets_dir or data_root / "mcp-secrets"),
+        # 留空时由 MCPConfigStore 选择 XDG/用户状态目录。数据库在 WSL 的
+        # /mnt/* 上时，旁目录无法可靠表达 0700/0600，不能用于存放凭据。
+        secrets_dir=(settings.mcp_secrets_dir or None),
     )
     skills = SkillStore(
         user_dir=(settings.skills_dir or data_root / "skills"),
@@ -1068,6 +1092,19 @@ def create_app(settings: Settings | None = None,
                 for tool in server.get("tools", [])
                 if isinstance(tool, dict) and tool.get("name")
             ],
+            "tool_risks": {
+                name: policy.get("risk", "high")
+                for name, policy in server.get("tool_policies", {}).items()
+                if isinstance(policy, dict)
+            },
+            "tool_policies": {
+                name: {
+                    "risk": policy.get("risk", "high"),
+                    "definition_sha256": policy.get("definition_sha256", ""),
+                }
+                for name, policy in server.get("tool_policies", {}).items()
+                if isinstance(policy, dict)
+            },
         }
 
     def permission_expiry(mode: PermissionMode, ttl_seconds: int | None) -> float | None:
@@ -1266,6 +1303,38 @@ def create_app(settings: Settings | None = None,
             tools=[tool["name"] for tool in result["tools"]],
         )
         return {**result, "runtime": runtime}
+
+    @app.put("/api/extensions/mcp/{server_id}/tool-policies")
+    async def set_mcp_tool_policies(
+        server_id: str, req: MCPToolPoliciesRequest,
+        user: str = Depends(local_operator),
+    ):
+        policies = {
+            name: value.model_dump(mode="json")
+            for name, value in req.policies.items()
+        }
+        audit_extension(
+            "mcp_tool_policies_update_requested", user,
+            server_id=server_id,
+            expected_version=req.version,
+            tool_risks={name: value["risk"]
+                        for name, value in policies.items()},
+            tool_policies=policies,
+        )
+        try:
+            with app.state.audit.serialized():
+                server = app.state.mcp_config.set_tool_policies(
+                    server_id,
+                    expected_version=req.version,
+                    policies=policies,
+                    updated_by=user,
+                    audit=transactional_extension_audit(
+                        "mcp_tool_policies_updated", user, mcp_audit_payload,
+                    ),
+                )
+        except MCPConfigError as exc:
+            raise mcp_http_error(exc) from exc
+        return {"server": server}
 
     @app.post("/api/extensions/mcp/{server_id}/enabled")
     async def set_mcp_server_enabled(

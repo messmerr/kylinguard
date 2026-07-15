@@ -138,6 +138,34 @@ test('从会话权限接口读取模式、执行身份与有效授权', async ()
   assert.equal(permissions.permissionGrants.value[0].label, '/srv/project/report.md')
 })
 
+test('已有任务遇到旧权限接口时不把未保存选择显示成已生效', async () => {
+  reset()
+  permissions.bindPermissionSession('legacy-session')
+  permissions.permissionContext.version = 1
+  fetchImpl = async () => new Response(null, { status: 404 })
+
+  const modeResult = await permissions.setPermissionMode('read_only')
+  const rootResult = await permissions.addTrustedRoot('/srv/legacy')
+
+  assert.deepEqual(modeResult, { supported: false, reason: 'legacy_backend' })
+  assert.equal(rootResult.supported, false)
+  assert.equal(rootResult.reason, 'legacy_backend')
+  assert.equal(permissions.permissionMode.value, 'ask')
+  assert.deepEqual(permissions.trustedRoots.value, [])
+})
+
+test('权限加载错误与权限修改错误使用独立展示状态', async () => {
+  reset()
+  fetchImpl = async () => Response.json({ detail: '权限服务不可用' }, { status: 500 })
+
+  await assert.rejects(
+    permissions.loadPermissionContext('session-load-error'),
+    /权限服务不可用/,
+  )
+
+  assert.equal(permissions.permissionLoadError.value, '权限服务不可用')
+})
+
 test('完全访问升级集中通过 permissions PUT 并携带时限', async () => {
   reset()
   permissions.bindPermissionSession('session-full')

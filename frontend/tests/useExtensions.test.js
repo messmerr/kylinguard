@@ -78,3 +78,22 @@ test('MCP 与 Skill 启停使用独立 enabled 端点并刷新列表', async () 
     expected_enabled: true,
   })
 })
+
+test('MCP 工具风险策略携带配置版本与工具定义摘要', async () => {
+  reset()
+  await extensions.loadExtensions()
+  requests.length = 0
+
+  const policies = {
+    'files.read': { risk: 'low', definition_sha256: 'b'.repeat(64) },
+  }
+  await extensions.setMcpToolPolicies('files', 4, policies)
+
+  assert.equal(requests[0].url, '/api/extensions/mcp/files/tool-policies')
+  assert.equal(requests[0].options.method, 'PUT')
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    version: 4,
+    policies,
+  })
+  assert.equal(requests.at(-1).url, '/api/extensions')
+})

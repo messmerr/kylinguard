@@ -68,11 +68,9 @@ async function request(url, options, fallback) {
 async function runAction(key, action) {
   if (extensionActions.has(key)) return null
   extensionActions.add(key)
-  extensionError.value = ''
   try {
     return await action()
   } catch (error) {
-    extensionError.value = error.message || '扩展操作失败'
     if (error.status === 409) await refreshAfterMutation()
     throw error
   } finally {
@@ -163,6 +161,18 @@ export function setMcpServerEnabled(id, enabled, version = 0) {
         ...(version > 0 ? { version } : {}),
       }),
     }, 'MCP 服务状态修改失败')
+    await refreshAfterMutation()
+    return body
+  })
+}
+
+export function setMcpToolPolicies(id, version, policies = {}) {
+  const encoded = encodeURIComponent(id)
+  return runAction(`mcp:policies:${id}`, async () => {
+    const body = await request(`/api/extensions/mcp/${encoded}/tool-policies`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version, policies }),
+    }, 'MCP 工具风险分级保存失败')
     await refreshAfterMutation()
     return body
   })

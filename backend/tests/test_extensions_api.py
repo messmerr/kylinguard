@@ -196,6 +196,144 @@ async def test_mcp终态审计失败与配置在同一事务回滚(app, monkeypa
     ]
 
 
+async def test_mcp工具风险分级绑定当前定义并进入扩展审计(app):
+    async with _client(app) as client:
+        created_response = await client.post(
+            "/api/extensions/mcp", json=_mcp_payload(),
+        )
+        created = created_response.json()["server"]
+        app.state.mcp_config.record_test(
+            "demo_mcp",
+            ok=True,
+            expected_version=created["version"],
+            tools=[{
+                "name": "lookup",
+                "description": "只读查询",
+                "input_schema": {"type": "object", "properties": {}},
+                "annotations": {
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
+                },
+            }],
+        )
+        listed = await client.get("/api/extensions")
+        tool = listed.json()["mcp_servers"][0]["tools"][0]
+        assert tool["effective_risk"] == "high"
+        assert tool["risk_source"] == "platform_default"
+        assert tool["annotations"]["readOnlyHint"] is True
+
+        saved = await client.put(
+            "/api/extensions/mcp/demo_mcp/tool-policies",
+            json={
+                "version": created["version"],
+                "policies": {"lookup": {
+                    "risk": "low",
+                    "definition_sha256": tool["definition_sha256"],
+                }},
+            },
+        )
+        assert saved.status_code == 200
+        effective = saved.json()["server"]["tools"][0]
+        assert effective["effective_risk"] == "low"
+        assert effective["risk_source"] == "administrator"
+        assert effective["policy_status"] == "active"
+
+        app.state.mcp_config.record_test(
+            "demo_mcp",
+            ok=True,
+            expected_version=saved.json()["server"]["version"],
+            tools=[{
+                "name": "lookup",
+                "description": "定义发生变化",
+                "input_schema": {"type": "object", "properties": {}},
+            }],
+        )
+        stale = await client.get("/api/extensions")
+        stale_tool = stale.json()["mcp_servers"][0]["tools"][0]
+        assert stale_tool["effective_risk"] == "high"
+        assert stale_tool["policy_status"] == "stale"
+
+        conflict = await client.put(
+            "/api/extensions/mcp/demo_mcp/tool-policies",
+            json={
+                "version": saved.json()["server"]["version"],
+                "policies": {"lookup": {
+                    "risk": "low",
+                    "definition_sha256": tool["definition_sha256"],
+                }},
+            },
+        )
+        assert conflict.status_code == 409
+
+    event_types = [event["event_type"] for event in
+                   app.state.audit.events("__extensions__")]
+    assert "mcp_tool_policies_update_requested" in event_types
+    assert "mcp_tool_policies_updated" in event_types
+    terminal = next(
+        event for event in app.state.audit.events("__extensions__")
+        if event["event_type"] == "mcp_tool_policies_updated"
+    )
+    assert terminal["payload"]["tool_policies"] == {"lookup": {
+        "risk": "low",
+        "definition_sha256": tool["definition_sha256"],
+    }}
+
+
+async def test_mcp风险分级终态审计失败会回滚(app, monkeypatch):
+    created = app.state.mcp_config.create_server(
+        server_id="demo_mcp", name="演示 MCP", command="/bin/echo",
+    )
+    app.state.mcp_config.record_test(
+        "demo_mcp", ok=True, expected_version=created["version"],
+        tools=[{
+            "name": "lookup", "description": "只读查询",
+            "input_schema": {"type": "object", "properties": {}},
+        }],
+    )
+    tool = app.state.mcp_config.get_server("demo_mcp")["tools"][0]
+    real_append = app.state.audit.append
+
+    def fail_terminal(session_id, event_type, payload, **kwargs):
+        if event_type == "mcp_tool_policies_updated":
+            raise RuntimeError("terminal audit unavailable")
+        return real_append(session_id, event_type, payload, **kwargs)
+
+    monkeypatch.setattr(app.state.audit, "append", fail_terminal)
+    async with _client(app) as client:
+        with pytest.raises(RuntimeError, match="terminal audit unavailable"):
+            await client.put(
+                "/api/extensions/mcp/demo_mcp/tool-policies",
+                json={
+                    "version": created["version"],
+                    "policies": {"lookup": {
+                        "risk": "low",
+                        "definition_sha256": tool["definition_sha256"],
+                    }},
+                },
+            )
+
+    current = app.state.mcp_config.get_server("demo_mcp")
+    assert current["version"] == created["version"]
+    assert current["tool_policies"] == {}
+
+
+async def test_mcp风险策略在写入审计前拒绝非法工具名(app):
+    before = len(app.state.audit.events("__extensions__"))
+    async with _client(app) as client:
+        response = await client.put(
+            "/api/extensions/mcp/demo_mcp/tool-policies",
+            json={
+                "version": 1,
+                "policies": {"x" * 10_000: {
+                    "risk": "low", "definition_sha256": "a" * 64,
+                }},
+            },
+        )
+
+    assert response.status_code == 422
+    assert len(app.state.audit.events("__extensions__")) == before
+
+
 async def test_mcp保存不启动_秘密不回显_完整生命周期进入审计(
     app, monkeypatch,
 ):

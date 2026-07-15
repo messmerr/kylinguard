@@ -32,6 +32,7 @@ _ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 MCP_TOOL_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}"
 _TOOL_NAME_RE = re.compile(rf"^{MCP_TOOL_NAME_PATTERN}$")
 _SECRET_REF_RE = re.compile(r"^[a-f0-9]{32}$")
+_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _SECRET_KEY_RE = re.compile(
     r"(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|"
     r"ACCESS_?KEY|CREDENTIALS?|AUTHORIZATION)(?:$|_)",
@@ -61,6 +62,28 @@ _MAX_TOOLS = 256
 _MAX_TOOL_SCHEMA_BYTES = 128 * 1024
 _MAX_TOOLS_JSON_BYTES = 1024 * 1024
 _MAX_ERROR_CHARS = 2000
+_TOOL_ANNOTATION_KEYS = (
+    "title", "readOnlyHint", "destructiveHint", "idempotentHint",
+    "openWorldHint",
+)
+
+
+def default_mcp_secrets_directory(db_path: str | Path) -> Path:
+    """Return the per-database MCP secret directory outside the workspace.
+
+    Development databases commonly live on a Windows-mounted WSL path where
+    POSIX 0700/0600 modes cannot be represented reliably.  Secret files must
+    therefore default to the host user's state directory instead of following
+    the database directory.  The database digest keeps independent instances
+    from cleaning up each other's randomly named secret files.
+    """
+    state_home = os.environ.get("XDG_STATE_HOME", "").strip()
+    state_root = (Path(state_home).expanduser() if state_home
+                  else Path.home() / ".local" / "state")
+    namespace = hashlib.sha256(
+        str(Path(db_path).expanduser().resolve()).encode("utf-8")
+    ).hexdigest()[:16]
+    return state_root / "kylinguard" / "mcp-secrets" / namespace
 
 # 这些变量可以改变被执行代码、动态链接器或控制面的行为，不能由自定义
 # 服务覆盖。PATH/HOME 等基础变量由 safe_subprocess_env 固定提供。
@@ -86,6 +109,7 @@ CREATE TABLE IF NOT EXISTS custom_mcp_servers (
     version INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'untested',
     tools_json TEXT NOT NULL DEFAULT '[]',
+    tool_policies_json TEXT NOT NULL DEFAULT '{}',
     tool_count INTEGER NOT NULL DEFAULT 0,
     error TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
@@ -127,6 +151,9 @@ class MCPServerConfig:
     args: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
     secret_env: dict[str, str] = field(default_factory=dict, repr=False)
+    # 管理员策略保留其绑定的工具定义摘要；运行时必须在 MCP 实际启动并
+    # 重新列举工具后再验证摘要，不能只信任上一次测试保存的工具清单。
+    tool_policies: dict[str, dict[str, str]] = field(default_factory=dict)
     enabled: bool = False
     version: int = 1
 
@@ -289,6 +316,7 @@ def make_stdio_server_config(
     args: Sequence[str] | None = None,
     env: Mapping[str, str] | None = None,
     secret_env: Mapping[str, str] | None = None,
+    tool_policies: Mapping | None = None,
     enabled: bool = False,
     version: int = 1,
 ) -> MCPServerConfig:
@@ -304,6 +332,7 @@ def make_stdio_server_config(
         )
     if not isinstance(version, int) or version < 1:
         raise MCPConfigError("mcp_version_invalid", "MCP 配置版本无效。")
+    checked_tool_policies = validate_tool_policies(tool_policies)
     return MCPServerConfig(
         id=validate_server_id(server_id),
         name=validate_server_name(name),
@@ -312,6 +341,7 @@ def make_stdio_server_config(
         args=validate_args(args),
         env=regular,
         secret_env=secrets,
+        tool_policies=checked_tool_policies,
         enabled=bool(enabled),
         version=version,
     )
@@ -380,6 +410,55 @@ def _validate_schema_shape(schema: dict, *, depth: int = 0) -> None:
         _validate_schema_shape(items, depth=depth + 1)
 
 
+def normalize_tool_annotations(value) -> dict:
+    """只保留 MCP 标准 ToolAnnotations；它们仅供管理员参考。"""
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json", by_alias=True, exclude_none=True)
+    if not isinstance(value, Mapping):
+        raise MCPConfigError(
+            "mcp_tool_annotations_invalid", "MCP 工具 annotations 无效。")
+    result: dict[str, str | bool] = {}
+    title = value.get("title")
+    if title is not None:
+        if not isinstance(title, str):
+            raise MCPConfigError(
+                "mcp_tool_annotations_invalid", "MCP 工具 annotations.title 无效。")
+        cleaned_title = " ".join(title.split())
+        if len(cleaned_title) > 200 or _has_control(cleaned_title):
+            raise MCPConfigError(
+                "mcp_tool_annotations_invalid", "MCP 工具 annotations.title 无效。")
+        if cleaned_title:
+            result["title"] = cleaned_title
+    for key in _TOOL_ANNOTATION_KEYS[1:]:
+        raw = value.get(key)
+        if raw is None:
+            continue
+        if not isinstance(raw, bool):
+            raise MCPConfigError(
+                "mcp_tool_annotations_invalid",
+                f"MCP 工具 annotations.{key} 必须是布尔值。",
+            )
+        result[key] = raw
+    return result
+
+
+def tool_definition_sha256(tool: Mapping) -> str:
+    """摘要绑定名称、说明、参数结构与 MCP 自述，供管理员策略防漂移。"""
+    payload = {
+        "name": tool.get("name", ""),
+        "description": tool.get("description", ""),
+        "input_schema": tool.get("input_schema", {}),
+        "annotations": tool.get("annotations", {}),
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def normalize_discovered_tools(tools: Sequence[Mapping]) -> list[dict]:
     """限制第三方服务返回的工具元数据大小与可用字符集合。"""
     if isinstance(tools, (str, bytes)) or len(tools) > _MAX_TOOLS:
@@ -397,6 +476,7 @@ def normalize_discovered_tools(tools: Sequence[Mapping]) -> list[dict]:
             raise MCPConfigError("mcp_tool_name_duplicate", "MCP 服务返回了重复工具名。")
         names.add(name)
         description = " ".join(str(raw.get("description") or "").split())[:2000]
+        annotations = normalize_tool_annotations(raw.get("annotations"))
         schema = raw.get("input_schema", raw.get("inputSchema", {}))
         if not isinstance(schema, dict):
             raise MCPConfigError("mcp_tool_schema_invalid", "MCP 工具参数结构无效。")
@@ -411,14 +491,21 @@ def normalize_discovered_tools(tools: Sequence[Mapping]) -> list[dict]:
                 "mcp_tool_schema_invalid", "MCP 工具参数结构无法序列化。") from exc
         if len(encoded) > _MAX_TOOL_SCHEMA_BYTES:
             raise MCPConfigError("mcp_tool_schema_too_large", "MCP 工具参数结构过大。")
-        total += len(encoded) + len(name.encode()) + len(description.encode())
+        annotations_encoded = json.dumps(
+            annotations, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+        total += (len(encoded) + len(annotations_encoded)
+                  + len(name.encode()) + len(description.encode()))
         if total > _MAX_TOOLS_JSON_BYTES:
             raise MCPConfigError("mcp_tool_catalog_too_large", "MCP 工具列表总大小过大。")
-        result.append({
+        normalized = {
             "name": name,
             "description": description,
             "input_schema": json.loads(encoded),
-        })
+            "annotations": annotations,
+        }
+        normalized["definition_sha256"] = tool_definition_sha256(normalized)
+        result.append(normalized)
     return result
 
 
@@ -453,10 +540,70 @@ def redact_discovered_tool_secrets(
             "name": tool["name"],
             "description": scrub(tool["description"]),
             "input_schema": scrub(tool["input_schema"]),
+            "annotations": scrub(tool.get("annotations", {})),
         })
     # 清理后再验证一次，保证 schema 键或值的替换不会让
     # 下游格式化器接收到无效结构。
     return normalize_discovered_tools(cleaned)
+
+
+def validate_tool_policies(value: Mapping | None) -> dict[str, dict[str, str]]:
+    """校验管理员按工具定义设置的风险策略。"""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping) or len(value) > _MAX_TOOLS:
+        raise MCPConfigError(
+            "mcp_tool_policies_invalid", "MCP 工具风险策略无效或数量过多。")
+    result: dict[str, dict[str, str]] = {}
+    for raw_name, raw_policy in value.items():
+        if not isinstance(raw_name, str) or not _TOOL_NAME_RE.fullmatch(raw_name):
+            raise MCPConfigError(
+                "mcp_tool_name_invalid", "MCP 工具风险策略包含无效名称。")
+        if not isinstance(raw_policy, Mapping):
+            raise MCPConfigError(
+                "mcp_tool_policy_invalid", "MCP 工具风险策略格式无效。")
+        risk = raw_policy.get("risk")
+        digest = raw_policy.get("definition_sha256")
+        if risk not in {"low", "medium", "high"}:
+            raise MCPConfigError(
+                "mcp_tool_risk_invalid", "MCP 工具风险必须是 low、medium 或 high。")
+        if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+            raise MCPConfigError(
+                "mcp_tool_definition_invalid", "MCP 工具定义摘要无效。")
+        result[raw_name] = {
+            "risk": risk,
+            "definition_sha256": digest,
+        }
+    return result
+
+
+def apply_tool_policies(
+    tools: Sequence[Mapping], policies: Mapping | None,
+) -> list[dict]:
+    """计算有效风险；无策略或定义漂移时始终回退到 HIGH。"""
+    try:
+        checked_policies = validate_tool_policies(policies)
+    except MCPConfigError:
+        checked_policies = {}
+    result: list[dict] = []
+    for raw_tool in tools:
+        if not isinstance(raw_tool, Mapping):
+            continue
+        tool = dict(raw_tool)
+        name = tool.get("name")
+        digest = tool.get("definition_sha256")
+        policy = checked_policies.get(name) if isinstance(name, str) else None
+        active = bool(
+            policy and isinstance(digest, str)
+            and policy["definition_sha256"] == digest
+        )
+        tool["effective_risk"] = policy["risk"] if active else "high"
+        tool["risk_source"] = "administrator" if active else "platform_default"
+        tool["policy_status"] = (
+            "active" if active else "stale" if policy else "default"
+        )
+        result.append(tool)
+    return result
 
 
 class MCPSecretEnvironmentStore:
@@ -586,6 +733,11 @@ class MCPConfigStore:
                 "ALTER TABLE custom_mcp_servers "
                 "ADD COLUMN cwd TEXT NOT NULL DEFAULT ''"
             )
+        if "tool_policies_json" not in columns:
+            self._conn.execute(
+                "ALTER TABLE custom_mcp_servers "
+                "ADD COLUMN tool_policies_json TEXT NOT NULL DEFAULT '{}'"
+            )
         # 旧版本没有 cwd；迁移时保存命令目录的解析路径。配置即使已经因
         # 外部文件变化而失效，也不阻止控制面启动，runtime_config 会在真正
         # 启动代码前重新执行严格存在性与非符号链接校验。
@@ -603,13 +755,7 @@ class MCPConfigStore:
         self._conn.commit()
         self._lock = threading.RLock()
         if secrets_dir is None:
-            state_home = os.environ.get("XDG_STATE_HOME", "").strip()
-            state_root = (Path(state_home).expanduser() if state_home
-                          else Path.home() / ".local" / "state")
-            namespace = hashlib.sha256(
-                str(Path(db_path).expanduser().resolve()).encode("utf-8")
-            ).hexdigest()[:16]
-            secrets_dir = state_root / "kylinguard" / "mcp-secrets" / namespace
+            secrets_dir = default_mcp_secrets_directory(db_path)
         self.secrets = MCPSecretEnvironmentStore(secrets_dir)
         refs = {
             row[0] for row in self._conn.execute(
@@ -638,11 +784,25 @@ class MCPConfigStore:
             return fallback
         return parsed if isinstance(parsed, type(fallback)) else fallback
 
+    @classmethod
+    def _stored_tools(cls, value: str) -> list[dict]:
+        """重新规范化落库目录；旧数据补摘要，畸形/篡改数据 fail closed。"""
+        raw = cls._json_object(value, [])
+        try:
+            return normalize_discovered_tools(raw)
+        except MCPConfigError:
+            return []
+
     def _public_locked(self, row: sqlite3.Row) -> dict:
         args = self._json_object(row["args_json"], [])
         env = self._json_object(row["env_json"], {})
         secret_keys = self._json_object(row["secret_env_keys_json"], [])
-        tools = self._json_object(row["tools_json"], [])
+        tools = self._stored_tools(row["tools_json"])
+        raw_tool_policies = self._json_object(row["tool_policies_json"], {})
+        try:
+            tool_policies = validate_tool_policies(raw_tool_policies)
+        except MCPConfigError:
+            tool_policies = {}
         return {
             "id": row["id"],
             "name": row["name"],
@@ -655,8 +815,9 @@ class MCPConfigStore:
             "enabled": bool(row["enabled"]),
             "version": row["version"],
             "status": row["status"],
-            "tool_count": row["tool_count"],
-            "tools": tools,
+            "tool_count": len(tools),
+            "tools": apply_tool_policies(tools, tool_policies),
+            "tool_policies": tool_policies,
             "error": row["error"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -821,7 +982,8 @@ class MCPConfigStore:
                     "UPDATE custom_mcp_servers SET name=?, command=?, cwd=?, "
                     "args_json=?, env_json=?, secret_env_ref=?, "
                     "secret_env_keys_json=?, enabled=?, version=version+1, "
-                    "status='untested', tools_json='[]', tool_count=0, "
+                    "status='untested', tools_json='[]', tool_policies_json='{}', "
+                    "tool_count=0, "
                     "error='', updated_at=?, updated_by=?, last_tested_at=NULL, "
                     "last_test_ok=NULL WHERE id=?",
                     (config.name, config.command, config.cwd,
@@ -872,6 +1034,73 @@ class MCPConfigStore:
                 audit(result, self._conn)
             return result
 
+    def set_tool_policies(
+        self,
+        server_id: str,
+        *,
+        expected_version: int,
+        policies: Mapping | None,
+        updated_by: str = "",
+        audit=None,
+    ) -> dict:
+        """保存管理员分级；只接受当前已发现工具的精确定义摘要。"""
+        validate_server_id(server_id)
+        checked = validate_tool_policies(policies)
+        with self.transaction():
+            row = self._conn.execute(
+                "SELECT * FROM custom_mcp_servers WHERE id=?", (server_id,),
+            ).fetchone()
+            if row is None:
+                raise MCPConfigError(
+                    "mcp_server_not_found", "MCP 服务不存在。", status_code=404)
+            if row["version"] != expected_version:
+                raise MCPConfigVersionConflict()
+            if bool(row["enabled"]):
+                raise MCPConfigError(
+                    "mcp_disable_before_tool_policy",
+                    "请先停用 MCP 服务，再修改工具风险分级。",
+                    status_code=409,
+                )
+            if checked:
+                tools = self._stored_tools(row["tools_json"])
+                if row["status"] != "connected" or not tools:
+                    raise MCPConfigError(
+                        "mcp_tools_not_discovered",
+                        "请先测试 MCP 连接并获取工具清单，再设置风险分级。",
+                        status_code=409,
+                    )
+                definitions = {
+                    tool.get("name"): tool.get("definition_sha256")
+                    for tool in tools if isinstance(tool, dict)
+                }
+                for name, policy in checked.items():
+                    current_digest = definitions.get(name)
+                    if current_digest is None:
+                        raise MCPConfigError(
+                            "mcp_tool_not_found", f"MCP 工具 {name} 不存在。",
+                            status_code=404,
+                        )
+                    if current_digest != policy["definition_sha256"]:
+                        raise MCPConfigError(
+                            "mcp_tool_definition_conflict",
+                            f"MCP 工具 {name} 的定义已变化，请刷新后重新评估。",
+                            status_code=409,
+                        )
+            self._conn.execute(
+                "UPDATE custom_mcp_servers SET tool_policies_json=?, "
+                "version=version+1, updated_at=?, updated_by=? WHERE id=?",
+                (json.dumps(checked, ensure_ascii=False, sort_keys=True),
+                 time.time(), updated_by, server_id),
+            )
+            fresh = self._conn.execute(
+                "SELECT * FROM custom_mcp_servers WHERE id=?", (server_id,),
+            ).fetchone()
+            assert fresh is not None
+            result = self._public_locked(fresh)
+            if audit is not None:
+                audit(result, self._conn)
+            return result
+
     def delete_server(
         self, server_id: str, *, expected_version: int | None = None,
         audit=None,
@@ -907,12 +1136,19 @@ class MCPConfigStore:
             if expected_version is not None and row["version"] != expected_version:
                 raise MCPConfigVersionConflict()
             secrets = self.secrets.read(row["secret_env_ref"])
+            policies = self._json_object(row["tool_policies_json"], {})
+            try:
+                checked_policies = validate_tool_policies(policies)
+            except MCPConfigError:
+                # 离线篡改或旧格式策略一律失效；真正运行时保持最高风险。
+                checked_policies = {}
             return make_stdio_server_config(
                 server_id=row["id"], name=row["name"], command=row["command"],
                 cwd=row["cwd"],
                 args=self._json_object(row["args_json"], []),
                 env=self._json_object(row["env_json"], {}),
                 secret_env=secrets, enabled=bool(row["enabled"]),
+                tool_policies=checked_policies,
                 version=row["version"],
             )
 

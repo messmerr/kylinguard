@@ -27,7 +27,18 @@
             <h2 class="kg-section-title">API 提供商</h2>
             <p>密钥不会再次返回浏览器。测试只验证凭据与 /models 列表端点；具体模型和推理参数仍以任务调用为准。</p>
           </div>
-          <span class="section-count">{{ modelProviders.length }} 个连接</span>
+          <span class="section-count">{{ modelConfigLoading && !modelProviders.length
+            ? '正在同步' : modelConfigLoadError && !modelProviders.length
+              ? '状态未同步' : `${modelProviders.length} 个连接` }}</span>
+        </div>
+
+        <div v-if="modelConfigLoadError && modelProviders.length" class="load-error is-inline" role="alert">
+          <span class="empty-mark"><KgIcon name="warning" :size="19" /></span>
+          <div>
+            <strong>模型配置刷新未完成</strong>
+            <p>{{ modelConfigLoadError }}；当前显示最近一次成功读取的配置。</p>
+          </div>
+          <el-button @click="reloadModelConfiguration">重新加载</el-button>
         </div>
 
         <el-table v-if="modelProviders.length" :data="modelProviders" class="provider-table">
@@ -84,7 +95,18 @@
           </el-table-column>
         </el-table>
 
-        <div v-else-if="!modelConfigLoading" class="empty-providers">
+        <div v-else-if="modelConfigLoading" class="loading-line">
+          <span class="kg-spinner"></span>正在同步模型配置…
+        </div>
+        <div v-else-if="modelConfigLoadError" class="load-error" role="alert">
+          <span class="empty-mark"><KgIcon name="warning" :size="19" /></span>
+          <div>
+            <strong>模型配置暂时未加载</strong>
+            <p>{{ modelConfigLoadError }}</p>
+          </div>
+          <el-button @click="reloadModelConfiguration">重新加载</el-button>
+        </div>
+        <div v-else class="empty-providers">
           <span class="empty-mark"><KgIcon name="model" :size="19" /></span>
           <div>
             <strong>还没有模型连接</strong>
@@ -92,7 +114,6 @@
           </div>
           <el-button @click="openProviderDialog()">添加提供商</el-button>
         </div>
-        <div v-else class="loading-line"><span class="kg-spinner"></span>正在读取模型配置…</div>
       </section>
 
       <template v-if="modelOptions.length">
@@ -309,6 +330,7 @@ import {
   availableModelGroups,
   effortLabel,
   loadModelConfig,
+  modelConfigLoadError,
   modelConfigLoading,
   modelDefaults,
   modelProviders,
@@ -400,9 +422,11 @@ watch(() => [
   if (!defaultsAutoSaving.value) syncDefaultDraft()
 }, { immediate: true })
 
-onMounted(() => loadModelConfig().catch((error) => {
-  ElMessage.error(error.message || '模型配置读取失败')
-}))
+function reloadModelConfiguration() {
+  return loadModelConfig().catch(() => {})
+}
+
+onMounted(reloadModelConfiguration)
 
 function adapterLabel(adapter) {
   return ({
@@ -854,6 +878,12 @@ function originChanged() {
 .row-actions { display: flex; justify-content: flex-end; gap: 0; white-space: nowrap; }
 .row-actions :deep(.el-button + .el-button) { margin-left: 0; }
 .empty-providers { min-height: 92px; display: flex; align-items: center; gap: 13px; padding: 15px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-1); }
+.load-error { min-height: 92px; display: flex; align-items: center; gap: 13px; padding: 15px; border: 1px solid var(--kg-warning-border); border-radius: var(--kg-radius-md); background: var(--kg-warning-soft); }
+.load-error > div { min-width: 0; flex: 1; }
+.load-error .empty-mark { color: var(--kg-warning); }
+.load-error strong { color: var(--kg-text-primary); font-size: 13px; font-weight: 550; }
+.load-error p { margin: 3px 0 0; color: var(--kg-text-secondary); font-size: 12px; }
+.load-error.is-inline { min-height: 58px; margin-bottom: var(--kg-space-3); padding-block: 9px; }
 .empty-mark { width: 38px; height: 38px; display: grid; flex: none; place-items: center; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); color: var(--kg-text-tertiary); }
 .empty-providers > div { min-width: 0; flex: 1; }
 .empty-providers strong { color: var(--kg-text-primary); font-size: 13px; font-weight: 550; }

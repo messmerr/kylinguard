@@ -23,8 +23,13 @@
             <h2 class="kg-section-title">Agent 权限</h2>
             <p>降低权限会立即阻止尚未通过执行前检查的操作；已经开始的系统调用无法回滚。</p>
           </div>
-          <span class="sync-state" :class="{ synced: permissionContext.synced }">
-            {{ permissionContext.synced ? '已与服务器同步' : activeId ? '等待服务器支持' : '新任务默认设置' }}
+          <span
+            class="sync-state"
+            :class="{ synced: permissionContext.synced, loading: permissionLoading, error: permissionLoadError }"
+            :title="permissionLoadError || ''"
+            role="status"
+          >
+            {{ permissionSyncText }}
           </span>
         </div>
 
@@ -360,7 +365,9 @@ import {
   executionIdentitySourceLabel,
   loadPermissionContext,
   permissionContext,
+  permissionLoadError,
   permissionGrants,
+  permissionLoading,
   permissionMode,
   permissionModeMeta,
   revokePermissionGrant,
@@ -382,6 +389,14 @@ const removingRootPath = ref('')
 const trustedRootInput = ref('')
 const trustedRootLifetime = ref('session')
 const policyTab = ref('access')
+
+const permissionSyncText = computed(() => {
+  if (permissionLoading.value) return '正在同步当前任务权限…'
+  if (permissionLoadError.value) return '权限同步失败'
+  if (permissionContext.synced) return '已与服务器同步'
+  if (activeId.value) return '当前任务权限尚未同步'
+  return '新任务设置将在创建时应用'
+})
 
 const activePermissionGrants = computed(() => permissionGrants.value.filter(
   (grant) => !grant.revoked,
@@ -453,7 +468,7 @@ async function choosePermissionMode(mode) {
         }
         : {})
     if (!result.supported && activeId.value) {
-      ElMessage.warning('当前后端尚未保存该设置')
+      ElMessage.warning('当前后端未保存此设置，任务权限未更改')
     } else {
       ElMessage.success(mode === 'full_access' ? '完整执行能力已开启' : '权限已更新')
     }
@@ -475,8 +490,15 @@ async function addRoot() {
   grantSaving.value = true
   try {
     const result = await addTrustedRoot(path, { lifetime: trustedRootLifetime.value })
-    trustedRootInput.value = ''
-    ElMessage.success(result.supported ? '可信目录已添加' : '目录已加入当前页面，等待后端同步')
+    if (result.supported) {
+      trustedRootInput.value = ''
+      ElMessage.success('可信目录已添加')
+    } else if (result.reason === 'draft') {
+      trustedRootInput.value = ''
+      ElMessage.success('已加入新任务草稿，将随首条消息提交')
+    } else {
+      ElMessage.warning('当前后端未保存可信目录，任务权限未更改')
+    }
   } catch (reason) {
     ElMessage.error(reason.message || '可信目录添加失败')
   } finally {
@@ -626,6 +648,8 @@ onMounted(() => {
   font-size: 10px;
 }
 .sync-state.synced { border-color: var(--kg-success-border); color: var(--kg-success); }
+.sync-state.loading { border-color: var(--kg-info-border); color: var(--kg-info); }
+.sync-state.error { border-color: var(--kg-danger-border); color: var(--kg-danger); }
 
 .mode-grid {
   display: grid;

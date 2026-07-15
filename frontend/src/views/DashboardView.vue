@@ -154,7 +154,7 @@
 
             <div v-else class="kg-empty details-empty">
               <KgIcon name="server" :size="22" />
-              <strong>详细状态加载中</strong>
+              <strong>正在汇总详细状态</strong>
             </div>
           </section>
         </el-tab-pane>

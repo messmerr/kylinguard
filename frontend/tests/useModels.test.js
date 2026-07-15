@@ -9,6 +9,7 @@ globalThis.localStorage = {
 }
 
 let configFixture = null
+let configStatus = 200
 let sessionGetFixture = null
 let sessionPutFixture = null
 let sessionPutStatus = 200
@@ -17,7 +18,7 @@ let pendingPut = null
 
 globalThis.fetch = async (url, options = {}) => {
   lastRequest = { url, options }
-  if (url === '/api/llm/config') return Response.json(configFixture)
+  if (url === '/api/llm/config') return Response.json(configFixture || {}, { status: configStatus })
   if (url.endsWith('/model') && options.method === 'PUT') {
     if (pendingPut) await pendingPut
     return Response.json(sessionPutFixture || {}, { status: sessionPutStatus })
@@ -60,6 +61,7 @@ function baseConfig() {
 function reset() {
   models._resetModelStateForTests()
   configFixture = baseConfig()
+  configStatus = 200
   sessionGetFixture = null
   sessionPutFixture = null
   sessionPutStatus = 200
@@ -82,6 +84,18 @@ test('读取提供商与默认值时规范化能力且不保留密钥', async ()
   assert.equal(models.modelProviders.value[0].allowInsecureHttp, false)
   assert.equal(JSON.stringify(models.modelProviders.value).includes('must-not-enter-state'), false)
   assert.equal(storageWrites.length, 0)
+})
+
+test('模型配置刷新失败时保留最近数据并单独记录加载错误', async () => {
+  reset()
+  await models.loadModelConfig()
+  configFixture = { detail: '上游暂时不可用' }
+  configStatus = 500
+
+  await assert.rejects(models.loadModelConfig(), /上游暂时不可用/)
+
+  assert.equal(models.modelProviders.value.length, 1)
+  assert.equal(models.modelConfigLoadError.value, '上游暂时不可用')
 })
 
 test('新任务草稿只发送有效模型组合，不支持的推理档位回退自动', async () => {

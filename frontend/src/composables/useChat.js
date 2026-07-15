@@ -189,7 +189,12 @@ export function handleEvent(ev) {
     case 'verification': {
       const step = stepsById[ev.step_id]
       if (!step) break
-      step.verification = { rule: ev.rule, review: ev.review, decision: ev.decision }
+      step.verification = {
+        rule: ev.rule,
+        review: ev.review,
+        decision: ev.decision,
+        toolRisk: ev.tool_risk || ev.toolRisk || null,
+      }
       if (ev.decision.action === 'deny') {
         step.status = 'denied'
         step.denyReason = ev.decision.reason
@@ -207,15 +212,18 @@ export function handleEvent(ev) {
     case 'capability_error': {
       const step = stepsById[ev.step_id]
       if (!step) break
-      const message = ev.message || (ev.code === 'unknown_tool'
-        ? '模型选择了不存在的工具，正在重新规划。'
+      const detail = ev.message || (ev.code === 'unknown_tool'
+        ? '模型选择的工具当前不可用。'
         : '该能力在当前上下文中无法继续执行。')
+      const message = ev.code === 'unknown_tool'
+        ? '所选工具当前不可用，系统正在调整方案。'
+        : detail
       step.status = 'failed'
       step.failureStage = 'planning'
       step.error = normalizeError({
         code: ev.code || 'capability_error',
         message,
-        detail: message,
+        detail,
         retryable: !ev.do_not_retry,
       }, message, { stage: 'planning' })
       step.expanded = true
@@ -1030,7 +1038,8 @@ function _buildReportPrompt() {
   const stepLines = steps.map(it => {
     const st = statusLabel[it.status] || it.status
     const out = it.output ? it.output.slice(0, 300) : '（无输出）'
-    return `- [${st}] **${it.tool}**：${it.purpose}（风险等级：${it.risk}）\n  执行输出：${out}`
+    const effectiveRisk = it.verification?.decision?.risk || it.risk
+    return `- [${st}] **${it.tool}**：${it.purpose}（风险等级：${effectiveRisk}）\n  执行输出：${out}`
   })
 
   const intentLines = intents.map(it => `- [策略拦截] ${it.decision?.reason || '（未知原因）'}`)

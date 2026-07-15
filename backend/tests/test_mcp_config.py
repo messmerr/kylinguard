@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from mcp.types import ServerNotification, ToolListChangedNotification
 
 import kylinguard.mcp_config as mcp_config_module
 from kylinguard.mcp_client import (
@@ -15,6 +16,8 @@ from kylinguard.mcp_client import (
     ToolCallError,
     ToolManager,
     _ManagedServer,
+    _is_tool_catalog_changed,
+    _verified_tool_risks,
     custom_server_parameters,
     test_configured_stdio_server as run_configured_stdio_test,
     test_stdio_server as run_stdio_test,
@@ -23,6 +26,8 @@ from kylinguard.mcp_config import (
     MCPConfigError,
     MCPConfigStore,
     MCPConfigVersionConflict,
+    MCPSecretEnvironmentStore,
+    default_mcp_secrets_directory,
     make_stdio_server_config,
     normalize_discovered_tools,
     redact_discovered_tool_secrets,
@@ -49,11 +54,49 @@ def _create(store, **overrides):
     return store.create_server(**values)
 
 
+def test_默认凭据目录使用用户状态目录并按数据库隔离(tmp_path, monkeypatch):
+    state_home = tmp_path / "state-home"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    first_db = tmp_path / "first.db"
+    second_db = tmp_path / "second.db"
+
+    first = MCPConfigStore(first_db)
+    second = MCPConfigStore(second_db)
+    try:
+        first_expected = default_mcp_secrets_directory(first_db)
+        second_expected = default_mcp_secrets_directory(second_db)
+        assert first.secrets.directory == first_expected
+        assert second.secrets.directory == second_expected
+        assert first_expected.parent.parent.parent == state_home
+        assert first_expected != second_expected
+        assert first_expected.parent.name == "mcp-secrets"
+        assert stat.S_IMODE(first_expected.stat().st_mode) == 0o700
+        assert not (first_db.parent / "mcp-secrets").exists()
+    finally:
+        first.close()
+        second.close()
+
+
+def test_权限无法收紧时仍拒绝不安全的MCP凭据目录(tmp_path, monkeypatch):
+    insecure = tmp_path / "drvfs-like-secrets"
+    insecure.mkdir()
+    insecure.chmod(0o777)
+    monkeypatch.setattr(mcp_config_module.os, "chmod", lambda *_args: None)
+
+    with pytest.raises(MCPConfigError) as caught:
+        MCPSecretEnvironmentStore(insecure)
+
+    assert caught.value.code == "mcp_secret_directory_permissions"
+
+
 def test_旧版数据库自动迁移并补齐cwd(tmp_path):
     db_path = tmp_path / "legacy.db"
-    legacy_schema = mcp_config_module._SCHEMA.replace(
-        "    cwd TEXT NOT NULL DEFAULT '',\n", "",
-    )
+    legacy_schema = (mcp_config_module._SCHEMA
+                     .replace("    cwd TEXT NOT NULL DEFAULT '',\n", "")
+                     .replace(
+                         "    tool_policies_json TEXT NOT NULL DEFAULT '{}',\n",
+                         "",
+                     ))
     connection = sqlite3.connect(db_path)
     connection.executescript(legacy_schema)
     connection.execute(
@@ -76,6 +119,7 @@ def test_旧版数据库自动迁移并补齐cwd(tmp_path):
         assert store.runtime_config("legacy_mcp").cwd == str(
             Path(sys.executable).parent.resolve()
         )
+        assert store.get_server("legacy_mcp")["tool_policies"] == {}
     finally:
         store.close()
 
@@ -352,6 +396,140 @@ def test_畸形第三方schema在进入目录前被拒绝():
         }])
 
 
+def test_mcp标准annotations只作为自述保留且进入定义摘要():
+    base = {
+        "name": "lookup",
+        "description": "查询外部数据",
+        "input_schema": {"type": "object", "properties": {}},
+        "annotations": {
+            "title": "只读查询",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
+    }
+    normalized = normalize_discovered_tools([base])[0]
+    assert normalized["annotations"] == base["annotations"]
+    assert len(normalized["definition_sha256"]) == 64
+
+    changed = normalize_discovered_tools([{
+        **base,
+        "annotations": {**base["annotations"], "openWorldHint": False},
+    }])[0]
+    assert changed["definition_sha256"] != normalized["definition_sha256"]
+
+    with pytest.raises(MCPConfigError, match="readOnlyHint"):
+        normalize_discovered_tools([{
+            **base, "annotations": {"readOnlyHint": "yes"},
+        }])
+
+
+def test_管理员风险分级绑定工具定义且漂移后回退最高风险(mcp_store):
+    created = _create(mcp_store)
+    tools = normalize_discovered_tools([{
+        "name": "lookup",
+        "description": "只读查询",
+        "input_schema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    }])
+    assert mcp_store.record_test(
+        "demo_mcp", ok=True, tools=tools,
+        expected_version=created["version"],
+    )
+    discovered = mcp_store.get_server("demo_mcp")["tools"][0]
+    assert discovered["effective_risk"] == "high"
+    assert discovered["risk_source"] == "platform_default"
+
+    configured = mcp_store.set_tool_policies(
+        "demo_mcp",
+        expected_version=created["version"],
+        policies={"lookup": {
+            "risk": "low",
+            "definition_sha256": discovered["definition_sha256"],
+        }},
+        updated_by="administrator",
+    )
+    effective = configured["tools"][0]
+    assert effective["effective_risk"] == "low"
+    assert effective["risk_source"] == "administrator"
+    assert effective["policy_status"] == "active"
+    assert mcp_store.runtime_config("demo_mcp").tool_policies == {
+        "lookup": {
+            "risk": "low",
+            "definition_sha256": discovered["definition_sha256"],
+        },
+    }
+
+    changed_tools = normalize_discovered_tools([{
+        "name": "lookup",
+        "description": "说明已经变化",
+        "input_schema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    }])
+    assert mcp_store.record_test(
+        "demo_mcp", ok=True, tools=changed_tools,
+        expected_version=configured["version"],
+    )
+    stale = mcp_store.get_server("demo_mcp")["tools"][0]
+    assert stale["effective_risk"] == "high"
+    assert stale["risk_source"] == "platform_default"
+    assert stale["policy_status"] == "stale"
+    # 运行时保留旧策略及其摘要，并在实际启动、重新 list_tools 后判定失效。
+    assert mcp_store.runtime_config("demo_mcp").tool_policies == {
+        "lookup": {
+            "risk": "low",
+            "definition_sha256": discovered["definition_sha256"],
+        },
+    }
+
+    with pytest.raises(MCPConfigError) as caught:
+        mcp_store.set_tool_policies(
+            "demo_mcp",
+            expected_version=configured["version"],
+            policies={"lookup": {
+                "risk": "low",
+                "definition_sha256": discovered["definition_sha256"],
+            }},
+        )
+    assert caught.value.code == "mcp_tool_definition_conflict"
+
+
+def test_停用服务即使工具目录丢失也能清空遗留风险策略(mcp_store):
+    created = _create(mcp_store)
+    tools = normalize_discovered_tools([{
+        "name": "lookup", "description": "只读查询", "input_schema": {},
+    }])
+    assert mcp_store.record_test(
+        "demo_mcp", ok=True, tools=tools,
+        expected_version=created["version"],
+    )
+    configured = mcp_store.set_tool_policies(
+        "demo_mcp", expected_version=created["version"], policies={
+            "lookup": {
+                "risk": "low",
+                "definition_sha256": tools[0]["definition_sha256"],
+            },
+        },
+    )
+    assert mcp_store.record_test(
+        "demo_mcp", ok=False, error="offline",
+        expected_version=configured["version"],
+    )
+
+    cleared = mcp_store.set_tool_policies(
+        "demo_mcp", expected_version=configured["version"], policies={},
+    )
+    assert cleared["tool_policies"] == {}
+    assert mcp_store.record_test(
+        "demo_mcp", ok=True, tools=tools,
+        expected_version=cleared["version"],
+    )
+    restored = mcp_store.get_server("demo_mcp")["tools"][0]
+    assert restored["effective_risk"] == "high"
+    assert restored["risk_source"] == "platform_default"
+
+
 def test_工具描述和schema不能回显该mcp的裸密密():
     cleaned = redact_discovered_tool_secrets([{
         "name": "lookup",
@@ -389,7 +567,12 @@ async def test_存量配置可测试并持久化工具发现(mcp_store):
     public = mcp_store.get_server("demo_mcp")
     assert public["status"] == "connected"
     assert public["tool_count"] == result["tool_count"]
-    assert public["tools"] == result["tools"]
+    assert [tool["name"] for tool in public["tools"]] == [
+        tool["name"] for tool in result["tools"]
+    ]
+    assert all(tool["effective_risk"] == "high" for tool in public["tools"])
+    assert all(tool["risk_source"] == "platform_default"
+               for tool in public["tools"])
 
 
 async def test_测试失败只暴露脱敏错误(tmp_path):
@@ -496,6 +679,123 @@ async def test_call_checked兼容只有替身session的测试双():
             "fake", "lookup", {}, expected_identity="sha256:stale",
         )
     await manager.stop()
+
+
+def test_管理员分级进入运行时元数据和工具身份():
+    handle = _ManagedServer(
+        name="external",
+        session=SimpleNamespace(),
+        tools=[{
+            "name": "lookup",
+            "description": "只读查询",
+            "input_schema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": True},
+            "definition_sha256": "a" * 64,
+        }],
+        custom=True,
+        config_version=3,
+        tool_risks={"lookup": "low"},
+    )
+    manager = ToolManager()
+    manager._handles["external"] = handle
+    manager._custom_ids.add("external")
+
+    meta = manager.tool_meta("external.lookup")
+    assert meta.risk.value == "low"
+    assert meta.risk_source == "administrator"
+    assert meta.custom is True
+    trusted_identity = manager.tool_identity("external.lookup")
+    context_meta, context_identity = manager.tool_security_context(
+        "external.lookup"
+    )
+    assert context_meta.risk.value == "low"
+    assert context_identity == trusted_identity
+
+    handle.tool_risks = {}
+    default_meta = manager.tool_meta("external.lookup")
+    assert default_meta.risk.value == "high"
+    assert default_meta.risk_source == "platform_default"
+    assert manager.tool_identity("external.lookup") != trusted_identity
+
+    missing_meta, missing_identity = manager.tool_security_context(
+        "external.missing"
+    )
+    assert missing_meta.risk.value == "high"
+    assert missing_identity == "unavailable:external.missing"
+
+    builtin = _ManagedServer(
+        name="sysinfo", session=SimpleNamespace(),
+        tools=[{"name": "future_tool", "description": "", "input_schema": {}}],
+        custom=False,
+    )
+    builtin_meta = manager._meta_for_handle(builtin, builtin.tools[0])
+    assert builtin_meta.risk.value == "high"
+    assert builtin_meta.custom is False
+    assert builtin_meta.risk_source == "platform_default"
+
+
+def test_管理员分级在运行实例再次绑定实际工具定义():
+    tested = normalize_discovered_tools([{
+        "name": "lookup", "description": "只读查询",
+        "input_schema": {"type": "object", "properties": {}},
+    }])[0]
+    policy = {"lookup": {
+        "risk": "low",
+        "definition_sha256": tested["definition_sha256"],
+    }}
+
+    assert _verified_tool_risks([tested], policy) == {"lookup": "low"}
+
+    runtime_changed = normalize_discovered_tools([{
+        "name": "lookup", "description": "启动后已更换实现",
+        "input_schema": {"type": "object", "properties": {}},
+    }])[0]
+    assert _verified_tool_risks([runtime_changed], policy) == {}
+
+
+async def test_mcp运行中通知工具目录变化会摘除路由并使旧授权失效():
+    class Session:
+        async def call_tool(self, _tool, _arguments):
+            return SimpleNamespace(content=[], isError=False)
+
+    tool = normalize_discovered_tools([{
+        "name": "lookup", "description": "只读查询", "input_schema": {},
+    }])[0]
+    handle = _ManagedServer(
+        name="external", session=Session(), tools=[tool], custom=True,
+        config_version=7, tool_risks={"lookup": "low"},
+    )
+    manager = ToolManager()
+    manager._handles["external"] = handle
+    manager._sessions["external"] = handle.session
+    manager._custom_ids.add("external")
+    manager._catalog_lines["external"] = manager._lines_for(handle)
+    manager._rebuild_catalog()
+    old_identity = manager.tool_identity("external.lookup")
+
+    # 等价于 ClientSession 收到 notifications/tools/list_changed 后的回调。
+    await manager._on_tools_changed(handle)
+
+    assert handle.catalog_stale is True
+    assert handle.tool_risks == {}
+    assert manager.has_tool("external.lookup") is False
+    assert manager.tool_identity("external.lookup") == ""
+    assert manager._tool_identity_for(handle, "lookup") != old_identity
+    assert manager._meta_for_handle(handle, tool).risk.value == "high"
+    with pytest.raises(ToolCallError, match="配置在规划或确认后已变更"):
+        await manager.call_checked(
+            "external", "lookup", {}, expected_identity=old_identity,
+        )
+    if handle.retirement_task is not None:
+        await handle.retirement_task
+
+
+def test_mcp_list_changed识别sdk的rootmodel通知包装():
+    wrapped = ServerNotification(root=ToolListChangedNotification())
+
+    assert _is_tool_catalog_changed(wrapped) is True
+    assert _is_tool_catalog_changed(ToolListChangedNotification()) is True
+    assert _is_tool_catalog_changed(SimpleNamespace(method="other")) is False
 
 
 async def test_detach_custom先摘除路由再后台等待在途调用():

@@ -557,7 +557,8 @@ test('未知工具在权限前标记为规划错误并允许模型重规划', as
   assert.equal(step.expanded, true)
   assert.equal(step.error.code, 'unknown_tool')
   assert.equal(step.error.retryable, true)
-  assert.match(step.error.message, /逐字复制/)
+  assert.equal(step.error.message, '所选工具当前不可用，系统正在调整方案。')
+  assert.match(step.error.detail, /逐字复制/)
 
   sse.event({ type: 'final_answer', answer: '已重新规划。', outcome: 'completed' })
   sse.event({ type: 'done' })
@@ -983,4 +984,24 @@ test('后端 permission_request/result 契约可生成并收起授权卡', () =>
   })
   assert.equal(card.hidden, true)
   assert.equal(chat.items.value.find((item) => item.kind === 'step').status, 'ready')
+})
+
+test('verification 保留工具基线风险及其来源用于权限解释', () => {
+  reset()
+  chat.handleEvent({ type: 'plan', thought: '读取第三方数据', steps: [{
+    step_id: 'mcp-step', tool: 'custom-files.read', arguments: {},
+    purpose: '读取数据', risk: 'low',
+  }] })
+  chat.handleEvent({
+    type: 'verification', step_id: 'mcp-step',
+    rule: { decision: 'allow', reason: '通过' },
+    review: { safe: true, matches_intent: true, risk: 'low', reason: '只读' },
+    decision: { action: 'auto', risk: 'low', reason: '允许自动执行' },
+    tool_risk: { baseline: 'low', source: 'administrator', custom: true },
+  })
+
+  const step = chat.items.value.find((item) => item.kind === 'step')
+  assert.deepEqual(step.verification.toolRisk, {
+    baseline: 'low', source: 'administrator', custom: true,
+  })
 })

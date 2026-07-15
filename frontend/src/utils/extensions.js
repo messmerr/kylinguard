@@ -7,7 +7,13 @@ function textList(value) {
 }
 
 function normalizeTool(raw) {
-  if (typeof raw === 'string') return { name: raw, description: '' }
+  if (typeof raw === 'string') return {
+    name: raw, description: '', inputSchema: {}, annotations: {},
+    definitionSha256: '', effectiveRisk: 'high', riskSource: 'platform_default',
+    policyStatus: 'default',
+  }
+  const annotations = raw?.annotations && typeof raw.annotations === 'object'
+    && !Array.isArray(raw.annotations) ? { ...raw.annotations } : {}
   return {
     name: text(raw?.name || raw?.id),
     description: text(raw?.description),
@@ -15,6 +21,12 @@ function normalizeTool(raw) {
       ? raw.input_schema
       : raw?.inputSchema && typeof raw.inputSchema === 'object'
         ? raw.inputSchema : {},
+    annotations,
+    definitionSha256: text(raw?.definition_sha256 ?? raw?.definitionSha256),
+    effectiveRisk: ['low', 'medium', 'high'].includes(raw?.effective_risk ?? raw?.effectiveRisk)
+      ? (raw.effective_risk ?? raw.effectiveRisk) : 'high',
+    riskSource: text(raw?.risk_source ?? raw?.riskSource) || 'platform_default',
+    policyStatus: text(raw?.policy_status ?? raw?.policyStatus) || 'default',
   }
 }
 
@@ -25,6 +37,8 @@ export function normalizeMcpServer(raw = {}) {
   const env = raw.env && typeof raw.env === 'object' && !Array.isArray(raw.env)
     ? Object.fromEntries(Object.entries(raw.env).map(([key, value]) => [key, String(value ?? '')]))
     : {}
+  const toolPolicies = raw.tool_policies && typeof raw.tool_policies === 'object'
+    && !Array.isArray(raw.tool_policies) ? { ...raw.tool_policies } : {}
   return {
     id: text(raw.id),
     name: text(raw.name) || text(raw.id) || '未命名 MCP 服务',
@@ -38,6 +52,7 @@ export function normalizeMcpServer(raw = {}) {
     toolCount: Number.isFinite(Number(raw.tool_count ?? raw.toolCount))
       ? Number(raw.tool_count ?? raw.toolCount) : tools.length,
     tools,
+    toolPolicies,
     error: text(raw.error),
     version: Number(raw.version) || 0,
     source: text(raw.source),

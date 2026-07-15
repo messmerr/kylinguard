@@ -10,7 +10,6 @@
 """
 import asyncio
 import json
-import shlex
 import time
 import uuid
 
@@ -40,7 +39,11 @@ from kylinguard.planner import (
     build_system_prompt,
 )
 from kylinguard.registry import get_meta
-from kylinguard.rules import check_argv, check_command
+from kylinguard.rules import (
+    check_argv,
+    check_command,
+    parse_readonly_shell_sequence,
+)
 from kylinguard.sanitization import canonical_fingerprint, redact_text, safe_step
 from kylinguard.skills import (
     SkillDefinition,
@@ -997,7 +1000,13 @@ class Pipeline:
             step = step.model_copy(update={
                 "arguments": {**step.arguments, "cwd": workspace_root},
             })
-        meta = get_meta(server, tool)
+        meta_lookup = getattr(self._tools, "tool_meta", None)
+
+        def effective_meta(qualified: str, server_name: str, tool_name: str):
+            return (meta_lookup(qualified) if callable(meta_lookup)
+                    else get_meta(server_name, tool_name))
+
+        meta = effective_meta(step.tool, server, tool)
         permission_context = self._effective_permission_context(
             self._session_store.get_permission_context(session_id)
             if self._session_store else None
@@ -1021,19 +1030,26 @@ class Pipeline:
             if (step.tool == "run_command.run_command"
                     and rule.decision == RuleDecision.ALLOW
                     and not full_access_active):
-                # 被证明只读的简单命令走精确 argv，不交给 Bash 再做一次展开。
-                # 这样 READ_ONLY 自动执行不会因遗漏的 glob/ANSI-C quoting 等
-                # shell 语法意外访问另一资源；完整 shell 仍用于所有显式授权调用。
-                try:
-                    argv = shlex.split(str(step.arguments.get("command", "")))
-                except ValueError:
-                    argv = []
+                # 被证明只读的简单命令（含 ;/&&/|| 列表）走精确 argv，不交给
+                # Bash 再做一次展开。这样 READ_ONLY 自动执行不会因遗漏的 glob、
+                # ANSI-C quoting 等 shell 语法意外访问另一资源。
+                readonly_sequence = parse_readonly_shell_sequence(
+                    str(step.arguments.get("command", "")),
+                    extra=extra_policies,
+                )
                 batch_tool = "run_command.run_batch"
                 batch_available = (
                     not callable(has_tool) or has_tool(batch_tool)
                 )
-                if argv and batch_available:
-                    batch_arguments = {"commands": [argv]}
+                if readonly_sequence is not None and batch_available:
+                    batch_arguments = {
+                        "commands": [
+                            list(argv) for argv in readonly_sequence.commands
+                        ],
+                    }
+                    if readonly_sequence.operators:
+                        batch_arguments["operators"] = list(
+                            readonly_sequence.operators)
                     for optional in ("cwd", "timeout"):
                         if optional in step.arguments:
                             batch_arguments[optional] = step.arguments[optional]
@@ -1044,14 +1060,23 @@ class Pipeline:
                     await record("step_rewrite", {
                         "step_id": step_id,
                         "outcome": "readonly_argv",
-                        "reason": "已证明只读的简单命令改用无 shell argv 执行。",
+                        "reason": "已证明只读的命令改用无 shell argv 执行。",
                         "original_step": safe_step(step),
                         "rewritten_step": safe_step(rewritten),
                     })
                     step = rewritten
                     server, tool = split_qualified(step.tool)
-                    meta = get_meta(server, tool)
+                    meta = effective_meta(step.tool, server, tool)
                     rule = self._dynamic_rule(step, extra_policies)
+                elif readonly_sequence is None:
+                    # 理论上 ALLOW 必然能产出同一份结构化序列；若实现漂移则
+                    # fail closed，避免把未经精确解析的文本自动交给 Bash。
+                    rule = RuleVerdict(
+                        decision=RuleDecision.REVIEW,
+                        reason="只读命令无法安全结构化，需要显式权限。",
+                        matched_rule="readonly_parse_failed",
+                        hard=False,
+                    )
                 elif not batch_available:
                     rule = RuleVerdict(
                         decision=RuleDecision.REVIEW,
@@ -1072,10 +1097,19 @@ class Pipeline:
                            f"{json.dumps(visible_arguments, ensure_ascii=False)}"
                            f"（声称目的：{step.purpose}）")
 
-        identity_fn = getattr(self._tools, "tool_identity", None)
-        tool_identity = (
-            identity_fn(step.tool) if callable(identity_fn) else ""
+        security_context_fn = getattr(
+            self._tools, "tool_security_context", None,
         )
+        if callable(security_context_fn):
+            # 风险基线与实现身份必须来自同一个运行实例；否则热加载可能在
+            # 两次读取之间把低风险旧工具换成高风险新工具。
+            meta, tool_identity = security_context_fn(step.tool)
+        else:
+            meta = effective_meta(step.tool, server, tool)
+            identity_fn = getattr(self._tools, "tool_identity", None)
+            tool_identity = (
+                identity_fn(step.tool) if callable(identity_fn) else ""
+            )
         action = describe_action(
             step,
             meta,
@@ -1200,6 +1234,11 @@ class Pipeline:
                 "policy_protected": action.policy_protected,
                 "control_path_signal": action.control_path_signal,
                 "tool_identity": tool_identity,
+            },
+            "tool_risk": {
+                "baseline": meta.risk.value,
+                "source": meta.risk_source,
+                "custom": meta.custom,
             },
             "permission": (
                 permission_context.model_dump(mode="json")

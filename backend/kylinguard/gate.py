@@ -18,6 +18,12 @@ _ACTION_BY_RISK = {
     RiskLevel.HIGH: GateAction.DOUBLE_CONFIRM,
 }
 
+_RISK_SOURCE_LABELS = {
+    "registry": "内置策略",
+    "administrator": "管理员设置",
+    "platform_default": "平台默认",
+}
+
 
 def decide(meta: ToolMeta, rule: RuleVerdict, review: ReviewVerdict,
            planner_risk: RiskLevel) -> GateDecision:
@@ -32,7 +38,9 @@ def decide(meta: ToolMeta, rule: RuleVerdict, review: ReviewVerdict,
         risk = max_risk(meta.risk, review.risk, planner_risk)
         prefix = ("静态规则要求显式权限；" if
                   rule.decision == RuleDecision.DENY else "")
-        reason = (f"{prefix}综合风险 {risk.value}（工具声明 {meta.risk.value} / "
+        source = _RISK_SOURCE_LABELS.get(meta.risk_source, meta.risk_source)
+        reason = (f"{prefix}综合风险 {risk.value}（工具基线 {meta.risk.value}"
+                  f"·{source} / "
                   f"审查员 {review.risk.value} / 规划自评 {planner_risk.value}）")
 
     concerns = []

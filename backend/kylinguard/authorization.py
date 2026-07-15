@@ -22,6 +22,7 @@ from kylinguard.models import (
     SessionPermissionContext,
     ToolMeta,
 )
+from kylinguard.mcp_config import default_mcp_secrets_directory
 from kylinguard.sanitization import canonical_fingerprint, redact_text
 
 
@@ -34,6 +35,7 @@ _DESTRUCTIVE_COMMAND_RULES = {
     "protected_path",
     "privilege_escalator",
     "control_command",
+    "shell_dangerous_segment",
 }
 
 
@@ -233,7 +235,7 @@ def _protected_path_reason(
         (settings.llm_secrets_dir or (
             state_root / "kylinguard" / "provider-secrets" / db_namespace
         ), "模型凭据目录属于控制面"),
-        (settings.mcp_secrets_dir or db_path.parent / "mcp-secrets",
+        (settings.mcp_secrets_dir or default_mcp_secrets_directory(db_path),
          "MCP 凭据目录属于控制面"),
         (settings.skills_dir or db_path.parent / "skills",
          "Skill 定义目录属于控制面"),
