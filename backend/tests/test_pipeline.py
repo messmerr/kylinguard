@@ -20,6 +20,16 @@ def _plan(tool: str, args: dict, risk: str) -> PlannerOutput:
     })
 
 
+def _plan_with_thought(
+    tool: str, args: dict, risk: str, thought: str,
+) -> PlannerOutput:
+    return PlannerOutput.model_validate({
+        "thought": thought,
+        "steps": [{"tool": tool, "arguments": args, "purpose": "测试", "risk": risk}],
+        "final_answer": None,
+    })
+
+
 class FakePlanner:
     def __init__(self, outputs, deltas=None):
         self.outputs = list(outputs)
@@ -39,9 +49,16 @@ class FakeReviewer:
     def __init__(self, safe=True, intent=True, risk=RiskLevel.LOW):
         self.verdict = ReviewVerdict(safe=safe, matches_intent=intent,
                                      risk=risk, reason="测试判定")
+        self.received = []
 
     async def review(self, user_query, env_summary, action_desc,
-                     on_progress=None):
+                     on_progress=None, *, intent_history=None):
+        self.received.append({
+            "user_query": user_query,
+            "env_summary": env_summary,
+            "action_desc": action_desc,
+            "intent_history": intent_history,
+        })
         return self.verdict
 
 
@@ -55,6 +72,14 @@ class FakeTools:
     async def call(self, server, tool, arguments):
         self.calls.append((server, tool, arguments))
         return "工具输出OK"
+
+
+class SensitiveOutputTools(FakeTools):
+    RAW_OUTPUT = "RAW_TOOL_OUTPUT_DO_NOT_REUSE"
+
+    async def call(self, server, tool, arguments):
+        self.calls.append((server, tool, arguments))
+        return self.RAW_OUTPUT
 
 
 class BrokenTools(FakeTools):
@@ -224,6 +249,42 @@ async def _collect(pipeline, query="帮我看下磁盘", on_event=None):
 
     await pipeline.handle("s1", query, emit)
     return events
+
+
+def _context_text(messages: list[dict]) -> str:
+    return "\n".join(str(message.get("content", "")) for message in messages)
+
+
+def _restarted_pipeline(audit, *, planner=None, reviewer=None, tools=None):
+    return Pipeline(
+        settings=Settings(_env_file=None, confirm_timeout=2),
+        audit=audit,
+        tools=tools or FakeTools(),
+        planner=planner or FakePlanner([FINAL]),
+        reviewer=reviewer or FakeReviewer(),
+        confirmations=Confirmations(),
+        snapshot_fn=_fake_snapshot,
+    )
+
+
+def _assert_interrupted_context(
+    messages: list[dict], original_query: str, *, expect_unknown: bool = False,
+) -> None:
+    text = _context_text(messages)
+    assert original_query in text
+    assert any(marker in text for marker in ("任务中断", "已取消", "cancelled"))
+    if expect_unknown:
+        assert "结果未知" in text or "result_unknown" in text
+    assert SensitiveOutputTools.RAW_OUTPUT not in text
+
+
+def _interrupted_semantics(messages: list[dict], original_query: str) -> tuple[bool, ...]:
+    text = _context_text(messages)
+    return (
+        original_query in text,
+        any(marker in text for marker in ("任务中断", "已取消", "cancelled")),
+        SensitiveOutputTools.RAW_OUTPUT not in text,
+    )
 
 
 async def test_老会话每轮刷新热加载工具目录(tmp_path):
@@ -397,6 +458,44 @@ async def test_审查员疑虑提升为二次确认而非替用户否决(tmp_pat
     assert tools.calls == []
 
 
+async def test_继续时Reviewer只收到有界的既往管理员意图(tmp_path):
+    planner_narrative = "PLANNER_NARRATIVE_MUST_NOT_REACH_REVIEWER"
+    recent_query = "RECENT_ADMIN_INTENT_" + "R" * 20000
+    planner = FakePlanner([
+        _plan_with_thought(
+            "sysinfo.disk_usage", {}, "low", planner_narrative,
+        ),
+        FINAL,
+        PlannerOutput(thought="", steps=[], final_answer="已记录近期意图"),
+        _plan("sysinfo.disk_usage", {}, "low"),
+        FINAL,
+    ])
+    reviewer = FakeReviewer()
+    tools = SensitiveOutputTools()
+    p, _audit, _ = _pipeline(
+        tmp_path, [], planner=planner, reviewer=reviewer, tools=tools,
+    )
+
+    async def emit(_event):
+        pass
+
+    await p.handle("s1", "FIRST_ADMIN_INTENT", emit)
+    await p.handle("s1", recent_query, emit)
+    await p.handle("s1", "继续", emit)
+
+    assert len(reviewer.received) == 2
+    review_call = reviewer.received[-1]
+    assert review_call["user_query"] == "继续"
+    history = review_call["intent_history"]
+    assert history
+    history_text = json.dumps(history, ensure_ascii=False)
+    assert "RECENT_ADMIN_INTENT_" in history_text
+    assert len(history_text) < len(recent_query)
+    assert "继续" not in history_text  # 当前轮仍由 user_query 单独承载
+    assert planner_narrative not in history_text
+    assert SensitiveOutputTools.RAW_OUTPUT not in history_text
+
+
 async def test_命令非零退出是可观察执行结果而非MCP协议错误(tmp_path):
     tools = CommandResultTools(exit_code=2)
     p, _, _ = _pipeline(
@@ -479,6 +578,38 @@ async def test_LLM失败持久化task_error并写失败终态(tmp_path):
     assert audit_types[-2:] == ["task_error", "final_answer"]
 
 
+async def test_失败回合的原始意图和失败终态在同进程及重启后均可见(tmp_path):
+    p, audit, _ = _pipeline(
+        tmp_path, [], planner=FailingPlanner(),
+    )
+    await _collect(p, "检查磁盘后继续处理告警")
+
+    live_context = p._get_conversation("s1")
+    rebuilt_context = _restarted_pipeline(audit)._get_conversation("s1")
+    for context in (live_context, rebuilt_context):
+        text = _context_text(context)
+        assert "检查磁盘后继续处理告警" in text
+        assert "任务已中止" in text or "失败" in text
+
+    live_text = _context_text(live_context)
+    rebuilt_text = _context_text(rebuilt_context)
+    markers = ("检查磁盘后继续处理告警", "任务已中止")
+    assert tuple(marker in live_text for marker in markers) == tuple(
+        marker in rebuilt_text for marker in markers
+    )
+
+    next_planner = FakePlanner([FINAL])
+    p._planner = next_planner
+
+    async def emit(_event):
+        pass
+
+    await p.handle("s1", "继续", emit)
+    next_text = _context_text(next_planner.received[0])
+    assert "检查磁盘后继续处理告警" in next_text
+    assert "任务已中止" in next_text or "失败" in next_text
+
+
 async def test_execution失败有结构化结果和progress(tmp_path):
     tools = BrokenTools()
     p, audit, _ = _pipeline(
@@ -526,6 +657,39 @@ async def test_同一会话第二条消息带历史上下文(tmp_path):
     assert "第一个问题" in joined       # 历史用户消息在上下文里
     assert "磁盘使用正常。" in joined    # 历史答复也在
     assert "第二个问题" in joined
+
+
+async def test_完成工具回合跨轮只保留结论而不回灌原始工具输出(tmp_path):
+    planner = FakePlanner([
+        _plan_with_thought(
+            "sysinfo.disk_usage", {}, "low",
+            "PLANNER_NARRATIVE_FOR_CURRENT_TURN",
+        ),
+        FINAL,
+        PlannerOutput(thought="", steps=[], final_answer="后续完成"),
+    ])
+    tools = SensitiveOutputTools()
+    p, audit, _ = _pipeline(
+        tmp_path, [], planner=planner, tools=tools,
+    )
+
+    await _collect(p, "先检查磁盘")
+    live_context = p._get_conversation("s1")
+    rebuilt_context = _restarted_pipeline(audit)._get_conversation("s1")
+    for context in (live_context, rebuilt_context):
+        text = _context_text(context)
+        assert "先检查磁盘" in text
+        assert "磁盘使用正常。" in text
+        assert SensitiveOutputTools.RAW_OUTPUT not in text
+
+    async def emit(_event):
+        pass
+
+    await p.handle("s1", "根据刚才结论继续", emit)
+    followup_context = _context_text(planner.received[2])
+    assert "先检查磁盘" in followup_context
+    assert "磁盘使用正常。" in followup_context
+    assert SensitiveOutputTools.RAW_OUTPUT not in followup_context
 
 
 async def test_同一会话并发请求严格串行且不丢上下文(tmp_path):
@@ -586,9 +750,12 @@ async def test_等待会话锁时取消不会泄漏锁(tmp_path):
     assert planner.calls == 2
 
 
-async def test_取消时回滚本轮全部会话追加(tmp_path):
+async def test_取消回合保留意图和显式中断状态且重启语义一致(tmp_path):
     planner = BlockOnSecondPlanner()
-    p, audit, tools = _pipeline(tmp_path, [], planner=planner)
+    tools = SensitiveOutputTools()
+    p, audit, _ = _pipeline(
+        tmp_path, [], planner=planner, tools=tools,
+    )
     events = []
 
     async def emit(event):
@@ -596,27 +763,169 @@ async def test_取消时回滚本轮全部会话追加(tmp_path):
 
     task = asyncio.create_task(
         p.handle("s1", "这一轮随后会被取消", emit))
-    await planner.blocked.wait()
-    # 工作副本已经包含用户指令、第一轮计划与工具观察，但尚未提交。
+    await asyncio.wait_for(planner.blocked.wait(), timeout=2)
+    # 第一轮工具已经返回，第二轮规划仍在等待；取消后不能忘记原始意图，
+    # 也不能把工具原文或“可以直接重放”的假象带到下一轮。
     assert "这一轮随后会被取消" in str(planner.received[-1])
-    assert len(p._conversations["s1"]) == 1
+    assert SensitiveOutputTools.RAW_OUTPUT in str(planner.received[-1])
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    shared = p._conversations["s1"]
-    assert len(shared) == 1
-    assert "这一轮随后会被取消" not in str(shared)
-    assert "工具输出OK" not in str(shared)
+    live_context = p._get_conversation("s1")
+    restarted = _restarted_pipeline(audit)
+    rebuilt_context = restarted._get_conversation("s1")
+    _assert_interrupted_context(live_context, "这一轮随后会被取消")
+    _assert_interrupted_context(rebuilt_context, "这一轮随后会被取消")
+    assert _interrupted_semantics(
+        live_context, "这一轮随后会被取消",
+    ) == _interrupted_semantics(
+        rebuilt_context, "这一轮随后会被取消",
+    ) == (True, True, True)
 
     next_planner = FakePlanner([FINAL])
     p._planner = next_planner
-    await p.handle("s1", "新的有效问题", emit)
-    next_context = str(next_planner.received[0])
-    assert "新的有效问题" in next_context
-    assert "这一轮随后会被取消" not in next_context
-    assert "工具输出OK" not in next_context
+    await p.handle("s1", "继续处理", emit)
+    next_context = next_planner.received[0]
+    _assert_interrupted_context(next_context, "这一轮随后会被取消")
+    assert "继续处理" in _context_text(next_context)
+
+
+def test_中断时已授权但未落执行结果的步骤标为结果未知(tmp_path):
+    audit = AuditLog(str(tmp_path / "a.db"))
+    audit.append("s1", "user_query", {"query": "更新服务配置"})
+    audit.append("s1", "plan", {
+        "round": 0,
+        "thought": "PLANNER_NARRATIVE_MUST_NOT_CROSS_TURN",
+        "steps": [{
+            "step_id": "step-unknown",
+            "tool": "run_command.run_command",
+            "arguments": {"command": SensitiveOutputTools.RAW_OUTPUT},
+            "purpose": "更新配置",
+            "risk": "high",
+        }],
+        "final_answer": None,
+    })
+    audit.append("s1", "execution_authorized", {
+        "step_id": "step-unknown",
+        "action_fingerprint": "fingerprint",
+        "context_version": 1,
+        "mode": "ask",
+        "grant_id": "grant-1",
+    })
+    audit.append("s1", "task_cancelled", {
+        "stage": "executing",
+        "step_id": "step-unknown",
+        "reason": "client_disconnected",
+    })
+    audit.append("s1", "final_answer", {
+        "answer": "客户端连接已中断，本轮任务已停止。",
+        "aborted": True,
+        "outcome": "cancelled",
+    })
+
+    context = _restarted_pipeline(audit)._get_conversation("s1")
+    _assert_interrupted_context(
+        context, "更新服务配置", expect_unknown=True,
+    )
+    text = _context_text(context)
+    assert "PLANNER_NARRATIVE_MUST_NOT_CROSS_TURN" not in text
+    assert SensitiveOutputTools.RAW_OUTPUT not in text
+
+
+def test_执行前复验明确失败时不会误报结果未知(tmp_path):
+    audit = AuditLog(str(tmp_path / "a.db"))
+    audit.append("s1", "user_query", {"query": "更新服务配置"})
+    audit.append("s1", "plan", {
+        "steps": [{
+            "step_id": "step-blocked", "tool": "files.write_file",
+        }],
+    })
+    audit.append("s1", "execution_authorized", {
+        "step_id": "step-blocked",
+    })
+    audit.append("s1", "execution_authorization_failed", {
+        "step_id": "step-blocked",
+        "code": "policy_changed_before_execution",
+    })
+    audit.append("s1", "task_cancelled", {
+        "reason": "client_disconnected",
+    })
+    audit.append("s1", "final_answer", {
+        "answer": "客户端连接已中断，本轮任务已停止。",
+        "outcome": "cancelled",
+    })
+
+    text = _context_text(
+        _restarted_pipeline(audit)._get_conversation("s1"),
+    )
+    assert '"status":"not_executed"' in text
+    assert '"status":"result_unknown"' not in text
+
+
+def test_中断摘要可区分同名工具的不同目标且不泄露参数(tmp_path):
+    audit = AuditLog(str(tmp_path / "a.db"))
+    audit.append("s1", "user_query", {"query": "更新两份配置"})
+    audit.append("s1", "plan", {
+        "thought": "PLANNER_THOUGHT_MUST_NOT_CROSS_TURN",
+        "steps": [{
+            "step_id": "step-a", "tool": "files.write_file",
+            "arguments": {
+                "path": "/srv/app/a.conf", "content": "SECRET_CONTENT_A",
+            },
+            "purpose": "更新 A 服务配置",
+        }, {
+            "step_id": "step-b", "tool": "files.write_file",
+            "arguments": {
+                "path": "/srv/app/b.conf", "content": "SECRET_CONTENT_B",
+            },
+            "purpose": "更新 B 服务配置",
+        }],
+    })
+    for step_id, resource, fingerprint, purpose in (
+        ("step-a", "/srv/app/a.conf", "fingerprint-a", "更新 A 服务配置"),
+        ("step-b", "/srv/app/b.conf", "fingerprint-b", "更新 B 服务配置"),
+    ):
+        audit.append("s1", "verification", {
+            "step_id": step_id,
+            "step": {
+                "tool": "files.write_file",
+                "purpose": purpose,
+            },
+            "action": {
+                "fingerprint": fingerprint,
+                "capability": "files.write",
+                "resource": resource,
+            },
+        })
+    audit.append("s1", "execution", {
+        "step_id": "step-a", "ok": True,
+        "step": {"tool": "files.write_file", "purpose": "更新 A 服务配置"},
+        "output": "RAW_SUCCESS_OUTPUT_MUST_NOT_CROSS_TURN",
+    })
+    audit.append("s1", "execution_authorized", {
+        "step_id": "step-b", "action_fingerprint": "fingerprint-b",
+    })
+    audit.append("s1", "task_cancelled", {
+        "reason": "client_disconnected",
+    })
+    audit.append("s1", "final_answer", {
+        "answer": "客户端连接已中断，本轮任务已停止。",
+        "outcome": "cancelled",
+    })
+
+    text = _context_text(
+        _restarted_pipeline(audit)._get_conversation("s1"),
+    )
+    assert "/srv/app/a.conf" in text and '"status":"succeeded"' in text
+    assert "/srv/app/b.conf" in text and '"status":"result_unknown"' in text
+    assert "更新 A 服务配置" in text and "更新 B 服务配置" in text
+    assert "succeeded 表示已经完成，不得重放" in text
+    assert "SECRET_CONTENT_A" not in text
+    assert "SECRET_CONTENT_B" not in text
+    assert "RAW_SUCCESS_OUTPUT_MUST_NOT_CROSS_TURN" not in text
+    assert "PLANNER_THOUGHT_MUST_NOT_CROSS_TURN" not in text
 
 
 async def test_服务重启后从审计链重建历史(tmp_path):
@@ -642,7 +951,39 @@ async def test_服务重启后从审计链重建历史(tmp_path):
     assert "第一个问题" in joined and "磁盘使用正常。" in joined
 
 
-def test_服务重启后只恢复已脱敏的工具失败摘要(tmp_path):
+def test_跨轮上下文按完整回合压缩并保留最初目标与最近回合(tmp_path):
+    audit = AuditLog(str(tmp_path / "a.db"))
+    for index in range(30):
+        audit.append("s1", "user_query", {
+            "query": f"ADMIN_GOAL_{index}_" + "问" * 3_500,
+        })
+        audit.append("s1", "final_answer", {
+            "answer": f"ANSWER_{index}_" + "答" * 3_500,
+            "outcome": "completed",
+        })
+
+    context = _restarted_pipeline(audit)._get_conversation("s1")
+    text = _context_text(context)
+    history = context[1:]
+
+    assert "ADMIN_GOAL_0_" in text
+    assert "ADMIN_GOAL_29_" in text
+    assert "ANSWER_29_" in text
+    assert "ADMIN_GOAL_15_" not in text
+    assert "较早历史已压缩" in text
+    # 两条压缩标记之后，最近历史仍严格保持 user/assistant 整轮配对。
+    assert [message["role"] for message in history[:2]] == [
+        "user", "assistant",
+    ]
+    assert all(
+        [message["role"] for message in history[index:index + 2]]
+        == ["user", "assistant"]
+        for index in range(2, len(history), 2)
+    )
+    assert len(text) < 60_000
+
+
+def test_服务重启后只恢复结构化失败摘要而不回灌工具输出(tmp_path):
     audit = AuditLog(str(tmp_path / "a.db"))
     audit.append("s1", "user_query", {"query": "创建文档"})
     audit.append("s1", "execution", {
@@ -679,9 +1020,12 @@ def test_服务重启后只恢复已脱敏的工具失败摘要(tmp_path):
 
     assert "<untrusted_historical_tool_failure>" in joined
     assert "files.write_file" in joined
-    assert "expected_sha256 不接受 null" in joined
+    assert "tool_call_failed" in joined
+    assert "工具参数不合法" in joined
     assert "err-history" in joined
-    assert "sk-[REDACTED]" in joined
+    assert "expected_sha256 不接受 null" not in joined
+    assert "sk-1234567890abcdef" not in joined
+    assert "sk-[REDACTED]" not in joined
     assert "正文不应恢复" not in joined
     assert "成功输出不应恢复" not in joined
 

@@ -79,7 +79,8 @@ test('两个权限入口复用首条消息前的会话权限编排', () => {
 test('新任务 composer 明确选择服务器工作目录且已有任务锁定', () => {
   assert.match(chatViewSource, /设置服务器工作目录/)
   assert.match(chatViewSource, /不是浏览器本地文件夹，也不是安全沙箱/)
-  assert.match(chatViewSource, /:disabled="running \|\| Boolean\(activeId\)"/)
+  assert.match(chatViewSource, /:disabled="composerDisabled \|\| Boolean\(activeId\)"/)
+  assert.match(chatViewSource, /running\.value \|\| sessionLoading\.value/)
   assert.match(chatViewSource, /setDraftWorkspaceRoot/)
 })
 

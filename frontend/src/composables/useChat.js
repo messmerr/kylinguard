@@ -18,7 +18,6 @@ import {
   loadSessionModel,
   modelRequestPayload,
   modelSelectionSnapshot,
-  sessionModel,
 } from './useModels.js'
 import {
   applyPermissionCapabilities,
@@ -37,6 +36,7 @@ export const sessions = ref([])
 export const activeId = ref('')
 export const items = ref([])
 export const currentTurn = ref(null)
+export const sessionLoading = ref(false)
 const ACTIVE_TURN_STATES = new Set(['running', 'retry_wait', 'waiting_user', 'cancelling'])
 // busy 描述 SSE 生命周期；业务终态可能先于 done 到达，此时仍不能开启新回合。
 export const running = computed(() => currentTurn.value?.busy === true)
@@ -51,9 +51,11 @@ let confirmsById = {}
 let activitiesById = {}
 let streamingItem = null // 当前正在流式累积的 assistant 文本项
 let activeController = null
+let sessionLoadController = null
 let _nextIsReport = false // 下一条 final_answer 标记为报告
 let _loadRequest = 0
 let fullAccessDraftPromise = null
+const SESSION_LOAD_TIMEOUT_MS = 20_000
 
 const PLANNING_ACTIVITIES = new Set([
   'constructing_tool_call',
@@ -803,9 +805,12 @@ function appendTaskError(ev, fallback) {
 function resetSessionState() {
   activeController?.abort()
   activeController = null
+  sessionLoadController?.abort()
+  sessionLoadController = null
   activeId.value = ''
   items.value = []
   currentTurn.value = null
+  sessionLoading.value = false
   stepsById = {}
   confirmsById = {}
   activitiesById = {}
@@ -819,14 +824,20 @@ export async function loadSession(id) {
   beginNewPermissionSession()
   beginNewModelSession()
   activeId.value = id
+  sessionLoading.value = true
   const summary = sessions.value.find((session) => session.id === id)
   bindPermissionSession(id, { workspaceRoot: summary?.workspace_root || '' })
   const summaryModel = summary?.model_context || summary?.session_model
     || (summary?.model && typeof summary.model === 'object' ? summary.model : null)
     || (summary?.provider_id && summary?.model_id ? summary : null)
   bindModelSession(id, summaryModel)
+  const controller = new AbortController()
+  sessionLoadController = controller
+  const timeout = setTimeout(() => controller.abort(), SESSION_LOAD_TIMEOUT_MS)
   try {
-    const r = await apiFetch(`/api/sessions/${id}/events`)
+    const r = await apiFetch(`/api/sessions/${id}/events`, {
+      signal: controller.signal,
+    })
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
     const body = await r.json()
     if (requestId !== _loadRequest || activeId.value !== id) return
@@ -835,11 +846,25 @@ export async function loadSession(id) {
     }
     // 历史 permission_changed 事件只用于回放；最后以服务器当前上下文校准，
     // 避免过期的 full_access 被历史事件重新点亮。
-    await loadPermissionContext(id).catch(() => {})
-    await loadSessionModel(id).catch(() => {})
+    await loadPermissionContext(id, { signal: controller.signal }).catch(() => {})
+    if (requestId !== _loadRequest || activeId.value !== id) return
+    if (controller.signal.aborted) throw new Error('任务上下文加载超时')
+    await loadSessionModel(id, { signal: controller.signal }).catch(() => {})
+    if (controller.signal.aborted) throw new Error('任务上下文加载超时')
   } catch (error) {
     if (requestId === _loadRequest && activeId.value === id) {
-      push({ kind: 'fatal', error: `任务记录读取失败：${error.message}` })
+      push({
+        kind: 'fatal',
+        error: controller.signal.aborted
+          ? '任务上下文加载超时，请重新打开该任务。'
+          : `任务记录读取失败：${error.message}`,
+      })
+    }
+  } finally {
+    clearTimeout(timeout)
+    if (sessionLoadController === controller) sessionLoadController = null
+    if (requestId === _loadRequest && activeId.value === id) {
+      sessionLoading.value = false
     }
   }
 }
@@ -853,7 +878,7 @@ export async function sendMessage(text, {
   contextMentions = [],
   contentNodes = [],
 } = {}) {
-  if (running.value) return
+  if (running.value || sessionLoading.value) return
   const hasContentNodes = Array.isArray(contentNodes) && contentNodes.length > 0
   const snapshot = hasContentNodes ? serializeEditorSnapshot(contentNodes) : null
   const prompt = snapshot?.message ?? String(text || '').trim()
@@ -901,7 +926,7 @@ export async function sendMessage(text, {
   })
   let sawDone = false
   try {
-    const includeDraftModel = !activeId.value || !sessionModel.synced
+    const includeDraftModel = !activeId.value
     const resp = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -930,6 +955,14 @@ export async function sendMessage(text, {
         ?? ([408, 425, 429].includes(resp.status) || resp.status >= 500)
       error.httpStatus = resp.status
       throw error
+    }
+    // 新会话 ID 同时由响应头提前返回。这样即使首个 session_created SSE
+    // 到达前断流或用户停止，本地仍能在下一轮复用服务端已经创建的会话。
+    const responseSessionId = String(resp.headers.get('X-Session-Id') || '').trim()
+    if (responseSessionId && !activeId.value) {
+      activeId.value = responseSessionId
+      bindPermissionSession(responseSessionId)
+      bindModelSession(responseSessionId)
     }
     turn.transport = 'streaming'
     if (!resp.body) throw new Error('服务未返回事件流。')
@@ -1064,7 +1097,7 @@ ${intentLines.length ? `\n**策略拦截**（${intentLines.length} 次）：\n${
 }
 
 export async function generateReport({ onUpdate } = {}) {
-  if (running.value || !items.value.length) return
+  if (running.value || sessionLoading.value || !items.value.length) return
   _nextIsReport = true
   await sendMessage(_buildReportPrompt(), { onUpdate })
 }

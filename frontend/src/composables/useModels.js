@@ -33,6 +33,8 @@ export const modelConfigLoadError = ref('')
 export const modelError = ref('')
 
 let draftDirty = false
+// 会话模型读取与任务切换并发时，只允许最新且仍属于当前任务的响应落地。
+let sessionModelLoadToken = 0
 
 function stringValue(value) {
   return typeof value === 'string' ? value.trim() : ''
@@ -207,6 +209,7 @@ export async function loadModelConfig() {
 }
 
 export function beginNewModelSession() {
+  sessionModelLoadToken++
   sessionModel.sessionId = ''
   sessionModel.version = 0
   sessionModel.synced = false
@@ -217,7 +220,12 @@ export function beginNewModelSession() {
 }
 
 export function bindModelSession(sessionId, raw = null) {
-  sessionModel.sessionId = stringValue(sessionId)
+  const nextSessionId = stringValue(sessionId)
+  if (sessionModel.sessionId !== nextSessionId) {
+    sessionModelLoadToken++
+    sessionModel.loading = false
+  }
+  sessionModel.sessionId = nextSessionId
   if (raw && typeof raw === 'object') {
     applySessionModel(raw)
   } else {
@@ -280,31 +288,44 @@ export function effortLabel(value) {
   return value || 'auto'
 }
 
-export async function loadSessionModel(sessionId = sessionModel.sessionId) {
+export async function loadSessionModel(
+  sessionId = sessionModel.sessionId, { signal } = {},
+) {
   const id = stringValue(sessionId)
   if (!id) return { supported: false, reason: 'draft' }
+  if (sessionModel.sessionId !== id) {
+    bindModelSession(id)
+  }
+  const loadToken = ++sessionModelLoadToken
+  const isCurrentLoad = () => (
+    loadToken === sessionModelLoadToken && sessionModel.sessionId === id
+  )
   sessionModel.loading = true
   modelError.value = ''
   try {
-    const response = await apiFetch(`/api/sessions/${encodeURIComponent(id)}/model`)
+    const response = await apiFetch(
+      `/api/sessions/${encodeURIComponent(id)}/model`, { signal },
+    )
+    if (!isCurrentLoad()) return { supported: false, reason: 'stale' }
     if ([404, 405, 501].includes(response.status)) {
       sessionModel.synced = false
       return { supported: false, reason: 'legacy_backend' }
     }
     const body = await readJson(response)
+    if (!isCurrentLoad()) return { supported: false, reason: 'stale' }
     if (!response.ok) {
       throw new Error(detailMessage(
         body, `会话模型读取失败（HTTP ${response.status}）`,
       ))
     }
-    sessionModel.sessionId = id
     applySessionModel(body)
     return { supported: true, body }
   } catch (error) {
+    if (!isCurrentLoad()) return { supported: false, reason: 'stale' }
     modelError.value = error.message || '会话模型读取失败'
     throw error
   } finally {
-    sessionModel.loading = false
+    if (isCurrentLoad()) sessionModel.loading = false
   }
 }
 
@@ -317,16 +338,19 @@ export async function setActiveModel(raw) {
   if (!sessionModel.sessionId) return setDraftModel(next)
   if (sessionModel.saving) return modelSelectionSnapshot()
 
+  const sessionId = sessionModel.sessionId
+  const version = sessionModel.version
+  const isCurrentSession = () => sessionModel.sessionId === sessionId
   sessionModel.saving = true
   modelError.value = ''
   try {
     const response = await apiFetch(
-      `/api/sessions/${encodeURIComponent(sessionModel.sessionId)}/model`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/model`,
       {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          version: sessionModel.version,
+          version,
           provider_id: next.providerId,
           model_id: next.modelId,
           reasoning_effort: next.reasoningEffort,
@@ -334,9 +358,10 @@ export async function setActiveModel(raw) {
       },
     )
     const body = await readJson(response)
+    if (!isCurrentSession()) return modelSelectionSnapshot()
     if (!response.ok) {
       if (response.status === 409) {
-        await loadSessionModel(sessionModel.sessionId).catch(() => {})
+        await loadSessionModel(sessionId).catch(() => {})
       }
       throw new Error(detailMessage(
         body, `会话模型修改失败（HTTP ${response.status}）`,
@@ -345,10 +370,11 @@ export async function setActiveModel(raw) {
     applySessionModel(body)
     return modelSelectionSnapshot()
   } catch (error) {
+    if (!isCurrentSession()) return modelSelectionSnapshot()
     modelError.value = error.message || '会话模型修改失败'
     throw error
   } finally {
-    sessionModel.saving = false
+    if (isCurrentSession()) sessionModel.saving = false
   }
 }
 
@@ -396,6 +422,7 @@ export async function updateModelDefaults({ agent, reviewer }) {
 }
 
 export function _resetModelStateForTests() {
+  sessionModelLoadToken++
   modelProviders.value = []
   modelDefaults.version = 0
   Object.assign(modelDefaults.agent, EMPTY_SELECTION)

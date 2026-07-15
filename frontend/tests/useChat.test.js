@@ -10,6 +10,10 @@ globalThis.localStorage = {
 
 const chatResponses = []
 const chatBodies = []
+const sessionEventResponses = []
+const sessionEventSignals = []
+const permissionResponses = []
+const modelResponses = []
 let chatRequestCount = 0
 let sessionEventsFixture = null
 let permissionFixture = null
@@ -25,6 +29,7 @@ globalThis.fetch = async (url, options = {}) => {
     return Response.json(modelConfigFixture || { providers: [], defaults: {}, security: {} })
   }
   if (url.endsWith('/model')) {
+    if (modelResponses.length) return modelResponses.shift()
     return sessionModelFixture
       ? Response.json(sessionModelFixture)
       : Response.json({}, { status: 404 })
@@ -73,11 +78,14 @@ globalThis.fetch = async (url, options = {}) => {
   if (url === '/api/confirm') {
     return Response.json({ ok: true })
   }
-  if (url.endsWith('/events') && sessionEventsFixture) {
-    return Response.json(sessionEventsFixture)
+  if (url.endsWith('/events')) {
+    sessionEventSignals.push(options.signal)
+    if (sessionEventResponses.length) return sessionEventResponses.shift()
+    if (sessionEventsFixture) return Response.json(sessionEventsFixture)
   }
-  if (url.endsWith('/permissions') && permissionFixture) {
-    return Response.json(permissionFixture)
+  if (url.endsWith('/permissions')) {
+    if (permissionResponses.length) return permissionResponses.shift()
+    if (permissionFixture) return Response.json(permissionFixture)
   }
   if (url.endsWith('/grants') && permissionFixture) {
     return Response.json({ grants: [] })
@@ -96,7 +104,7 @@ const permissions = await import('../src/composables/usePermissions.js')
 const extensions = await import('../src/composables/useExtensions.js')
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-function controlledSse() {
+function controlledSse(headers = {}) {
   let controller
   const stream = new ReadableStream({
     start(value) { controller = value },
@@ -108,7 +116,7 @@ function controlledSse() {
       }, { once: true })
       return new Response(stream, {
         status: 200,
-        headers: { 'Content-Type': 'text/event-stream' },
+        headers: { 'Content-Type': 'text/event-stream', ...headers },
       })
     },
     event(payload) {
@@ -126,11 +134,25 @@ function httpResponse(status, body) {
   }
 }
 
+function deferredResponse() {
+  let resolve
+  let reject
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 function reset() {
   assert.equal(chat.running.value, false)
   chat.newSession()
   chatRequestCount = 0
   chatBodies.length = 0
+  sessionEventResponses.length = 0
+  sessionEventSignals.length = 0
+  permissionResponses.length = 0
+  modelResponses.length = 0
   sessionEventsFixture = null
   permissionFixture = null
   sessionListFixture = []
@@ -741,6 +763,230 @@ test('无行内 mention 的多 Skill 历史保留每个服务端名称', async (
   assert.deepEqual(user.skillNames, ['磁盘诊断', '日志排查'])
 })
 
+test('切换到新任务后忽略旧会话迟到的权限与模型响应', async () => {
+  reset()
+  const permissionResponse = deferredResponse()
+  const modelResponse = deferredResponse()
+  permissionResponses.push(permissionResponse.promise)
+  modelResponses.push(modelResponse.promise)
+  permissions.bindPermissionSession('session-a')
+  models.bindModelSession('session-a')
+
+  const permissionLoad = permissions.loadPermissionContext('session-a')
+  const modelLoad = models.loadSessionModel('session-a')
+  await tick()
+  chat.newSession()
+
+  permissionResponse.resolve(Response.json({
+    mode: 'trusted_workspace', version: 7,
+    workspace_root: '/srv/session-a', trusted_roots: ['/srv/session-a'],
+    expires_at: Math.floor(Date.now() / 1000) + 600,
+  }))
+  modelResponse.resolve(Response.json({
+    session_id: 'session-a', provider_id: 'provider-a', model_id: 'model-a',
+    reasoning_effort: 'high', version: 4,
+  }))
+  const [permissionResult, modelResult] = await Promise.all([
+    permissionLoad, modelLoad,
+  ])
+
+  assert.equal(permissionResult.reason, 'stale')
+  assert.equal(modelResult.reason, 'stale')
+  assert.equal(permissions.permissionContext.sessionId, '')
+  assert.equal(permissions.permissionContext.mode, 'ask')
+  assert.deepEqual(permissions.permissionContext.trustedRoots, [])
+  assert.equal(permissions.permissionContext.workspaceRoot, '')
+  assert.equal(permissions.permissionLoading.value, false)
+  assert.equal(models.sessionModel.sessionId, '')
+  assert.equal(models.sessionModel.modelId, '')
+  assert.equal(models.sessionModel.loading, false)
+})
+
+test('切换任务后忽略仍在读取正文的旧权限响应', async () => {
+  reset()
+  const body = deferredResponse()
+  permissionResponses.push({
+    status: 200,
+    ok: true,
+    json: () => body.promise,
+  })
+  permissions.bindPermissionSession('session-a')
+
+  const permissionLoad = permissions.loadPermissionContext('session-a')
+  await tick()
+  chat.newSession()
+  body.resolve({
+    mode: 'trusted_workspace', version: 7,
+    workspace_root: '/srv/session-a', trusted_roots: ['/srv/session-a'],
+  })
+  const result = await permissionLoad
+
+  assert.equal(result.reason, 'stale')
+  assert.equal(permissions.permissionContext.sessionId, '')
+  assert.equal(permissions.permissionContext.mode, 'ask')
+  assert.deepEqual(permissions.permissionContext.trustedRoots, [])
+  assert.equal(permissions.permissionContext.workspaceRoot, '')
+})
+
+test('切换任务会主动取消仍在等待的历史加载请求', async () => {
+  reset()
+  const eventsResponse = deferredResponse()
+  sessionEventResponses.push(eventsResponse.promise)
+
+  const loading = chat.loadSession('session-a')
+  await tick()
+  assert.equal(sessionEventSignals.length, 1)
+  assert.equal(sessionEventSignals[0].aborted, false)
+
+  chat.newSession()
+  assert.equal(sessionEventSignals[0].aborted, true)
+  eventsResponse.resolve(Response.json({ events: [] }))
+  await loading
+  assert.equal(chat.sessionLoading.value, false)
+})
+
+test('切换到新任务后忽略旧会话迟到的权限与模型修改结果', async () => {
+  reset()
+  modelConfigFixture = {
+    providers: [{
+      id: 'provider-a', name: 'Provider A', adapter: 'openai_compatible',
+      base_url: 'https://a.example/v1', enabled: true, api_key_configured: true,
+      models: [{ id: 'model-a', label: 'Model A', enabled: true,
+        supported_efforts: ['low'] }],
+    }, {
+      id: 'provider-b', name: 'Provider B', adapter: 'openai_compatible',
+      base_url: 'https://b.example/v1', enabled: true, api_key_configured: true,
+      models: [{ id: 'model-b', label: 'Model B', enabled: true,
+        supported_efforts: ['high'] }],
+    }],
+    defaults: {
+      version: 1,
+      agent: { provider_id: 'provider-a', model_id: 'model-a', reasoning_effort: 'low' },
+      reviewer: { provider_id: 'provider-a', model_id: 'model-a', reasoning_effort: 'auto' },
+    },
+    security: {},
+  }
+  await models.loadModelConfig()
+  permissions.bindPermissionSession('session-a')
+  permissions.applyPermissionEvent({
+    type: 'permission_context', mode: 'ask', version: 1,
+  })
+  models.bindModelSession('session-a', {
+    session_id: 'session-a', provider_id: 'provider-a', model_id: 'model-a',
+    reasoning_effort: 'low', version: 1,
+  })
+  const permissionResponse = deferredResponse()
+  const modelResponse = deferredResponse()
+  permissionResponses.push(permissionResponse.promise)
+  modelResponses.push(modelResponse.promise)
+
+  const permissionChange = permissions.setPermissionMode('trusted_workspace', {
+    trustedRoots: ['/srv/session-a'], ttlSeconds: 600,
+  })
+  const modelChange = models.setActiveModel({
+    providerId: 'provider-b', modelId: 'model-b', reasoningEffort: 'high',
+  })
+  await tick()
+  chat.newSession()
+  permissionResponse.resolve(Response.json({
+    mode: 'trusted_workspace', version: 2,
+    trusted_roots: ['/srv/session-a'],
+  }))
+  modelResponse.resolve(Response.json({
+    session_id: 'session-a', provider_id: 'provider-b', model_id: 'model-b',
+    reasoning_effort: 'high', version: 2,
+  }))
+  const [permissionResult] = await Promise.all([permissionChange, modelChange])
+
+  assert.equal(permissionResult.reason, 'stale')
+  assert.equal(permissions.permissionContext.sessionId, '')
+  assert.equal(permissions.permissionContext.mode, 'ask')
+  assert.deepEqual(permissions.permissionContext.trustedRoots, [])
+  assert.equal(models.sessionModel.sessionId, '')
+  assert.equal(models.sessionModel.providerId, 'provider-a')
+  assert.equal(models.sessionModel.modelId, 'model-a')
+  assert.equal(models.sessionModel.saving, false)
+})
+
+test('历史权限同步期间切换新任务不会再启动旧会话模型读取', async () => {
+  reset()
+  sessionEventsFixture = { events: [] }
+  const permissionResponse = deferredResponse()
+  permissionResponses.push(permissionResponse.promise)
+
+  const loading = chat.loadSession('session-a')
+  await tick()
+  assert.equal(permissions.permissionLoading.value, true)
+  chat.newSession()
+  permissionResponse.resolve(Response.json({
+    mode: 'trusted_workspace', version: 2,
+    workspace_root: '/srv/session-a', trusted_roots: ['/srv/session-a'],
+  }))
+  await loading
+
+  assert.equal(chat.activeId.value, '')
+  assert.equal(chat.sessionLoading.value, false)
+  assert.equal(permissions.permissionContext.sessionId, '')
+  assert.equal(permissions.permissionContext.mode, 'ask')
+  assert.equal(models.sessionModel.sessionId, '')
+  assert.equal(models.sessionModel.loading, false)
+})
+
+test('历史任务加载完成前阻止发送，完成后复用 ID 且不附带模型草稿', async () => {
+  reset()
+  modelConfigFixture = {
+    providers: [{
+      id: 'provider-a', name: 'Provider A', adapter: 'openai_compatible',
+      base_url: 'https://api.example.com/v1', enabled: true,
+      api_key_configured: true,
+      models: [{ id: 'model-a', label: 'Model A', enabled: true,
+        supported_efforts: ['high'] }],
+    }],
+    defaults: {
+      version: 1,
+      agent: { provider_id: 'provider-a', model_id: 'model-a', reasoning_effort: 'high' },
+      reviewer: { provider_id: 'provider-a', model_id: 'model-a', reasoning_effort: 'auto' },
+    },
+    security: {},
+  }
+  await models.loadModelConfig()
+  permissionFixture = { mode: 'ask', version: 1 }
+  const eventsResponse = deferredResponse()
+  sessionEventResponses.push(eventsResponse.promise)
+
+  const loading = chat.loadSession('history-session')
+  await tick()
+  assert.equal(chat.sessionLoading.value, true)
+  await chat.sendMessage('TOO-EARLY')
+  assert.equal(chatRequestCount, 0)
+
+  eventsResponse.resolve(Response.json({ events: [{
+    event_type: 'user_query', payload: { query: '历史问题' },
+  }, {
+    event_type: 'final_answer', payload: {
+      answer: '历史回答', outcome: 'completed',
+    },
+  }] }))
+  await loading
+  assert.equal(chat.sessionLoading.value, false)
+  assert.equal(chat.activeId.value, 'history-session')
+  assert.equal(chat.items.value.some((item) => item.text === '历史问题'), true)
+  assert.equal(models.sessionModel.synced, false)
+
+  const sse = controlledSse()
+  chatResponses.push(sse)
+  const followUp = chat.sendMessage('继续')
+  await tick()
+  assert.equal(chatBodies[0].session_id, 'history-session')
+  assert.equal('provider_id' in chatBodies[0], false)
+  assert.equal('model_id' in chatBodies[0], false)
+  assert.equal('reasoning_effort' in chatBodies[0], false)
+  sse.event({ type: 'final_answer', answer: '继续完成', outcome: 'completed' })
+  sse.event({ type: 'done' })
+  sse.close()
+  await followUp
+})
+
 test('权限与服务器工作目录只随首轮 chat 创建会话，后续消息不重复更新', async () => {
   reset()
   permissionCapabilitiesFixture = { workspace_root: '/srv/default' }
@@ -984,6 +1230,33 @@ test('后端 permission_request/result 契约可生成并收起授权卡', () =>
   })
   assert.equal(card.hidden, true)
   assert.equal(chat.items.value.find((item) => item.kind === 'step').status, 'ready')
+})
+
+test('首个 SSE 前断流时通过响应头保留新会话并在下一轮复用', async () => {
+  reset()
+  const sessionId = 'a'.repeat(32)
+  const broken = controlledSse({ 'X-Session-Id': sessionId })
+  chatResponses.push(broken)
+
+  const firstRequest = chat.sendMessage('FIRST-TURN')
+  await tick()
+  assert.equal(chat.activeId.value, sessionId)
+  assert.equal(permissions.permissionContext.sessionId, sessionId)
+  assert.equal(models.sessionModel.sessionId, sessionId)
+  broken.close()
+  await firstRequest
+
+  const retry = controlledSse()
+  chatResponses.push(retry)
+  const retryRequest = chat.sendMessage('继续')
+  await tick()
+  assert.equal(chatBodies[1].session_id, sessionId)
+  assert.equal('provider_id' in chatBodies[1], false)
+  assert.equal('model_id' in chatBodies[1], false)
+  retry.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
+  retry.event({ type: 'done' })
+  retry.close()
+  await retryRequest
 })
 
 test('verification 保留工具基线风险及其来源用于权限解释', () => {

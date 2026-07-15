@@ -73,6 +73,10 @@ export const permissionLoading = ref(false)
 export const permissionLoadError = ref('')
 export const permissionError = ref('')
 
+// 权限读取会跨越多个 await；任务切换后，旧请求不得再写回全局状态。
+// 单调递增的 token 同时处理“换会话”和“同会话重复刷新”两类竞态。
+let permissionLoadToken = 0
+
 export const permissionMode = computed(() => permissionContext.mode)
 export const permissionModeMeta = computed(() => (
   PERMISSION_MODES.find((mode) => mode.value === permissionContext.mode)
@@ -301,6 +305,7 @@ function isCompatibilityMiss(response) {
 }
 
 export function beginNewPermissionSession() {
+  permissionLoadToken++
   permissionContext.sessionId = ''
   permissionContext.mode = 'ask'
   permissionContext.version = 0
@@ -309,6 +314,7 @@ export function beginNewPermissionSession() {
   permissionContext.draftTtlSeconds = null
   permissionContext.workspaceRoot = permissionContext.defaultWorkspaceRoot
   permissionContext.synced = false
+  permissionLoading.value = false
   permissionLoadError.value = ''
   permissionError.value = ''
   // 授权属于会话；新任务从干净的 ask 模式开始。
@@ -316,7 +322,12 @@ export function beginNewPermissionSession() {
 }
 
 export function bindPermissionSession(sessionId, { workspaceRoot = '' } = {}) {
-  permissionContext.sessionId = String(sessionId || '')
+  const nextSessionId = String(sessionId || '')
+  if (permissionContext.sessionId !== nextSessionId) {
+    permissionLoadToken++
+    permissionLoading.value = false
+  }
+  permissionContext.sessionId = nextSessionId
   if (workspaceRoot) permissionContext.workspaceRoot = normalizePath(workspaceRoot)
 }
 
@@ -359,30 +370,43 @@ export function expirePermissionContext(now = Date.now()) {
   return true
 }
 
-export async function loadPermissionContext(sessionId = permissionContext.sessionId) {
-  bindPermissionSession(sessionId)
-  if (!permissionContext.sessionId) return { supported: false, reason: 'draft' }
+export async function loadPermissionContext(
+  sessionId = permissionContext.sessionId, { signal } = {},
+) {
+  const id = String(sessionId || '')
+  bindPermissionSession(id)
+  if (!id) return { supported: false, reason: 'draft' }
+  const loadToken = ++permissionLoadToken
+  const isCurrentLoad = () => (
+    loadToken === permissionLoadToken && permissionContext.sessionId === id
+  )
   permissionLoading.value = true
   permissionLoadError.value = ''
   permissionError.value = ''
   try {
     const response = await apiFetch(
-      `/api/sessions/${encodeURIComponent(permissionContext.sessionId)}/permissions`,
+      `/api/sessions/${encodeURIComponent(id)}/permissions`,
+      { signal },
     )
+    if (!isCurrentLoad()) return { supported: false, reason: 'stale' }
     if (isCompatibilityMiss(response)) {
       permissionContext.synced = false
       return { supported: false, reason: 'legacy_backend' }
     }
     const body = await readJson(response)
+    if (!isCurrentLoad()) return { supported: false, reason: 'stale' }
     if (!response.ok) throw new Error(detailMessage(body, `权限读取失败（HTTP ${response.status}）`))
     const contextBody = body.permission || body.context || body
     applyContext(contextBody)
 
     const grantsResponse = await apiFetch(
-      `/api/sessions/${encodeURIComponent(permissionContext.sessionId)}/grants`,
+      `/api/sessions/${encodeURIComponent(id)}/grants`,
+      { signal },
     )
+    if (!isCurrentLoad()) return { supported: false, reason: 'stale' }
     if (grantsResponse.ok) {
       const grantsBody = await readJson(grantsResponse)
+      if (!isCurrentLoad()) return { supported: false, reason: 'stale' }
       permissionGrants.value = (grantsBody.grants || grantsBody.items || []).map(normalizeGrant)
     } else {
       const grantsBody = await readJson(grantsResponse)
@@ -392,11 +416,12 @@ export async function loadPermissionContext(sessionId = permissionContext.sessio
     }
     return { supported: true }
   } catch (error) {
+    if (!isCurrentLoad()) return { supported: false, reason: 'stale' }
     permissionLoadError.value = error.message || '无法读取权限设置'
     permissionError.value = permissionLoadError.value
     throw error
   } finally {
-    permissionLoading.value = false
+    if (isCurrentLoad()) permissionLoading.value = false
   }
 }
 
@@ -462,19 +487,22 @@ export async function createFullAccessDraftSession(sessionId, {
 async function persistPermissionMode(mode, {
   durationMinutes = 30, ttlSeconds = null, trustedRoots: roots = null,
 } = {}) {
-  if (!permissionContext.sessionId) return { supported: false, reason: 'draft' }
+  const sessionId = permissionContext.sessionId
+  if (!sessionId) return { supported: false, reason: 'draft' }
+  const contextVersion = permissionContext.version
+  const isCurrentSession = () => permissionContext.sessionId === sessionId
   const requestedTtl = ttlSeconds ?? durationMinutes * 60
   const maxTtl = mode === 'full_access'
     ? permissionContext.fullAccessMaxTtl : permissionContext.permissionMaxTtl
   const effectiveTtl = Math.max(1, Math.min(requestedTtl, maxTtl))
   const response = await apiFetch(
-    `/api/sessions/${encodeURIComponent(permissionContext.sessionId)}/permissions`,
+    `/api/sessions/${encodeURIComponent(sessionId)}/permissions`,
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         mode,
-        version: permissionContext.version,
+        version: contextVersion,
         trusted_roots: mode === 'trusted_workspace'
           ? (roots || trustedRoots.value) : [],
         ...(['trusted_workspace', 'full_access'].includes(mode)
@@ -482,8 +510,10 @@ async function persistPermissionMode(mode, {
       }),
     },
   )
+  if (!isCurrentSession()) return { supported: false, reason: 'stale' }
   if (isCompatibilityMiss(response)) return { supported: false, reason: 'legacy_backend' }
   const body = await readJson(response)
+  if (!isCurrentSession()) return { supported: false, reason: 'stale' }
   if (!response.ok) {
     throw new Error(detailMessage(body, `权限修改失败（HTTP ${response.status}）`))
   }
@@ -493,9 +523,13 @@ async function persistPermissionMode(mode, {
 
 export async function setPermissionMode(mode, options = {}) {
   const normalized = normalizeMode(mode)
+  const operationSessionId = permissionContext.sessionId
   permissionError.value = ''
   if (permissionContext.sessionId && permissionContext.version < 1) {
     await loadPermissionContext(permissionContext.sessionId)
+    if (permissionContext.sessionId !== operationSessionId) {
+      return { supported: false, reason: 'stale' }
+    }
   }
   if (normalized === 'full_access') {
     if (!permissionContext.fullAccessAvailable) {
@@ -509,6 +543,7 @@ export async function setPermissionMode(mode, options = {}) {
   }
   try {
     const result = await persistPermissionMode(normalized, options)
+    if (result.reason === 'stale') return result
     if (!result.supported) {
       // 只有新任务草稿可以留在前端并随首条消息提交。已有任务若后端
       // 不支持该协议，不能仅改变页面状态，否则显示权限会与实际执行不一致。
@@ -536,6 +571,9 @@ export async function setPermissionMode(mode, options = {}) {
     }
     return result
   } catch (error) {
+    if (permissionContext.sessionId !== operationSessionId) {
+      return { supported: false, reason: 'stale' }
+    }
     Object.assign(permissionContext, previous)
     permissionError.value = error.message || '权限修改失败'
     throw error
@@ -707,6 +745,7 @@ export function applyPermissionEvent(event = {}) {
 
 // 供 Node 测试清空模块级状态；不在产品 UI 中调用。
 export function _resetPermissionStateForTests() {
+  permissionLoadToken++
   Object.assign(permissionContext, DEFAULT_CONTEXT)
   permissionGrants.value = []
   permissionLoading.value = false

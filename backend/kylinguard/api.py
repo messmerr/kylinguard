@@ -115,6 +115,23 @@ _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 _LOCAL_OPERATOR = "local"
 logger = logging.getLogger(__name__)
 
+
+class _ManagedStreamingResponse(StreamingResponse):
+    """无论正文迭代是否开始，都执行一次流清理。"""
+
+    def __init__(self, *args, cleanup, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cleanup = cleanup
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # StreamingResponse 会先发送响应头，再开始迭代正文。若客户端在
+            # 两者之间断开，正文生成器的 finally 根本没有机会运行，因此
+            # 还需要由整个 Response 生命周期兜底收口 worker 与审计终态。
+            await self._cleanup()
+
 ReasoningEffort = Literal[
     "auto", "none", "minimal", "low", "medium", "high", "xhigh", "max",
 ]
@@ -2049,9 +2066,18 @@ def create_app(settings: Settings | None = None,
         pending_confirm: dict | None = None
         started = time.monotonic()
         cancellation_recorded = False
+        terminal_enqueued = False
+
+        def refresh_pipeline_context() -> None:
+            """API 补写终态后同步刷新同进程模型上下文缓存。"""
+            refresh = getattr(
+                app.state.pipeline, "refresh_session_context", None,
+            )
+            if callable(refresh):
+                refresh(session_id)
 
         async def emit(event: dict):
-            nonlocal last_progress, pending_confirm
+            nonlocal last_progress, pending_confirm, terminal_enqueued
             if event.get("type") == "progress":
                 last_progress = {
                     key: event[key]
@@ -2067,6 +2093,10 @@ def create_app(settings: Settings | None = None,
                   and pending_confirm
                   and event.get("confirm_id") == pending_confirm["confirm_id"]):
                 pending_confirm = None
+            if event.get("type") in {"final_answer", "fatal"}:
+                # Pipeline 在 emit 前已将 final_answer 写入审计。即使客户端
+                # 尚未读取 done，此时业务结果也已确定，断流不能再改写成取消。
+                terminal_enqueued = True
             # 对 worker 施加真实的 SSE 发送背压。否则连续事件会在无界队列
             # 中瞬间堆积，客户端恰在 ``yield`` 边界断开时，ASGI 可能先把
             # 请求取消返回、稍后才关闭生成器，导致取消审计出现短暂空窗。
@@ -2082,7 +2112,7 @@ def create_app(settings: Settings | None = None,
             生成器和 worker 共用该函数，先标记再写入，确保最多记录一次。
             """
             nonlocal cancellation_recorded
-            if cancellation_recorded:
+            if cancellation_recorded or terminal_enqueued:
                 return
             cancellation_recorded = True
             elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -2111,10 +2141,12 @@ def create_app(settings: Settings | None = None,
                     "outcome": "cancelled",
                     "elapsed_ms": elapsed_ms,
                 })
+                refresh_pipeline_context()
             except AuditError:
                 pass
 
         async def run():
+            nonlocal terminal_enqueued
             try:
                 kwargs = {}
                 if req.skill_ids:
@@ -2138,6 +2170,7 @@ def create_app(settings: Settings | None = None,
                 record_client_cancellation()
                 raise
             except AuditError:
+                terminal_enqueued = True
                 await queue.put({"type": "fatal",
                                  "error": "审计写入失败，任务已中止。",
                                  "request_id": req.request_id})
@@ -2180,6 +2213,8 @@ def create_app(settings: Settings | None = None,
                     }
                     h = app.state.audit.append(
                         session_id, "final_answer", final_payload)
+                    refresh_pipeline_context()
+                    terminal_enqueued = True
                     await queue.put({
                         "type": "final_answer",
                         "session_id": session_id,
@@ -2187,6 +2222,7 @@ def create_app(settings: Settings | None = None,
                         **final_payload,
                     })
                 except AuditError:
+                    terminal_enqueued = True
                     await queue.put({
                         "type": "fatal",
                         "error": "审计写入失败，任务已中止。",
@@ -2195,18 +2231,55 @@ def create_app(settings: Settings | None = None,
             finally:
                 await queue.put(None)
 
-        async def stream():
-            if created:
-                yield ("data: " + json.dumps(
-                    {"type": "session_created", "session_id": session_id,
-                     "request_id": req.request_id,
-                     "model_context": session_model},
-                    ensure_ascii=False) + "\n\n")
-            task = asyncio.create_task(run())
-            reached_end = False
+        # worker 必须在 Response 返回前启动，并至少产出一个事件。否则
+        # StreamingResponse 已发出 X-Session-Id、但尚未开始迭代正文时若断流，
+        # 本轮原始指令不会进入审计，下一次“继续”仍然无从恢复目标。
+        task = asyncio.create_task(run())
+        reached_end = False
+        cleanup_finished = False
+
+        async def cleanup_stream() -> None:
+            """幂等收口 worker；由正文生成器与 Response 生命周期共用。"""
+            nonlocal cleanup_finished
+            if cleanup_finished:
+                return
+            cleanup_finished = True
+            if (not reached_end and not terminal_enqueued
+                    and not task.done()):
+                # 先同步记录终态，再取消 worker。这样即使 ASGI 在响应头或
+                # yield 边界中断，调用方返回时审计也已经收口。
+                record_client_cancellation()
+            task.cancel()
             try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except RuntimeError as exc:
+                # Python/ASGI 在异步生成器 athrow 清理边界上可能报告
+                # “cannot reuse already awaited coroutine”。worker 已取消且
+                # 终态已同步记录，该清理异常不应形成未取回 Task。
+                if "cannot reuse already awaited coroutine" not in str(exc):
+                    raise
+
+        try:
+            first_item = await queue.get()
+        except BaseException:
+            await cleanup_stream()
+            raise
+
+        async def stream():
+            nonlocal reached_end
+            try:
+                if created:
+                    # 首个流水线事件已缓存在 first_item 中；session_created
+                    # 仍保持为新会话对外可见的第一个 SSE 事件。
+                    yield ("data: " + json.dumps(
+                        {"type": "session_created", "session_id": session_id,
+                         "request_id": req.request_id,
+                         "model_context": session_model},
+                        ensure_ascii=False) + "\n\n")
+                item = first_item
                 while True:
-                    item = await queue.get()
                     if item is None:
                         reached_end = True
                         break
@@ -2222,25 +2295,22 @@ def create_app(settings: Settings | None = None,
                     finally:
                         if delivered is not None and not delivered.done():
                             delivered.set_result(None)
+                    item = await queue.get()
                 yield 'data: {"type": "done"}\n\n'
             finally:
-                if not reached_end and not task.done():
-                    # 先同步记录终态，再取消 worker。这样即使 ASGI 在 yield
-                    # 边界关闭生成器，调用方返回时审计也已收口。
-                    record_client_cancellation()
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except RuntimeError as exc:
-                    # Python/ASGI 在异步生成器 athrow 清理边界上可能报告
-                    # “cannot reuse already awaited coroutine”。worker 已取消且
-                    # 终态已同步记录，该清理异常不应形成未取回 Task。
-                    if "cannot reuse already awaited coroutine" not in str(exc):
-                        raise
+                await cleanup_stream()
 
-        return StreamingResponse(stream(), media_type="text/event-stream")
+        return _ManagedStreamingResponse(
+            stream(),
+            cleanup=cleanup_stream,
+            media_type="text/event-stream",
+            headers={
+                # 前端在读取第一个 SSE 事件前即可绑定服务端已经创建的会话；
+                # 即使首事件前断流，下一次“继续”也不会意外新建第二个会话。
+                "X-Session-Id": session_id,
+                "Access-Control-Expose-Headers": "X-Session-Id",
+            },
+        )
 
     @app.post("/api/confirm")
     async def confirm(req: ConfirmRequest,

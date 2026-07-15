@@ -5,8 +5,9 @@ from pathlib import Path
 
 import httpx
 import pytest
+from starlette.requests import ClientDisconnect
 
-from kylinguard.api import create_app
+from kylinguard.api import ChatRequest, create_app
 from kylinguard.audit import AuditError
 from kylinguard.config import Settings
 
@@ -67,10 +68,14 @@ class UnexpectedPipeline:
 class BlockingPipeline:
     def __init__(self):
         self.started = asyncio.Event()
+        self.refreshed_sessions = []
 
     async def handle(self, session_id, user_query, emit):
         self.started.set()
         await asyncio.Event().wait()
+
+    def refresh_session_context(self, session_id):
+        self.refreshed_sessions.append(session_id)
 
 
 class BlockingConfirmPipeline(BlockingPipeline):
@@ -86,6 +91,34 @@ class BlockingConfirmPipeline(BlockingPipeline):
         })
         self.started.set()
         await asyncio.Event().wait()
+
+
+class AuditedEventPipeline(BlockingPipeline):
+    def __init__(self, audit):
+        super().__init__()
+        self.audit = audit
+
+    async def handle(self, session_id, user_query, emit):
+        self.audit.append(session_id, "user_query", {"query": user_query})
+        self.started.set()
+        await emit({"type": "user_query", "query": user_query})
+        await asyncio.Event().wait()
+
+
+class AuditedCompletedPipeline:
+    def __init__(self, audit):
+        self.audit = audit
+
+    async def handle(self, session_id, user_query, emit):
+        self.audit.append(session_id, "user_query", {"query": user_query})
+        await emit({"type": "user_query", "query": user_query})
+        final = {
+            "answer": "已经完成",
+            "aborted": False,
+            "outcome": "completed",
+        }
+        self.audit.append(session_id, "final_answer", final)
+        await emit({"type": "final_answer", **final})
 
 
 async def test_health无需鉴权(app):
@@ -123,6 +156,8 @@ async def test_chat_SSE流式事件(app):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
     events = _parse_sse(r.text)
+    assert r.headers["x-session-id"] == events[0]["session_id"]
+    assert "X-Session-Id" in r.headers["access-control-expose-headers"]
     assert [e["type"] for e in events] == ["session_created", "user_query",
                                            "final_answer", "done"]
     assert events[1]["query"] == "系统怎么样"
@@ -190,6 +225,74 @@ async def test_客户端断流会留下取消终态(app):
         "task_cancelled", "final_answer",
     ]
     assert audited[-1]["payload"]["outcome"] == "cancelled"
+    assert pipeline.refreshed_sessions == [session_id]
+
+
+async def test_响应头后正文前断流仍保留原始指令并收口(app):
+    pipeline = AuditedEventPipeline(app.state.audit)
+    app.state.pipeline = pipeline
+    chat_endpoint = next(
+        route.endpoint for route in app.routes
+        if getattr(route, "path", "") == "/api/chat"
+    )
+    response = await chat_endpoint(
+        ChatRequest(message="首事件后立即断开"), user="local",
+    )
+
+    session_id = app.state.sessions.list()[0]["id"]
+    # 端点返回时响应头还未发送；worker 已经启动并将原始指令落入审计。
+    assert [event["event_type"] for event in
+            app.state.audit.events(session_id)] == ["user_query"]
+
+    sent = []
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "http.response.start":
+            raise OSError("client disconnected after headers")
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+    }
+    with pytest.raises(ClientDisconnect):
+        await response(scope, receive, send)
+
+    assert [message["type"] for message in sent] == ["http.response.start"]
+    audited = app.state.audit.events(session_id)
+    assert [event["event_type"] for event in audited] == [
+        "user_query", "task_cancelled", "final_answer",
+    ]
+    assert audited[0]["payload"]["query"] == "首事件后立即断开"
+    assert pipeline.refreshed_sessions == [session_id]
+
+
+async def test_成功终态后done前断流不会改写为取消(app):
+    app.state.pipeline = AuditedCompletedPipeline(app.state.audit)
+    chat_endpoint = next(
+        route.endpoint for route in app.routes
+        if getattr(route, "path", "") == "/api/chat"
+    )
+    response = await chat_endpoint(
+        ChatRequest(message="完成后断开"), user="local",
+    )
+
+    assert '"session_created"' in await anext(response.body_iterator)
+    assert '"user_query"' in await anext(response.body_iterator)
+    final_chunk = await anext(response.body_iterator)
+    assert '"final_answer"' in final_chunk
+    assert '"completed"' in final_chunk
+    await response.body_iterator.aclose()
+
+    session_id = app.state.sessions.list()[0]["id"]
+    audited = app.state.audit.events(session_id)
+    assert [event["event_type"] for event in audited] == [
+        "user_query", "final_answer",
+    ]
+    assert audited[-1]["payload"]["outcome"] == "completed"
 
 
 async def test_确认等待中断流会收口确认并记录阶段(app):
@@ -243,9 +346,11 @@ async def test_chat自动建会话并可续聊(app):
         assert events[0]["type"] == "session_created"
         sid = events[0]["session_id"]
         assert sid
+        assert r1.headers["x-session-id"] == sid
         r2 = await c.post("/api/chat",
                           json={"message": "第二条", "session_id": sid},
                           headers=h)
+        assert r2.headers["x-session-id"] == sid
         types2 = [e["type"] for e in _parse_sse(r2.text)]
         assert "session_created" not in types2
         r3 = await c.get("/api/sessions", headers=h)

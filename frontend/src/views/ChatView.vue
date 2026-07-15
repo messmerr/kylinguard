@@ -10,7 +10,7 @@
 
             <div class="welcome-hints">
               <button v-for="hint in WELCOME_HINTS" :key="hint.text" type="button"
-                      class="hint" :disabled="running" @click="sendHint(hint.text)">
+                      class="hint" :disabled="composerDisabled" @click="sendHint(hint.text)">
                 <span class="hint-icon"><KgIcon :name="hint.icon" :size="16" /></span>
                 <span class="hint-copy">
                   <strong>{{ hint.title }}</strong>
@@ -109,7 +109,7 @@
             <ConfirmCard v-else-if="it.kind === 'confirm' && !it.hidden" :card="it" />
 
             <TaskError v-else-if="it.kind === 'task_error'" :item="it"
-                       :disabled="running" @retry="retryTask(it)"
+                       :disabled="composerDisabled" @retry="retryTask(it)"
                        @configure-model="emit('open-model-settings')" />
 
             <el-alert v-else-if="it.kind === 'fatal'" type="error"
@@ -197,7 +197,7 @@
             <InlineMentionEditor
               ref="composerEditorRef"
               v-model="editorNodes"
-              :disabled="running"
+              :disabled="composerDisabled"
               placeholder="描述运维任务…"
               @query-change="handleMentionQuery"
               @mention-keydown="onMentionKeydown"
@@ -211,7 +211,7 @@
                 type="button"
                 class="workspace-control"
                 :class="{ locked: Boolean(activeId) }"
-                :disabled="running || Boolean(activeId)"
+                :disabled="composerDisabled || Boolean(activeId)"
                 :title="activeId
                   ? `服务器工作目录已锁定：${workspaceDisplay}`
                   : `设置服务器工作目录：${workspaceDisplay}`"
@@ -228,7 +228,7 @@
               <button
                 type="button"
                 class="context-trigger"
-                :disabled="running"
+                :disabled="composerDisabled"
                 title="输入 @ 可指定 Skill 或引用服务器工作目录中的文件"
                 @click="insertMentionTrigger"
               >
@@ -237,25 +237,26 @@
               </button>
               <span class="composer-separator" aria-hidden="true"></span>
               <ModelSelector
-                :disabled="running"
+                :disabled="composerDisabled"
                 :has-history="Boolean(items.length)"
                 @configure="emit('open-model-settings')"
               />
               <span class="composer-separator" aria-hidden="true"></span>
               <PermissionSelector
-                :disabled="running && currentTurn?.status !== 'waiting_user'"
+                :disabled="sessionLoading || (running && currentTurn?.status !== 'waiting_user')"
               />
             </div>
             <div class="composer-actions">
               <button v-if="activeId && items.length" type="button" class="inline-action"
-                      :disabled="running" @click="genReport">
+                       :disabled="composerDisabled" @click="genReport">
                 <KgIcon name="task" :size="13" />生成运维报告
               </button>
               <button type="button" class="send-btn" :class="{ stop: running }"
-                      :aria-label="running ? '停止本轮处理' : '发送运维指令'"
-                      :disabled="!running && !canSubmit"
+                      :aria-label="sessionLoading ? '正在加载任务' : running ? '停止本轮处理' : '发送运维指令'"
+                      :disabled="sessionLoading || (!running && !canSubmit)"
                       @click="running ? stopTurn() : submit()">
                 <span v-if="running" class="stop-square"></span>
+                <span v-else-if="sessionLoading" class="kg-spinner" aria-hidden="true"></span>
                 <KgIcon v-else name="arrowUp" :size="16" />
               </button>
             </div>
@@ -280,7 +281,7 @@ import TaskError from '../components/TaskError.vue'
 import TraceStep from '../components/TraceStep.vue'
 import {
   activeId, cancelCurrentTurn, currentTurn, generateReport, items,
-  retryMessage, running, sendMessage,
+  retryMessage, running, sendMessage, sessionLoading,
 } from '../composables/useChat.js'
 import {
   permissionContext,
@@ -308,6 +309,7 @@ const composerEditorRef = ref(null)
 const mentionMenuRef = ref(null)
 const chatRef = ref(null)
 const canSubmit = computed(() => Boolean(editorPlainText(editorNodes.value).trim()))
+const composerDisabled = computed(() => running.value || sessionLoading.value)
 const workspaceDisplay = computed(() => (
   permissionContext.workspaceRoot || '服务器默认目录'
 ))
@@ -332,7 +334,7 @@ const {
   nodes: editorNodes,
   editorRef: composerEditorRef,
   workspaceRoot: mentionWorkspaceRoot,
-  disabled: running,
+  disabled: composerDisabled,
 })
 
 const snapshotClock = ref(Date.now())
@@ -476,7 +478,7 @@ function onMentionKeydown(payload) {
 }
 
 async function submit() {
-  if (running.value || !canSubmit.value) return
+  if (composerDisabled.value || !canSubmit.value) return
   const snapshot = takeDraftContext()
   await sendMessage(snapshot.message, { onUpdate: scrollToBottom, ...snapshot })
 }

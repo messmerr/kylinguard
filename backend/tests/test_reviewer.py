@@ -35,12 +35,16 @@ async def test_拦截判定():
     assert not v.safe
 
 
-async def test_审查员只看命令与原始意图():
+async def test_审查员接收当前指令和有界既往管理员意图():
     fake = FakeLLM([SAFE])
-    await Reviewer(fake).review("查看负载", "内存充足", "ps aux")
+    await Reviewer(fake).review(
+        "继续", "内存充足", "ps aux",
+        intent_history="1. 上一轮管理员要求：查看负载",
+    )
     sent = json.dumps(fake.received[0], ensure_ascii=False)
-    assert "查看负载" in sent and "ps aux" in sent
-    # 不给审查员看规划模型的思考过程（独立性）：接口上根本不接收该信息
+    assert "继续" in sent
+    assert "上一轮管理员要求：查看负载" in sent
+    assert "ps aux" in sent
 
 
 async def test_解析失败按最不安全处理():
