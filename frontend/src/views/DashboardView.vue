@@ -14,8 +14,26 @@
         </div>
       </header>
 
+      <div v-if="dashboardError && hasDashboardData" class="dashboard-notice" role="alert">
+        <KgIcon name="warning" :size="15" />
+        <span><strong>部分信息未能刷新</strong>{{ dashboardError }}；{{ dashboardNoticeDetail }}</span>
+        <el-button text :loading="refreshing" @click="poll">重试</el-button>
+      </div>
+
       <el-tabs v-model="activeTab" class="dashboard-tabs">
         <el-tab-pane label="运行概览" name="overview">
+          <div v-if="initialLoading" class="dashboard-state" role="status" aria-live="polite">
+            <span class="kg-spinner" aria-hidden="true"></span>
+            <div><strong>正在汇总运行概览</strong><span>系统状态、安全活动与告警会在这里同步显示。</span></div>
+          </div>
+
+          <div v-else-if="dashboardError && !hasDashboardData" class="dashboard-state is-error" role="alert">
+            <span class="state-icon"><KgIcon name="warning" :size="20" /></span>
+            <div><strong>运行概览暂不可用</strong><span>{{ dashboardError }}</span></div>
+            <el-button :loading="refreshing" @click="poll">重新加载</el-button>
+          </div>
+
+          <template v-else>
           <section class="summary-strip" aria-label="运行概览">
             <div v-for="item in summaryStats" :key="item.label" class="summary-item">
               <span>{{ item.label }}</span>
@@ -45,6 +63,7 @@
                       <span>{{ metric.label }}</span>
                     </div>
                   </div>
+                  <span class="metric-accessible">{{ metric.label }}：{{ metric.value }}</span>
                   <span class="metric-note">{{ metric.note || metric.label }}</span>
                 </div>
               </div>
@@ -94,9 +113,13 @@
                 </div>
               </div>
 
-              <div v-else class="panel-loading">
-                <span class="kg-spinner"></span>
-                正在读取系统状态
+              <div v-else class="panel-loading" :class="{ 'is-error': statusError }" :role="statusError ? 'alert' : 'status'">
+                <KgIcon v-if="statusError" name="warning" :size="17" />
+                <span v-else-if="!initialLoadComplete || refreshing" class="kg-spinner" aria-hidden="true"></span>
+                <KgIcon v-else name="server" :size="17" />
+                {{ statusError
+                  ? '系统状态本次未能刷新'
+                  : !initialLoadComplete || refreshing ? '正在读取系统状态' : '暂无系统状态' }}
               </div>
             </section>
 
@@ -122,12 +145,17 @@
                 </dl>
               </template>
 
-              <div v-else class="panel-loading">
-                <span class="kg-spinner"></span>
-                正在读取活动统计
+              <div v-else class="panel-loading" :class="{ 'is-error': statsError }" :role="statsError ? 'alert' : 'status'">
+                <KgIcon v-if="statsError" name="warning" :size="17" />
+                <span v-else-if="!initialLoadComplete || refreshing" class="kg-spinner" aria-hidden="true"></span>
+                <KgIcon v-else name="activity" :size="17" />
+                {{ statsError
+                  ? '活动统计本次未能刷新'
+                  : !initialLoadComplete || refreshing ? '正在读取活动统计' : '暂无活动统计' }}
               </div>
             </section>
           </div>
+          </template>
         </el-tab-pane>
 
         <el-tab-pane label="详细状态" name="details">
@@ -152,9 +180,14 @@
               </el-collapse-item>
             </el-collapse>
 
-            <div v-else class="kg-empty details-empty">
-              <KgIcon name="server" :size="22" />
-              <strong>正在汇总详细状态</strong>
+            <div v-else class="kg-empty details-empty" :class="{ 'is-error': statusError }">
+              <span v-if="!initialLoadComplete || refreshing" class="kg-spinner" aria-hidden="true"></span>
+              <KgIcon v-else :name="statusError ? 'warning' : 'server'" :size="22" />
+              <strong>{{ !initialLoadComplete || refreshing
+                ? '正在汇总详细状态'
+                : statusError ? '详细状态暂不可用' : '暂无详细状态' }}</strong>
+              <span v-if="statusError">{{ statusError }}</span>
+              <el-button v-if="statusError" :loading="refreshing" @click="poll">重试</el-button>
             </div>
           </section>
         </el-tab-pane>
@@ -186,12 +219,39 @@ const stats = ref(null)
 const status = ref(null)
 const alerts = ref(null)
 const refreshing = ref(false)
+const endpointErrors = ref({})
+const retainedErrorKeys = ref([])
+const initialLoadComplete = ref(false)
 const openDetails = ref([])
 const activeTab = ref('overview')
 const statusReceivedAt = ref(0)
 const clock = ref(Date.now())
 let timer = null
 let clockTimer = null
+const endpointLoaded = {
+  status: false,
+  stats: false,
+  alerts: false,
+  extensions: false,
+}
+
+const hasDashboardData = computed(() => Boolean(
+  status.value || stats.value || alerts.value !== null,
+))
+const initialLoading = computed(() => (
+  (!initialLoadComplete.value || refreshing.value) && !hasDashboardData.value
+))
+const dashboardError = computed(() => Object.values(endpointErrors.value).filter(Boolean).join('；'))
+const statusError = computed(() => endpointErrors.value.status || '')
+const statsError = computed(() => endpointErrors.value.stats || '')
+const alertError = computed(() => endpointErrors.value.alerts || '')
+const dashboardNoticeDetail = computed(() => {
+  const failedCount = Object.keys(endpointErrors.value).length
+  const retainedCount = retainedErrorKeys.value.length
+  if (!failedCount || !retainedCount) return '未成功读取的项目暂不显示，请稍后重试。'
+  if (retainedCount === failedCount) return '相关项目继续显示最近一次成功结果。'
+  return '已有结果的项目继续显示最近一次成功结果，首次读取失败的项目暂不显示。'
+})
 
 const TONE_COLORS = Object.freeze({
   accent: '#175cff',
@@ -252,13 +312,13 @@ const activityStats = computed(() => [
 
 const summaryStats = computed(() => [
   {
-    label: '待处理告警', value: activeAlertCount.value,
+    label: '待处理告警', value: alerts.value == null ? '—' : activeAlertCount.value,
     note: alertSummary.value.note,
     tone: alertSummary.value.tone,
   },
-  { label: '累计任务', value: stats.value?.sessions || 0, note: '历史会话', tone: 'accent' },
-  { label: '审计事件', value: stats.value?.total_events || 0, note: '哈希链记录', tone: 'info' },
-  { label: '风险阻止', value: stats.value?.denied || 0, note: '策略命中', tone: 'danger' },
+  { label: '累计任务', value: stats.value ? stats.value.sessions || 0 : '—', note: '历史会话', tone: 'accent' },
+  { label: '审计事件', value: stats.value ? stats.value.total_events || 0 : '—', note: '哈希链记录', tone: 'info' },
+  { label: '风险阻止', value: stats.value ? stats.value.denied || 0 : '—', note: '策略命中', tone: 'danger' },
 ])
 
 const activeAlertCount = computed(() => alerts.value?.length || 0)
@@ -267,7 +327,12 @@ const enabledSkillSummaries = computed(() => (
 ))
 
 const alertSummary = computed(() => {
-  if (alerts.value == null) return { note: '正在读取当前风险', tone: 'info' }
+  if (alerts.value == null) return {
+    note: alertError.value
+      ? '告警状态未同步'
+      : initialLoadComplete.value ? '暂无告警状态' : '正在读取当前风险',
+    tone: alertError.value ? 'warning' : 'info',
+  }
   const critical = alerts.value.filter(alert => alert.severity === 'critical').length
   if (critical) return { note: `${critical} 条严重风险待处理`, tone: 'danger' }
   if (alerts.value.length) return { note: `${alerts.value.length} 条风险需要关注`, tone: 'warning' }
@@ -421,24 +486,72 @@ function statusRows(raw = '', kind) {
 async function poll() {
   if (refreshing.value) return
   refreshing.value = true
-  const extensionsRequest = loadExtensions().catch(() => {})
+  const previouslyLoaded = {
+    ...endpointLoaded,
+    extensions: endpointLoaded.extensions
+      || Boolean(enabledMcpServers.value.length || extensionSkills.value.length),
+  }
+  endpointErrors.value = {}
+  retainedErrorKeys.value = []
+  const requests = await Promise.allSettled([
+    apiFetch('/api/status'),
+    apiFetch('/api/stats'),
+    apiFetch('/api/alerts'),
+    loadExtensions(),
+  ])
+  const errors = {}
+
+  async function readResponse(result, key, label) {
+    if (result.status === 'rejected') {
+      errors[key] = `${label}连接失败`
+      return null
+    }
+    if (!result.value.ok) {
+      errors[key] = `${label}返回 HTTP ${result.value.status}`
+      return null
+    }
+    try {
+      const body = await result.value.json()
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        errors[key] = `${label}响应格式不正确`
+        return null
+      }
+      return body
+    } catch {
+      errors[key] = `${label}响应无法解析`
+      return null
+    }
+  }
+
   try {
-    const [statusResponse, statsResponse, alertsResponse] = await Promise.all([
-      apiFetch('/api/status'),
-      apiFetch('/api/stats'),
-      apiFetch('/api/alerts'),
-    ])
-    if (statusResponse.ok) {
-      status.value = await statusResponse.json()
+    const statusBody = await readResponse(requests[0], 'status', '系统状态')
+    const statsBody = await readResponse(requests[1], 'stats', '活动统计')
+    const alertsBody = await readResponse(requests[2], 'alerts', '告警')
+    if (requests[3].status === 'rejected') errors.extensions = '扩展能力同步失败'
+    else endpointLoaded.extensions = true
+
+    if (statusBody) {
+      status.value = statusBody
+      endpointLoaded.status = true
       statusReceivedAt.value = Date.now()
       clock.value = statusReceivedAt.value
     }
-    if (statsResponse.ok) stats.value = await statsResponse.json()
-    if (alertsResponse.ok) alerts.value = (await alertsResponse.json()).alerts || []
-    await extensionsRequest
-  } catch {
-    // 保留上一次成功结果，等待下一轮刷新。
+    if (statsBody) {
+      stats.value = statsBody
+      endpointLoaded.stats = true
+    }
+    if (alertsBody) {
+      if (Array.isArray(alertsBody.alerts)) {
+        alerts.value = alertsBody.alerts
+        endpointLoaded.alerts = true
+      } else {
+        errors.alerts = '告警响应格式不正确'
+      }
+    }
+    endpointErrors.value = errors
+    retainedErrorKeys.value = Object.keys(errors).filter(key => previouslyLoaded[key])
   } finally {
+    initialLoadComplete.value = true
     refreshing.value = false
   }
 }

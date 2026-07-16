@@ -15,6 +15,9 @@
         :disabled="disabled"
         :title="triggerTitle"
         aria-label="选择会话模型与推理强度"
+        aria-haspopup="dialog"
+        aria-controls="session-model-selector"
+        :aria-expanded="open"
       >
         <KgIcon name="model" :size="13" />
         <span class="model-trigger-label">{{ activeModel?.model.label || '配置模型' }}</span>
@@ -26,7 +29,7 @@
       </button>
     </template>
 
-    <div class="selector-panel">
+    <div id="session-model-selector" class="selector-panel" role="dialog" aria-label="会话模型设置">
       <template v-if="availableModelGroups.length">
         <div class="selector-head">
           <div>

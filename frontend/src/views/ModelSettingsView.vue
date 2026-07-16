@@ -53,7 +53,7 @@
             </template>
           </el-table-column>
           <el-table-column label="API 地址" min-width="220">
-            <template #default="{ row }"><code class="endpoint">{{ row.baseUrl }}</code></template>
+            <template #default="{ row }"><code class="endpoint" :title="row.baseUrl">{{ row.baseUrl }}</code></template>
           </el-table-column>
           <el-table-column label="模型" width="82">
             <template #default="{ row }">{{ row.models.filter(model => model.enabled).length }}</template>
@@ -72,7 +72,7 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="" width="218" align="right">
+          <el-table-column label="操作" width="218" align="right">
             <template #default="{ row }">
               <div class="row-actions">
                 <el-button text :disabled="actionBusy" @click="testProvider(row)">测试</el-button>
@@ -291,11 +291,11 @@
                 <el-option v-for="effort in EFFORT_VALUES" :key="effort" :label="effortLabel(effort)" :value="effort" />
               </el-select>
               <el-checkbox v-model="model.supportsTemperature" class="temperature-capability">温度</el-checkbox>
-              <el-switch v-model="model.enabled" aria-label="启用模型" />
+              <el-switch v-model="model.enabled" :aria-label="`${model.label || model.id || '未命名模型'} 启用状态`" />
               <button
                 type="button"
                 class="remove-model"
-                aria-label="移除模型"
+                :aria-label="`移除模型 ${model.label || model.id || index + 1}`"
                 :disabled="providerSaving || providerDiscovering"
                 @click="removeModelRow(index)"
               >

@@ -6,6 +6,10 @@
       :contenteditable="disabled ? 'false' : 'true'"
       :data-placeholder="placeholder"
       :aria-disabled="disabled"
+      :aria-label="ariaLabel"
+      :aria-expanded="menuOpen"
+      :aria-controls="menuOpen && menuId ? menuId : undefined"
+      :aria-activedescendant="menuOpen && activeDescendant ? activeDescendant : undefined"
       role="textbox"
       aria-multiline="true"
       spellcheck="true"
@@ -30,6 +34,10 @@ const props = defineProps({
   modelValue: { type: Array, default: () => [{ type: 'text', text: '' }] },
   disabled: { type: Boolean, default: false },
   placeholder: { type: String, default: '' },
+  ariaLabel: { type: String, default: '任务描述' },
+  menuOpen: { type: Boolean, default: false },
+  menuId: { type: String, default: '' },
+  activeDescendant: { type: String, default: '' },
 })
 
 const emit = defineEmits([
@@ -68,7 +76,7 @@ function createMentionElement(node) {
 
   const remove = document.createElement('button')
   remove.type = 'button'
-  remove.tabIndex = -1
+  remove.tabIndex = 0
   remove.className = 'inline-mention-remove'
   remove.dataset.mentionRemove = 'true'
   remove.setAttribute('aria-label', `移除 ${node.label}`)

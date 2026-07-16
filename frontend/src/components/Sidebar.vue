@@ -39,7 +39,9 @@
       <div class="session-list">
         <button v-for="s in sessions" :key="s.id" class="session-item"
                 :class="{ active: view === 'chat' && s.id === activeId }"
-                type="button" :title="s.title" @click="openSession(s.id)">
+                type="button" :title="s.title"
+                :aria-current="view === 'chat' && s.id === activeId ? 'page' : undefined"
+                @click="openSession(s.id)">
           <span class="session-title">{{ s.title }}</span>
           <time class="session-time">{{ timeText(s.updated_at) }}</time>
         </button>

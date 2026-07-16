@@ -2,7 +2,7 @@
   <section class="flow-canvas">
     <header class="canvas-head">
       <div>
-        <span class="canvas-kicker">DECISION FLOW</span>
+        <span class="canvas-kicker">决策链</span>
         <strong>{{ title }}</strong>
       </div>
       <div class="zoom-actions">

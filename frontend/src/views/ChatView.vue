@@ -143,7 +143,8 @@
 
       <div class="composer">
         <div class="composer-shell">
-          <div v-if="mentionOpen" ref="mentionMenuRef" class="mention-menu" role="listbox" aria-label="@ 上下文候选">
+          <div v-if="mentionOpen" id="composer-mention-menu" ref="mentionMenuRef"
+               class="mention-menu" role="listbox" aria-label="@ 上下文候选">
             <div class="mention-head">
               <strong>添加到本轮任务</strong>
               <span><kbd>↑↓</kbd> 选择　<kbd>Enter</kbd>/<kbd>Tab</kbd> 确认　<kbd>Esc</kbd> 关闭</span>
@@ -153,6 +154,7 @@
               <button
                 v-for="(candidate, index) in skillCandidates"
                 :key="candidate.key"
+                :id="`composer-mention-option-${index}`"
                 type="button"
                 role="option"
                 :data-candidate-index="index"
@@ -173,6 +175,7 @@
               <button
                 v-for="(candidate, index) in fileCandidates"
                 :key="candidate.key"
+                :id="`composer-mention-option-${skillCandidates.length + index}`"
                 type="button"
                 role="option"
                 :data-candidate-index="skillCandidates.length + index"
@@ -199,6 +202,11 @@
               v-model="editorNodes"
               :disabled="composerDisabled"
               placeholder="描述运维任务…"
+              aria-label="描述运维任务"
+              menu-id="composer-mention-menu"
+              :menu-open="mentionOpen"
+              :active-descendant="mentionOpen && allCandidates.length && activeIndex >= 0
+                ? `composer-mention-option-${activeIndex}` : ''"
               @query-change="handleMentionQuery"
               @mention-keydown="onMentionKeydown"
               @submit="submit"

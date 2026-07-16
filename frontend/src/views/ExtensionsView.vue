@@ -82,7 +82,7 @@
               />
             </template>
           </el-table-column>
-          <el-table-column label="" width="218" align="right">
+          <el-table-column label="操作" width="218" align="right">
             <template #default="{ row }">
               <div class="row-actions">
                 <el-button text :disabled="!mcpDetailAvailable(row)" @click="openMcpDetail(row)">详情</el-button>
@@ -161,7 +161,7 @@
               />
             </template>
           </el-table-column>
-          <el-table-column label="" width="178" align="right">
+          <el-table-column label="操作" width="178" align="right">
             <template #default="{ row }">
               <div class="row-actions">
                 <el-button text @click="openSkillDetail(row)">详情</el-button>
@@ -193,12 +193,13 @@
         v-model="mcpImportText"
         type="textarea"
         :rows="12"
+        aria-label="MCP 配置或启动命令"
         placeholder='{&#10;  "mcpServers": {&#10;    "my-server": { "command": "/usr/local/bin/server", "args": ["--stdio"] }&#10;  }&#10;}'
         @input="clearMcpImportChoices"
       />
       <div v-if="mcpImportChoices.length" class="import-choice">
         <span>配置中包含 {{ mcpImportChoices.length }} 个服务，请选择本次要填入的一个：</span>
-        <el-select v-model="mcpImportSelectedId" placeholder="选择 MCP 服务">
+        <el-select v-model="mcpImportSelectedId" placeholder="选择 MCP 服务" aria-label="选择要导入的 MCP 服务">
           <el-option v-for="choice in mcpImportChoices" :key="choice.id" :label="choice.name === choice.id ? choice.id : `${choice.name}（${choice.id}）`" :value="choice.id" />
         </el-select>
       </div>
@@ -224,6 +225,7 @@
         v-model="skillImportText"
         type="textarea"
         :rows="12"
+        aria-label="SKILL.md 内容"
         placeholder="---&#10;name: log-review&#10;description: 检查近期错误日志&#10;---&#10;&#10;先读取近期日志，再总结异常。"
       />
       <input ref="skillFileInput" class="hidden-file-input" type="file" accept=".md,text/markdown,text/plain" @change="importSkillFile">
@@ -290,6 +292,7 @@
               collapse-tags
               class="secret-clear-select"
               placeholder="选择要移除的已保存变量"
+              aria-label="选择要移除的已保存敏感环境变量"
             >
               <el-option v-for="key in mcpForm.secretEnvKeys" :key="key" :label="key" :value="key" />
             </el-select>
@@ -322,7 +325,7 @@
                 v-model="mcpToolRiskDraft[tool.name]"
                 size="small"
                 :disabled="selectedMcp.enabled || mcpPolicySaving"
-                aria-label="管理员风险分级"
+                :aria-label="`${tool.name} 的管理员风险分级`"
               >
                 <el-option label="平台默认（高风险）" value="default" />
                 <el-option label="低风险（只读）" value="low" />

@@ -18,7 +18,8 @@
           </div>
           <button ref="statusTrigger" class="status-trigger" :class="{ active: showPanel }"
                   type="button" aria-controls="system-status-panel"
-                  aria-haspopup="dialog" :aria-expanded="showPanel" @click="toggleStatusPanel">
+                  aria-haspopup="dialog" :aria-expanded="showPanel"
+                  aria-label="系统状态" title="系统状态" @click="toggleStatusPanel">
             <KgIcon name="gauge" :size="16" />
             <span>系统状态</span>
           </button>

@@ -5,7 +5,13 @@
         <div>
           <p class="page-description">决定 Agent 什么时候可以直接执行，并管理额外的固定限制。</p>
         </div>
-        <el-button v-if="policyTab === 'rules'" type="primary" @click="openAddDialog">
+        <el-button
+          v-if="policyTab === 'rules'"
+          type="primary"
+          :disabled="policyLoading || Boolean(policyLoadError)"
+          aria-label="添加自定义安全策略"
+          @click="openAddDialog"
+        >
           <KgIcon name="plus" :size="15" />
           添加策略
         </el-button>
@@ -33,15 +39,46 @@
           </span>
         </div>
 
-        <div class="mode-grid">
+        <div
+          v-if="activeId && permissionLoading"
+          class="policy-state"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="kg-spinner" aria-hidden="true"></span>
+          <div><strong>正在同步当前任务权限</strong><span>同步完成前不会把本地草稿显示为已生效。</span></div>
+        </div>
+
+        <div
+          v-else-if="activeId && permissionLoadError"
+          class="policy-state is-error"
+          role="alert"
+        >
+          <KgIcon name="warning" :size="17" />
+          <div><strong>当前任务权限同步失败</strong><span>{{ permissionLoadError }}</span></div>
+          <el-button size="small" :loading="permissionLoading" @click="retryPermissionContext">重新同步</el-button>
+        </div>
+
+        <template v-else>
+        <div
+          class="mode-grid"
+          role="radiogroup"
+          aria-label="Agent 权限模式"
+          :aria-busy="permissionChanging"
+        >
           <button
             v-for="mode in PERMISSION_MODES"
             :key="mode.value"
+            :ref="element => setPermissionModeButtonRef(mode.value, element)"
             type="button"
             class="mode-card"
             :class="[`is-${mode.tone}`, { active: permissionMode === mode.value }]"
-            :disabled="permissionChanging || (mode.value === 'full_access'
-              && !permissionContext.fullAccessAvailable)"
+            role="radio"
+            :aria-checked="permissionMode === mode.value"
+            :aria-label="`${mode.label}：${mode.short}`"
+            :tabindex="permissionModeTabIndex(mode.value)"
+            :disabled="permissionChanging || permissionModeUnavailable(mode.value)"
+            @keydown="handlePermissionModeKeydown($event, mode.value)"
             @click="choosePermissionMode(mode.value)"
           >
             <span class="mode-card-head">
@@ -91,6 +128,7 @@
             <span>开启完全访问后，Agent 可在不逐项确认的情况下以 root 执行完整 Shell、文件、网络和进程操作。</span>
           </div>
         </div>
+        </template>
           </section>
         </el-tab-pane>
 
@@ -111,6 +149,18 @@
           <span class="section-count">{{ trustedRoots.length }} 个目录 · {{ activePermissionGrants.length }} 条授权</span>
         </div>
 
+        <div v-if="activeId && permissionLoading" class="policy-state" role="status">
+          <span class="kg-spinner" aria-hidden="true"></span>
+          <div><strong>正在同步授权范围</strong><span>可信目录与操作授权同步完成后再显示。</span></div>
+        </div>
+
+        <div v-else-if="activeId && permissionLoadError" class="policy-state is-error" role="alert">
+          <KgIcon name="warning" :size="17" />
+          <div><strong>授权范围同步失败</strong><span>{{ permissionLoadError }}</span></div>
+          <el-button size="small" :loading="permissionLoading" @click="retryPermissionContext">重新同步</el-button>
+        </div>
+
+        <template v-else>
         <div class="root-entry">
           <el-input
             v-model="trustedRootInput"
@@ -171,6 +221,7 @@
           <KgIcon name="lock" :size="17" />
           <span>还没有操作授权。普通修改会按当前模式询问。</span>
         </div>
+        </template>
           </section>
         </el-tab-pane>
 
@@ -182,6 +233,18 @@
             </span>
           </template>
 
+          <div v-if="policyLoading" class="policy-state policy-page-state" role="status">
+            <span class="kg-spinner" aria-hidden="true"></span>
+            <div><strong>正在读取安全策略</strong><span>正在同步自定义规则与只读基线。</span></div>
+          </div>
+
+          <div v-else-if="policyLoadError" class="policy-state policy-page-state is-error" role="alert">
+            <KgIcon name="warning" :size="18" />
+            <div><strong>安全策略暂时未加载</strong><span>{{ policyLoadError }}</span></div>
+            <el-button size="small" :loading="policyLoading" @click="refresh">重新加载</el-button>
+          </div>
+
+          <template v-else>
           <section class="policy-section custom-section">
         <div class="section-head">
           <div>
@@ -309,16 +372,25 @@
           </el-collapse-item>
         </el-collapse>
 
-        <div v-else class="baseline-loading">
-          <span class="kg-spinner"></span>
-          正在读取内置策略
+        <div v-else class="baseline-loading is-error" role="alert">
+          <KgIcon name="warning" :size="16" />
+          内置策略数据不完整
+          <el-button size="small" @click="refresh">重新加载</el-button>
         </div>
           </section>
+          </template>
         </el-tab-pane>
       </el-tabs>
     </div>
 
-    <el-dialog v-model="addDialog" title="添加策略" width="480px" align-center>
+    <el-dialog
+      v-model="addDialog"
+      title="添加策略"
+      width="min(480px, calc(100vw - 28px))"
+      align-center
+      :close-on-click-modal="!saving"
+      :show-close="!saving"
+    >
       <el-form label-position="top" @submit.prevent="add">
         <el-form-item label="策略类型">
           <el-select v-model="form.kind" style="width: 100%">
@@ -352,7 +424,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useApi.js'
@@ -377,6 +449,8 @@ import {
 
 const custom = ref([])
 const builtin = ref(null)
+const policyLoading = ref(true)
+const policyLoadError = ref('')
 const error = ref('')
 const addDialog = ref(false)
 const saving = ref(false)
@@ -389,6 +463,8 @@ const removingRootPath = ref('')
 const trustedRootInput = ref('')
 const trustedRootLifetime = ref('session')
 const policyTab = ref('access')
+const permissionModeButtonRefs = new Map()
+let policyRequest = 0
 
 const permissionSyncText = computed(() => {
   if (permissionLoading.value) return '正在同步当前任务权限…'
@@ -447,6 +523,64 @@ function lifetimeLabel(lifetime) {
   }[lifetime] || lifetime || '本次会话'
 }
 
+function permissionModeUnavailable(mode) {
+  return mode === 'full_access' && !permissionContext.fullAccessAvailable
+}
+
+function navigablePermissionModes() {
+  return PERMISSION_MODES.filter(mode => !permissionModeUnavailable(mode.value))
+}
+
+function permissionModeTabIndex(mode) {
+  const modes = navigablePermissionModes()
+  const rovingMode = modes.some(item => item.value === permissionMode.value)
+    ? permissionMode.value
+    : modes[0]?.value
+  return mode === rovingMode ? 0 : -1
+}
+
+function setPermissionModeButtonRef(mode, element) {
+  if (element) permissionModeButtonRefs.set(mode, element)
+  else permissionModeButtonRefs.delete(mode)
+}
+
+async function handlePermissionModeKeydown(event, currentMode) {
+  if (permissionChanging.value) return
+  const modes = navigablePermissionModes()
+  if (!modes.length) return
+
+  const currentIndex = Math.max(0, modes.findIndex(mode => mode.value === currentMode))
+  let targetIndex
+  switch (event.key) {
+    case 'ArrowRight':
+    case 'ArrowDown':
+      targetIndex = (currentIndex + 1) % modes.length
+      break
+    case 'ArrowLeft':
+    case 'ArrowUp':
+      targetIndex = (currentIndex - 1 + modes.length) % modes.length
+      break
+    case 'Home':
+      targetIndex = 0
+      break
+    case 'End':
+      targetIndex = modes.length - 1
+      break
+    default:
+      return
+  }
+
+  event.preventDefault()
+  const targetMode = modes[targetIndex].value
+  permissionModeButtonRefs.get(targetMode)?.focus()
+  await choosePermissionMode(targetMode)
+  await nextTick()
+  const selectedMode = navigablePermissionModes().some(mode => mode.value === permissionMode.value)
+    ? permissionMode.value
+    : targetMode
+  permissionModeButtonRefs.get(selectedMode)?.focus()
+}
+
 async function choosePermissionMode(mode) {
   if (permissionChanging.value || mode === permissionMode.value) return
   if (mode === 'full_access' && !permissionContext.fullAccessAvailable) {
@@ -477,6 +611,15 @@ async function choosePermissionMode(mode) {
     ElMessage.error(reason.message || '权限修改失败')
   } finally {
     permissionChanging.value = false
+  }
+}
+
+async function retryPermissionContext() {
+  if (!activeId.value || permissionLoading.value) return
+  try {
+    await loadPermissionContext(activeId.value)
+  } catch {
+    // usePermissions 会保留可展示的错误文本。
   }
 }
 
@@ -540,10 +683,35 @@ function openAddDialog() {
 }
 
 async function refresh() {
-  const response = await apiFetch('/api/policies')
-  const body = await response.json()
-  custom.value = body.custom
-  builtin.value = body.builtin
+  const requestId = ++policyRequest
+  policyLoading.value = true
+  policyLoadError.value = ''
+  try {
+    const response = await apiFetch('/api/policies')
+    if (!response.ok) throw new Error(await responseError(response, '服务器未能返回安全策略'))
+    const body = await response.json()
+    if (!Array.isArray(body.custom) || !body.builtin) {
+      throw new Error('服务器返回的安全策略数据不完整')
+    }
+    if (requestId !== policyRequest) return
+    custom.value = body.custom
+    builtin.value = body.builtin
+  } catch (reason) {
+    if (requestId === policyRequest) {
+      policyLoadError.value = reason.message || '请检查后端服务后重试'
+    }
+  } finally {
+    if (requestId === policyRequest) policyLoading.value = false
+  }
+}
+
+async function responseError(response, fallback) {
+  try {
+    const body = await response.clone().json()
+    return body.detail || body.message || fallback
+  } catch {
+    return fallback
+  }
 }
 
 async function add() {
@@ -561,12 +729,12 @@ async function add() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(form),
     })
-    if (!response.ok) {
-      error.value = (await response.json()).detail || '添加失败'
-      return
-    }
+    if (!response.ok) throw new Error(await responseError(response, '添加失败'))
     addDialog.value = false
     await refresh()
+    if (policyLoadError.value) ElMessage.warning('策略已添加，但列表刷新未完成')
+  } catch (reason) {
+    error.value = reason.message || '添加失败'
   } finally {
     saving.value = false
   }
@@ -576,8 +744,12 @@ async function remove(id) {
   if (removingId.value != null) return
   removingId.value = id
   try {
-    await apiFetch(`/api/policies/${id}`, { method: 'DELETE' })
+    const response = await apiFetch(`/api/policies/${id}`, { method: 'DELETE' })
+    if (!response.ok) throw new Error(await responseError(response, '删除失败'))
     await refresh()
+    if (policyLoadError.value) ElMessage.warning('策略已删除，但列表刷新未完成')
+  } catch (reason) {
+    ElMessage.error(reason.message || '策略删除失败')
   } finally {
     removingId.value = null
   }

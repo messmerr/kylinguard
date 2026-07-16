@@ -6,11 +6,23 @@
           <p class="page-description">设置触发条件、通知渠道，并查看告警记录。</p>
         </div>
         <div class="page-actions">
-          <el-button v-if="tab === 'rules'" type="primary" @click="openRuleDialog()">
+          <el-button
+            v-if="tab === 'rules'"
+            type="primary"
+            :disabled="alertsLoading || activeSectionUnavailable"
+            aria-label="新建告警规则"
+            @click="openRuleDialog()"
+          >
             <KgIcon name="plus" :size="15" />
             新建规则
           </el-button>
-          <el-button v-else-if="tab === 'channels'" type="primary" @click="openChDialog()">
+          <el-button
+            v-else-if="tab === 'channels'"
+            type="primary"
+            :disabled="alertsLoading || activeSectionUnavailable"
+            aria-label="新建推送渠道"
+            @click="openChDialog()"
+          >
             <KgIcon name="plus" :size="15" />
             新建渠道
           </el-button>
@@ -18,19 +30,44 @@
             v-else
             text
             type="danger"
-            :disabled="!history.length"
+            :loading="clearingHistory"
+            :disabled="alertsLoading || activeSectionUnavailable || !history.length"
+            aria-label="清空全部告警历史"
             @click="clearHistory"
           >清空历史</el-button>
         </div>
       </header>
 
-      <el-tabs v-model="tab" class="main-tabs">
+      <div v-if="alertsLoading" class="alerts-state" role="status" aria-live="polite">
+        <span class="kg-spinner" aria-hidden="true"></span>
+        <div><strong>正在读取告警配置</strong><span>正在同步规则、渠道与历史记录。</span></div>
+      </div>
+
+      <div v-else-if="alertsLoadError" class="alerts-state is-error" role="alert">
+        <KgIcon name="warning" :size="19" />
+        <div><strong>告警配置暂时未加载</strong><span>{{ alertsLoadError }}</span></div>
+        <el-button :loading="alertsLoading" @click="loadAlerts">重新加载</el-button>
+      </div>
+
+      <el-tabs v-else v-model="tab" class="main-tabs">
         <el-tab-pane name="rules">
           <template #label>
             <span class="tab-label">规则 <span>{{ rules.length }}</span></span>
           </template>
 
-          <template v-if="rules.length">
+          <section class="alerts-section" aria-label="告警规则">
+          <div v-if="ruleLoadError && rules.length" class="section-refresh-warning" role="status">
+            <KgIcon name="warning" :size="15" />
+            <span>规则列表刷新未完成，当前显示最近一次结果。</span>
+            <el-button text size="small" :loading="ruleRefreshing" @click="refreshRules">重试</el-button>
+          </div>
+          <div v-if="ruleLoadError && !rules.length" class="kg-empty alerts-empty is-error" role="alert">
+            <KgIcon name="warning" :size="24" />
+            <strong>暂时无法读取告警规则</strong>
+            <span>{{ ruleLoadError }}</span>
+            <el-button :loading="ruleRefreshing" @click="refreshRules">重新加载</el-button>
+          </div>
+          <template v-else-if="rules.length">
             <el-table :data="rules" class="wide-table alert-table">
               <el-table-column label="规则名称" prop="name" min-width="145" />
               <el-table-column label="指标" min-width="150">
@@ -61,14 +98,28 @@
               </el-table-column>
               <el-table-column label="状态" width="66" align="center">
                 <template #default="{ row }">
-                  <el-switch :model-value="row.enabled" size="small" @change="toggleRule(row)" />
+                  <el-switch
+                    :model-value="row.enabled"
+                    size="small"
+                    :loading="togglingRuleId === row.id"
+                    :disabled="isRuleBusy(row.id)"
+                    :aria-label="`${row.name}：${row.enabled ? '停用规则' : '启用规则'}`"
+                    @change="toggleRule(row)"
+                  />
                 </template>
               </el-table-column>
               <el-table-column label="" width="106" align="right">
                 <template #default="{ row }">
                   <div class="row-actions">
-                    <el-button text @click="openRuleDialog(row)">编辑</el-button>
-                    <el-button text type="danger" @click="deleteRule(row.id)">删除</el-button>
+                    <el-button text :disabled="isRuleBusy(row.id)" @click="openRuleDialog(row)">编辑</el-button>
+                    <el-button
+                      text
+                      type="danger"
+                      :loading="deletingRuleId === row.id"
+                      :disabled="isRuleBusy(row.id)"
+                      :aria-label="`删除规则 ${row.name}`"
+                      @click="deleteRule(row.id)"
+                    >删除</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -81,7 +132,14 @@
                   <span class="severity" :class="rule.severity">
                     <span class="severity-dot"></span>{{ severityLabel(rule.severity) }}
                   </span>
-                  <el-switch :model-value="rule.enabled" size="small" @change="toggleRule(rule)" />
+                  <el-switch
+                    :model-value="rule.enabled"
+                    size="small"
+                    :loading="togglingRuleId === rule.id"
+                    :disabled="isRuleBusy(rule.id)"
+                    :aria-label="`${rule.name}：${rule.enabled ? '停用规则' : '启用规则'}`"
+                    @change="toggleRule(rule)"
+                  />
                 </div>
                 <div class="compact-meta">
                   <span>{{ metricLabel(rule.metric) }} {{ conditionText(rule) }}</span>
@@ -89,8 +147,15 @@
                   <span>{{ channelSummary(rule) }}</span>
                 </div>
                 <div class="compact-actions">
-                  <el-button text @click="openRuleDialog(rule)">编辑</el-button>
-                  <el-button text type="danger" @click="deleteRule(rule.id)">删除</el-button>
+                  <el-button text :disabled="isRuleBusy(rule.id)" @click="openRuleDialog(rule)">编辑</el-button>
+                  <el-button
+                    text
+                    type="danger"
+                    :loading="deletingRuleId === rule.id"
+                    :disabled="isRuleBusy(rule.id)"
+                    :aria-label="`删除规则 ${rule.name}`"
+                    @click="deleteRule(rule.id)"
+                  >删除</el-button>
                 </div>
               </article>
             </div>
@@ -102,6 +167,7 @@
             <span>创建规则后，系统会按条件记录或推送告警。</span>
             <el-button @click="openRuleDialog()">新建规则</el-button>
           </div>
+          </section>
         </el-tab-pane>
 
         <el-tab-pane name="channels">
@@ -109,7 +175,19 @@
             <span class="tab-label">渠道 <span>{{ channels.length }}</span></span>
           </template>
 
-          <template v-if="channels.length">
+          <section class="alerts-section" aria-label="推送渠道">
+          <div v-if="channelLoadError && channels.length" class="section-refresh-warning" role="status">
+            <KgIcon name="warning" :size="15" />
+            <span>渠道列表刷新未完成，当前显示最近一次结果。</span>
+            <el-button text size="small" :loading="channelRefreshing" @click="refreshChannels">重试</el-button>
+          </div>
+          <div v-if="channelLoadError && !channels.length" class="kg-empty alerts-empty is-error" role="alert">
+            <KgIcon name="warning" :size="24" />
+            <strong>暂时无法读取推送渠道</strong>
+            <span>{{ channelLoadError }}</span>
+            <el-button :loading="channelRefreshing" @click="refreshChannels">重新加载</el-button>
+          </div>
+          <template v-else-if="channels.length">
             <el-table :data="channels" class="wide-table alert-table">
               <el-table-column label="渠道名称" prop="name" min-width="170" />
               <el-table-column label="类型" width="108">
@@ -122,15 +200,35 @@
               </el-table-column>
               <el-table-column label="状态" width="70" align="center">
                 <template #default="{ row }">
-                  <el-switch :model-value="row.enabled" size="small" @change="toggleChannel(row)" />
+                  <el-switch
+                    :model-value="row.enabled"
+                    size="small"
+                    :loading="togglingChannelId === row.id"
+                    :disabled="isChannelBusy(row.id)"
+                    :aria-label="`${row.name}：${row.enabled ? '停用渠道' : '启用渠道'}`"
+                    @change="toggleChannel(row)"
+                  />
                 </template>
               </el-table-column>
               <el-table-column label="" width="164" align="right">
                 <template #default="{ row }">
                   <div class="row-actions">
-                    <el-button text @click="testChannel(row)">测试</el-button>
-                    <el-button text @click="openChDialog(row)">编辑</el-button>
-                    <el-button text type="danger" @click="deleteChannel(row.id)">删除</el-button>
+                    <el-button
+                      text
+                      :loading="testingChannelId === row.id"
+                      :disabled="isChannelBusy(row.id)"
+                      :aria-label="`测试渠道 ${row.name}`"
+                      @click="testChannel(row)"
+                    >测试</el-button>
+                    <el-button text :disabled="isChannelBusy(row.id)" @click="openChDialog(row)">编辑</el-button>
+                    <el-button
+                      text
+                      type="danger"
+                      :loading="deletingChannelId === row.id"
+                      :disabled="isChannelBusy(row.id)"
+                      :aria-label="`删除渠道 ${row.name}`"
+                      @click="deleteChannel(row.id)"
+                    >删除</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -141,13 +239,31 @@
                 <div class="compact-head">
                   <strong>{{ channel.name }}</strong>
                   <span class="type-badge">{{ channelTypeLabel(channel.type) }}</span>
-                  <el-switch :model-value="channel.enabled" size="small" @change="toggleChannel(channel)" />
+                  <el-switch
+                    :model-value="channel.enabled"
+                    size="small"
+                    :loading="togglingChannelId === channel.id"
+                    :disabled="isChannelBusy(channel.id)"
+                    :aria-label="`${channel.name}：${channel.enabled ? '停用渠道' : '启用渠道'}`"
+                    @change="toggleChannel(channel)"
+                  />
                 </div>
                 <code class="compact-target">{{ chTarget(channel) }}</code>
                 <div class="compact-actions">
-                  <el-button text @click="testChannel(channel)">测试</el-button>
-                  <el-button text @click="openChDialog(channel)">编辑</el-button>
-                  <el-button text type="danger" @click="deleteChannel(channel.id)">删除</el-button>
+                  <el-button
+                    text
+                    :loading="testingChannelId === channel.id"
+                    :disabled="isChannelBusy(channel.id)"
+                    @click="testChannel(channel)"
+                  >测试</el-button>
+                  <el-button text :disabled="isChannelBusy(channel.id)" @click="openChDialog(channel)">编辑</el-button>
+                  <el-button
+                    text
+                    type="danger"
+                    :loading="deletingChannelId === channel.id"
+                    :disabled="isChannelBusy(channel.id)"
+                    @click="deleteChannel(channel.id)"
+                  >删除</el-button>
                 </div>
               </article>
             </div>
@@ -159,6 +275,7 @@
             <span>未绑定渠道的规则仍会记录在告警历史中。</span>
             <el-button @click="openChDialog()">新建渠道</el-button>
           </div>
+          </section>
         </el-tab-pane>
 
         <el-tab-pane name="history">
@@ -166,7 +283,19 @@
             <span class="tab-label">历史 <span>{{ history.length }}</span></span>
           </template>
 
-          <template v-if="history.length">
+          <section class="alerts-section" aria-label="告警历史">
+          <div v-if="historyLoadError && history.length" class="section-refresh-warning" role="status">
+            <KgIcon name="warning" :size="15" />
+            <span>历史记录刷新未完成，当前显示最近一次结果。</span>
+            <el-button text size="small" :loading="historyRefreshing" @click="refreshHistory">重试</el-button>
+          </div>
+          <div v-if="historyLoadError && !history.length" class="kg-empty alerts-empty is-error" role="alert">
+            <KgIcon name="warning" :size="24" />
+            <strong>暂时无法读取告警历史</strong>
+            <span>{{ historyLoadError }}</span>
+            <el-button :loading="historyRefreshing" @click="refreshHistory">重新加载</el-button>
+          </div>
+          <template v-else-if="history.length">
             <el-table :data="history" class="wide-table alert-table history-table">
               <el-table-column label="时间" width="150">
                 <template #default="{ row }"><span class="time-text">{{ fmtTime(row.fired_at) }}</span></template>
@@ -218,6 +347,7 @@
             <strong>暂时没有告警记录</strong>
             <span>规则触发后，记录会显示在这里。</span>
           </div>
+          </section>
         </el-tab-pane>
       </el-tabs>
     </div>
@@ -225,12 +355,14 @@
     <el-dialog
       v-model="ruleDialog"
       :title="ruleForm.id ? '编辑规则' : '新建规则'"
-      width="520px"
+      width="min(520px, calc(100vw - 28px))"
       align-center
+      :close-on-click-modal="!savingRule"
+      :show-close="!savingRule"
     >
       <el-form :model="ruleForm" label-position="top" class="dialog-form">
         <el-form-item label="规则名称">
-          <el-input v-model="ruleForm.name" placeholder="例如：内存使用率过高" />
+          <el-input v-model="ruleForm.name" :disabled="savingRule" placeholder="例如：内存使用率过高" />
         </el-form-item>
 
         <el-form-item label="监控指标">
@@ -286,37 +418,50 @@
             <strong>启用规则</strong>
             <span>保存后立即参与告警评估。</span>
           </div>
-          <el-switch v-model="ruleForm.enabled" />
+          <el-switch v-model="ruleForm.enabled" aria-label="启用规则" />
         </div>
       </el-form>
 
       <template #footer>
-        <el-button @click="ruleDialog = false">取消</el-button>
-        <el-button type="primary" @click="saveRule">保存规则</el-button>
+        <el-button :disabled="savingRule" @click="ruleDialog = false">取消</el-button>
+        <el-button type="primary" :loading="savingRule" @click="saveRule">保存规则</el-button>
       </template>
     </el-dialog>
 
     <el-dialog
       v-model="chDialog"
       :title="chForm.id ? '编辑渠道' : '新建渠道'"
-      width="560px"
+      width="min(560px, calc(100vw - 28px))"
       align-center
+      :close-on-click-modal="!savingChannel"
+      :show-close="!savingChannel"
     >
       <el-form :model="chForm" label-position="top" class="dialog-form">
-        <el-form-item label="渠道名称">
-          <el-input v-model="chForm.name" placeholder="例如：运维群 Webhook" />
+        <el-form-item label="渠道名称" :error="chErrors.name">
+          <el-input
+            v-model="chForm.name"
+            :disabled="savingChannel"
+            placeholder="例如：运维群 Webhook"
+            :aria-invalid="Boolean(chErrors.name)"
+            @input="clearChError('name')"
+          />
         </el-form-item>
 
         <el-form-item label="渠道类型">
-          <el-radio-group v-model="chForm.type">
+          <el-radio-group v-model="chForm.type" @change="clearChErrors">
             <el-radio-button value="webhook">Webhook</el-radio-button>
             <el-radio-button value="email">邮件</el-radio-button>
           </el-radio-group>
         </el-form-item>
 
         <template v-if="chForm.type === 'webhook'">
-          <el-form-item label="URL">
-            <el-input v-model="chForm.config.url" placeholder="https://..." />
+          <el-form-item label="URL" :error="chErrors.url">
+            <el-input
+              v-model="chForm.config.url"
+              placeholder="https://..."
+              :aria-invalid="Boolean(chErrors.url)"
+              @input="clearChError('url')"
+            />
           </el-form-item>
           <el-form-item label="HTTP 方法">
             <el-select v-model="chForm.config.method" style="width: 140px">
@@ -324,21 +469,30 @@
               <el-option value="PUT" label="PUT" />
             </el-select>
           </el-form-item>
-          <el-form-item label="自定义 Header">
+          <el-form-item label="自定义 Header" :error="headerJsonError">
             <el-input
               v-model="chForm.headersRaw"
               type="textarea"
               :rows="4"
               class="headers-input"
               placeholder='{"Authorization": "Bearer xxx"}'
+              aria-label="自定义 Header JSON"
+              :aria-invalid="Boolean(headerJsonError)"
+              aria-describedby="header-json-help"
             />
+            <span id="header-json-help" class="field-help">请输入 JSON 对象；留空表示不发送自定义 Header。</span>
           </el-form-item>
         </template>
 
         <template v-else>
           <div class="form-grid">
-            <el-form-item label="SMTP 主机">
-              <el-input v-model="chForm.config.host" placeholder="smtp.example.com" />
+            <el-form-item label="SMTP 主机" :error="chErrors.host">
+              <el-input
+                v-model="chForm.config.host"
+                placeholder="smtp.example.com"
+                :aria-invalid="Boolean(chErrors.host)"
+                @input="clearChError('host')"
+              />
             </el-form-item>
             <el-form-item label="端口">
               <el-input-number v-model="chForm.config.port" :min="1" :max="65535" controls-position="right" />
@@ -347,14 +501,35 @@
           <el-form-item label="连接加密">
             <el-switch v-model="chForm.config.use_tls" active-text="使用 SSL/TLS" />
           </el-form-item>
-          <el-form-item label="发件人账号">
-            <el-input v-model="chForm.config.user" placeholder="noreply@example.com" />
+          <el-form-item label="发件人账号" :error="chErrors.user">
+            <el-input
+              v-model="chForm.config.user"
+              placeholder="noreply@example.com"
+              :aria-invalid="Boolean(chErrors.user)"
+              @input="clearChError('user')"
+            />
           </el-form-item>
-          <el-form-item label="授权码或密码">
-            <el-input v-model="chForm.config.password" type="password" show-password />
+          <el-form-item label="授权码或密码" :error="chErrors.password">
+            <el-input
+              v-model="chForm.config.password"
+              type="password"
+              show-password
+              :placeholder="chForm.id ? '留空则保留现有凭据' : '请输入授权码或密码'"
+              :aria-invalid="Boolean(chErrors.password)"
+              aria-describedby="channel-password-help"
+              @input="clearChError('password')"
+            />
+            <span id="channel-password-help" class="field-help">
+              {{ chForm.id ? '留空将保留现有凭据；填写后会替换。' : '新建邮件渠道必须填写凭据。' }}
+            </span>
           </el-form-item>
-          <el-form-item label="收件人">
-            <el-input v-model="chForm.config.to" placeholder="ops@example.com" />
+          <el-form-item label="收件人" :error="chErrors.to">
+            <el-input
+              v-model="chForm.config.to"
+              placeholder="ops@example.com"
+              :aria-invalid="Boolean(chErrors.to)"
+              @input="clearChError('to')"
+            />
           </el-form-item>
         </template>
 
@@ -363,13 +538,13 @@
             <strong>启用渠道</strong>
             <span>停用后将不再向该渠道推送。</span>
           </div>
-          <el-switch v-model="chForm.enabled" />
+          <el-switch v-model="chForm.enabled" aria-label="启用渠道" />
         </div>
       </el-form>
 
       <template #footer>
-        <el-button @click="chDialog = false">取消</el-button>
-        <el-button type="primary" @click="saveChannel">保存渠道</el-button>
+        <el-button :disabled="savingChannel" @click="chDialog = false">取消</el-button>
+        <el-button type="primary" :loading="savingChannel" @click="saveChannel">保存渠道</el-button>
       </template>
     </el-dialog>
   </div>
@@ -377,7 +552,7 @@
 
 <script setup>
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useApi.js'
 
@@ -385,6 +560,22 @@ const tab = ref('rules')
 const rules = ref([])
 const channels = ref([])
 const history = ref([])
+const alertsLoading = ref(true)
+const alertsLoadError = ref('')
+const ruleLoadError = ref('')
+const channelLoadError = ref('')
+const historyLoadError = ref('')
+const ruleRefreshing = ref(false)
+const channelRefreshing = ref(false)
+const historyRefreshing = ref(false)
+const savingRule = ref(false)
+const togglingRuleId = ref(null)
+const deletingRuleId = ref(null)
+const savingChannel = ref(false)
+const togglingChannelId = ref(null)
+const deletingChannelId = ref(null)
+const testingChannelId = ref(null)
+const clearingHistory = ref(false)
 
 const METRICS = [
   { value: 'memory_pct', label: '内存使用率 (%)' },
@@ -428,25 +619,88 @@ function fmtTime(timestamp) {
 }
 
 async function loadRules() {
-  const response = await apiFetch('/api/alert-rules')
-  rules.value = (await response.json()).rules
+  const body = await requestJson('/api/alert-rules', {}, '无法读取告警规则')
+  if (!Array.isArray(body.rules)) throw new Error('告警规则数据格式不正确')
+  rules.value = body.rules
 }
 
 async function loadChannels() {
-  const response = await apiFetch('/api/alert-channels')
-  channels.value = (await response.json()).channels
+  const body = await requestJson('/api/alert-channels', {}, '无法读取推送渠道')
+  if (!Array.isArray(body.channels)) throw new Error('推送渠道数据格式不正确')
+  channels.value = body.channels
 }
 
 async function loadHistory() {
-  const response = await apiFetch('/api/alert-history')
-  history.value = (await response.json()).history
+  const body = await requestJson('/api/alert-history', {}, '无法读取告警历史')
+  if (!Array.isArray(body.history)) throw new Error('告警历史数据格式不正确')
+  history.value = body.history
 }
 
-onMounted(async () => {
-  await loadChannels()
-  await loadRules()
-  await loadHistory()
-})
+async function refreshSection(loader, errorState, refreshingState) {
+  refreshingState.value = true
+  try {
+    await loader()
+    errorState.value = ''
+    return true
+  } catch (reason) {
+    errorState.value = reason.message || '请检查后端服务后重试'
+    return false
+  } finally {
+    refreshingState.value = false
+  }
+}
+
+const refreshRules = () => refreshSection(loadRules, ruleLoadError, ruleRefreshing)
+const refreshChannels = () => refreshSection(loadChannels, channelLoadError, channelRefreshing)
+const refreshHistory = () => refreshSection(loadHistory, historyLoadError, historyRefreshing)
+
+async function loadAlerts() {
+  alertsLoading.value = true
+  alertsLoadError.value = ''
+  const results = await Promise.all([refreshChannels(), refreshRules(), refreshHistory()])
+  if (results.every((result) => !result)) {
+    alertsLoadError.value = '规则、渠道与历史记录均暂时无法读取，请检查后端服务后重试'
+  }
+  alertsLoading.value = false
+}
+
+async function responseError(response, fallback) {
+  try {
+    const body = await response.clone().json()
+    return body.detail || body.message || fallback
+  } catch {
+    return fallback
+  }
+}
+
+async function request(url, options = {}, fallback = '操作失败') {
+  const response = await apiFetch(url, options)
+  if (!response.ok) throw new Error(await responseError(response, fallback))
+  return response
+}
+
+async function requestJson(url, options = {}, fallback = '请求失败') {
+  const response = await request(url, options, fallback)
+  try {
+    return await response.json()
+  } catch {
+    throw new Error(`${fallback}：服务器返回的数据无法解析`)
+  }
+}
+
+const activeSectionUnavailable = computed(() => ({
+  rules: Boolean(ruleLoadError.value && !rules.value.length),
+  channels: Boolean(channelLoadError.value && !channels.value.length),
+  history: Boolean(historyLoadError.value && !history.value.length),
+}[tab.value]))
+const isRuleBusy = () => savingRule.value
+  || togglingRuleId.value != null || deletingRuleId.value != null
+const isChannelBusy = () => savingChannel.value || togglingChannelId.value != null
+  || deletingChannelId.value != null || testingChannelId.value != null
+const isDialogCancel = (reason) => reason === 'cancel' || reason === 'close'
+  || reason?.action === 'cancel' || reason?.action === 'close'
+
+onMounted(loadAlerts)
 
 const ruleDialog = ref(false)
 const ruleForm = reactive({
@@ -456,6 +710,7 @@ const ruleForm = reactive({
 })
 
 function openRuleDialog(row = null) {
+  if (savingRule.value) return
   if (row) {
     Object.assign(ruleForm, { ...row, channel_ids: [...row.channel_ids] })
   } else {
@@ -469,6 +724,7 @@ function openRuleDialog(row = null) {
 }
 
 async function saveRule() {
+  if (savingRule.value) return
   if (!ruleForm.name.trim()) {
     ElMessage.warning('请输入规则名称')
     return
@@ -482,40 +738,69 @@ async function saveRule() {
   }
   const url = ruleForm.id ? `/api/alert-rules/${ruleForm.id}` : '/api/alert-rules'
   const method = ruleForm.id ? 'PUT' : 'POST'
-  const response = await apiFetch(url, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    ElMessage.error('保存失败')
-    return
+  savingRule.value = true
+  try {
+    await request(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }, '规则保存失败')
+    ruleDialog.value = false
+    const refreshed = await refreshRules()
+    if (refreshed) ElMessage.success('规则已保存')
+    else ElMessage.warning('规则已保存，但列表刷新失败；当前显示可能未更新')
+  } catch (reason) {
+    ElMessage.error(reason.message || '规则保存失败')
+  } finally {
+    savingRule.value = false
   }
-  ruleDialog.value = false
-  await loadRules()
-  ElMessage.success('已保存')
 }
 
 async function toggleRule(row) {
+  if (isRuleBusy(row.id)) return
   const body = {
     name: row.name, metric: row.metric, operator: row.operator,
     threshold: row.threshold, severity: row.severity,
     silence_minutes: row.silence_minutes, channel_ids: row.channel_ids,
     enabled: !row.enabled,
   }
-  await apiFetch(`/api/alert-rules/${row.id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  await loadRules()
+  togglingRuleId.value = row.id
+  try {
+    await request(`/api/alert-rules/${row.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }, '规则状态更新失败')
+    if (!await refreshRules()) {
+      ElMessage.warning('规则状态已更新，但列表刷新失败；当前显示可能未更新')
+    }
+  } catch (reason) {
+    ElMessage.error(reason.message || '规则状态更新失败')
+  } finally {
+    togglingRuleId.value = null
+  }
 }
 
 async function deleteRule(id) {
-  await ElMessageBox.confirm('确定删除该规则？', '确认', { type: 'warning' })
-  await apiFetch(`/api/alert-rules/${id}`, { method: 'DELETE' })
-  await loadRules()
-  ElMessage.success('已删除')
+  if (isRuleBusy(id)) return
+  try {
+    await ElMessageBox.confirm('确定删除该规则？', '确认', { type: 'warning' })
+  } catch (reason) {
+    if (isDialogCancel(reason)) return
+    ElMessage.error(reason.message || '无法打开删除确认')
+    return
+  }
+  deletingRuleId.value = id
+  try {
+    await request(`/api/alert-rules/${id}`, { method: 'DELETE' }, '规则删除失败')
+    const refreshed = await refreshRules()
+    if (refreshed) ElMessage.success('规则已删除')
+    else ElMessage.warning('规则已删除，但列表刷新失败；当前显示可能未更新')
+  } catch (reason) {
+    ElMessage.error(reason.message || '规则删除失败')
+  } finally {
+    deletingRuleId.value = null
+  }
 }
 
 const chDialog = ref(false)
@@ -524,9 +809,68 @@ const chForm = reactive({
   config: { url: '', method: 'POST', use_tls: true, host: '', port: 465, user: '', password: '', to: '' },
   headersRaw: '',
 })
+const chErrors = reactive({ name: '', url: '', host: '', user: '', password: '', to: '' })
+const existingChannelPassword = ref('')
+
+function clearChErrors() {
+  for (const key of Object.keys(chErrors)) chErrors[key] = ''
+}
+
+function clearChError(field) {
+  chErrors[field] = ''
+}
+
+function validateChannelForm() {
+  clearChErrors()
+
+  if (!chForm.name.trim()) chErrors.name = '请输入渠道名称'
+
+  if (chForm.type === 'webhook') {
+    const rawUrl = chForm.config.url.trim()
+    if (!rawUrl) {
+      chErrors.url = '请输入 Webhook URL'
+    } else if (!/^https?:\/\//i.test(rawUrl)) {
+      chErrors.url = '请输入以 http:// 或 https:// 开头的绝对 URL'
+    } else {
+      try {
+        const url = new URL(rawUrl)
+        if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) {
+          chErrors.url = '请输入有效的 http/https 绝对 URL'
+        }
+      } catch {
+        chErrors.url = '请输入有效的 http/https 绝对 URL'
+      }
+    }
+  } else {
+    if (!chForm.config.host.trim()) chErrors.host = '请输入 SMTP 主机'
+    if (!chForm.config.user.trim()) chErrors.user = '请输入发件人账号'
+    if (!chForm.config.to.trim()) chErrors.to = '请输入收件人'
+    if (!chForm.config.password.trim() && (!chForm.id || !existingChannelPassword.value)) {
+      chErrors.password = '请输入授权码或密码'
+    }
+  }
+
+  return !Object.values(chErrors).some(Boolean)
+}
+
+const headerJsonError = computed(() => {
+  if (chForm.type !== 'webhook' || !chForm.headersRaw.trim()) return ''
+  try {
+    const parsed = JSON.parse(chForm.headersRaw)
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+      return '自定义 Header 必须是 JSON 对象，例如 {"X-Token":"value"}'
+    }
+    return ''
+  } catch {
+    return 'JSON 格式不正确，请检查引号、逗号和括号'
+  }
+})
 
 function openChDialog(row = null) {
+  if (savingChannel.value) return
+  clearChErrors()
   if (row) {
+    existingChannelPassword.value = row.type === 'email' ? (row.config.password ?? '') : ''
     Object.assign(chForm, {
       id: row.id, name: row.name, type: row.type, enabled: row.enabled,
       config: {
@@ -536,12 +880,13 @@ function openChDialog(row = null) {
         host: row.config.host ?? '',
         port: row.config.port ?? 465,
         user: row.config.user ?? '',
-        password: row.config.password ?? '',
+        password: '',
         to: row.config.to ?? '',
       },
       headersRaw: row.config.headers ? JSON.stringify(row.config.headers, null, 2) : '',
     })
   } else {
+    existingChannelPassword.value = ''
     Object.assign(chForm, {
       id: null, name: '', type: 'webhook', enabled: true,
       config: { url: '', method: 'POST', use_tls: true, host: '', port: 465, user: '', password: '', to: '' },
@@ -553,76 +898,132 @@ function openChDialog(row = null) {
 
 function buildChConfig() {
   if (chForm.type === 'webhook') {
-    let headers = {}
-    try {
-      headers = chForm.headersRaw.trim() ? JSON.parse(chForm.headersRaw) : {}
-    } catch {
-      // 保持原行为：无效 JSON 作为空 Header 保存。
-    }
-    return { url: chForm.config.url, method: chForm.config.method, headers }
+    const headers = chForm.headersRaw.trim() ? JSON.parse(chForm.headersRaw) : {}
+    return { url: chForm.config.url.trim(), method: chForm.config.method, headers }
   }
+  const password = chForm.config.password.trim()
+    ? chForm.config.password
+    : existingChannelPassword.value
   return {
-    host: chForm.config.host, port: chForm.config.port,
-    user: chForm.config.user, password: chForm.config.password,
-    to: chForm.config.to, use_tls: chForm.config.use_tls,
+    host: chForm.config.host.trim(), port: chForm.config.port,
+    user: chForm.config.user.trim(), password,
+    to: chForm.config.to.trim(), use_tls: chForm.config.use_tls,
   }
 }
 
 async function saveChannel() {
-  if (!chForm.name.trim()) {
-    ElMessage.warning('请输入渠道名称')
+  if (savingChannel.value) return
+  if (!validateChannelForm() || headerJsonError.value) {
+    ElMessage.warning('请先修正表单中标注的问题')
     return
   }
-  const body = { name: chForm.name, type: chForm.type, config: buildChConfig(), enabled: chForm.enabled }
+  const body = { name: chForm.name.trim(), type: chForm.type, config: buildChConfig(), enabled: chForm.enabled }
   const url = chForm.id ? `/api/alert-channels/${chForm.id}` : '/api/alert-channels'
   const method = chForm.id ? 'PUT' : 'POST'
-  const response = await apiFetch(url, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    ElMessage.error('保存失败')
-    return
+  savingChannel.value = true
+  try {
+    await request(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }, '渠道保存失败')
+    chDialog.value = false
+    const refreshed = await refreshChannels()
+    if (refreshed) ElMessage.success('渠道已保存')
+    else ElMessage.warning('渠道已保存，但列表刷新失败；当前显示可能未更新')
+  } catch (reason) {
+    ElMessage.error(reason.message || '渠道保存失败')
+  } finally {
+    savingChannel.value = false
   }
-  chDialog.value = false
-  await loadChannels()
-  ElMessage.success('已保存')
 }
 
 async function toggleChannel(row) {
+  if (isChannelBusy(row.id)) return
   const body = { name: row.name, type: row.type, config: row.config, enabled: !row.enabled }
-  await apiFetch(`/api/alert-channels/${row.id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  await loadChannels()
+  togglingChannelId.value = row.id
+  try {
+    await request(`/api/alert-channels/${row.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }, '渠道状态更新失败')
+    if (!await refreshChannels()) {
+      ElMessage.warning('渠道状态已更新，但列表刷新失败；当前显示可能未更新')
+    }
+  } catch (reason) {
+    ElMessage.error(reason.message || '渠道状态更新失败')
+  } finally {
+    togglingChannelId.value = null
+  }
 }
 
 async function deleteChannel(id) {
-  await ElMessageBox.confirm('确定删除该渠道？', '确认', { type: 'warning' })
-  await apiFetch(`/api/alert-channels/${id}`, { method: 'DELETE' })
-  await loadChannels()
-  await loadRules()
-  ElMessage.success('已删除')
+  if (isChannelBusy(id)) return
+  try {
+    await ElMessageBox.confirm('确定删除该渠道？', '确认', { type: 'warning' })
+  } catch (reason) {
+    if (isDialogCancel(reason)) return
+    ElMessage.error(reason.message || '无法打开删除确认')
+    return
+  }
+  deletingChannelId.value = id
+  try {
+    await request(`/api/alert-channels/${id}`, { method: 'DELETE' }, '渠道删除失败')
+    const [channelsRefreshed, rulesRefreshed] = await Promise.all([
+      refreshChannels(),
+      refreshRules(),
+    ])
+    if (channelsRefreshed && rulesRefreshed) ElMessage.success('渠道已删除')
+    else ElMessage.warning('渠道已删除，但关联列表刷新失败；当前显示可能未更新')
+  } catch (reason) {
+    ElMessage.error(reason.message || '渠道删除失败')
+  } finally {
+    deletingChannelId.value = null
+  }
 }
 
 async function testChannel(row) {
-  const response = await apiFetch(`/api/alert-channels/${row.id}/test`, { method: 'POST' })
-  const body = await response.json()
-  if (body.ok) {
-    ElMessage.success(`测试推送成功：${body.message}`)
-  } else {
-    ElMessage.error(`测试推送失败：${body.message}`)
+  if (isChannelBusy(row.id)) return
+  testingChannelId.value = row.id
+  try {
+    const body = await requestJson(
+      `/api/alert-channels/${row.id}/test`,
+      { method: 'POST' },
+      '测试推送失败',
+    )
+    if (body.ok) {
+      ElMessage.success(`测试推送成功：${body.message}`)
+    } else {
+      ElMessage.error(`测试推送失败：${body.message || '渠道未接受消息'}`)
+    }
+  } catch (reason) {
+    ElMessage.error(reason.message || '测试推送失败')
+  } finally {
+    testingChannelId.value = null
   }
 }
 
 async function clearHistory() {
-  await ElMessageBox.confirm('确定清空所有告警历史？', '确认', { type: 'warning' })
-  await apiFetch('/api/alert-history', { method: 'DELETE' })
-  await loadHistory()
-  ElMessage.success('已清空')
+  if (clearingHistory.value) return
+  try {
+    await ElMessageBox.confirm('确定清空所有告警历史？', '确认', { type: 'warning' })
+  } catch (reason) {
+    if (isDialogCancel(reason)) return
+    ElMessage.error(reason.message || '无法打开清空确认')
+    return
+  }
+  clearingHistory.value = true
+  try {
+    await request('/api/alert-history', { method: 'DELETE' }, '告警历史清空失败')
+    const refreshed = await refreshHistory()
+    if (refreshed) ElMessage.success('告警历史已清空')
+    else ElMessage.warning('告警历史已清空，但列表刷新失败；当前显示可能未更新')
+  } catch (reason) {
+    ElMessage.error(reason.message || '告警历史清空失败')
+  } finally {
+    clearingHistory.value = false
+  }
 }
 </script>
 

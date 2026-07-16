@@ -1,5 +1,5 @@
 <template>
-  <div class="md" v-html="html"></div>
+  <div class="md" v-html="html" @click="handleContentClick"></div>
 </template>
 
 <script setup>
@@ -21,7 +21,41 @@ const md = new MarkdownIt({
   },
 })
 
+const defaultFence = md.renderer.rules.fence
+md.renderer.rules.fence = (tokens, index, options, env, renderer) => {
+  const token = tokens[index]
+  const language = String(token.info || '').trim().split(/\s+/)[0]
+  const label = md.utils.escapeHtml(language || 'CODE')
+  const content = defaultFence(tokens, index, options, env, renderer)
+  return `<div class="md-code-block"><div class="md-code-head"><span>${label}</span>`
+    + '<button type="button" data-copy-code aria-label="复制代码" aria-live="polite">复制</button></div>'
+    + `${content}</div>`
+}
+
 const html = computed(() => md.render(props.text || ''))
+
+async function handleContentClick(event) {
+  const button = event.target.closest?.('[data-copy-code]')
+  if (!button) return
+  const code = button.closest('.md-code-block')?.querySelector('code')?.textContent || ''
+  if (!code) return
+  try {
+    await navigator.clipboard.writeText(code)
+    button.setAttribute('aria-label', '代码已复制')
+    button.textContent = '已复制'
+    setTimeout(() => {
+      button.setAttribute('aria-label', '复制代码')
+      button.textContent = '复制'
+    }, 1200)
+  } catch {
+    button.setAttribute('aria-label', '代码复制失败')
+    button.textContent = '复制失败'
+    setTimeout(() => {
+      button.setAttribute('aria-label', '复制代码')
+      button.textContent = '复制'
+    }, 1200)
+  }
+}
 </script>
 
 <style>
@@ -69,6 +103,30 @@ const html = computed(() => md.render(props.text || ''))
 .md a:hover { color: var(--kg-accent-hover); }
 .md hr { height: 1px; margin: 20px 0; border: none; background: var(--kg-border-subtle); }
 .md img { max-width: 100%; border-radius: var(--kg-radius-md); }
+
+.md-code-block { margin: 11px 0; }
+.md-code-block .md-code-head {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border: 1px solid var(--kg-border-subtle);
+  border-bottom: 0;
+  border-radius: var(--kg-radius-md) var(--kg-radius-md) 0 0;
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-tertiary);
+  font: 10px/1 var(--kg-font-mono);
+}
+.md-code-head button {
+  border: 0;
+  background: transparent;
+  color: var(--kg-text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+}
+.md-code-head button:hover { color: var(--kg-accent); }
+.md-code-block pre { margin: 0; border-radius: 0 0 var(--kg-radius-md) var(--kg-radius-md); }
 
 /* KylinGuard syntax palette: restrained semantic accents instead of a vendor theme. */
 .md .hljs-comment, .md .hljs-quote { color: #7f8da4; font-style: italic; }

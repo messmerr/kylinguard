@@ -2,7 +2,7 @@
   <section class="visual-canvas chart-canvas" :class="{ embedded }">
     <header class="canvas-head">
       <div>
-        <span class="canvas-kicker">LIVE CANVAS</span>
+        <span class="canvas-kicker">实时视图</span>
         <strong>{{ title }}</strong>
       </div>
       <button type="button" title="恢复图表" aria-label="恢复图表" @click="restore">

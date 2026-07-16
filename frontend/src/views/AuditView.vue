@@ -5,7 +5,11 @@
         <div>
           <p class="page-description">按任务或系统配置范围查看可校验审计链。</p>
         </div>
-        <el-button :disabled="!selectedId || !events.length" @click="exportReport">
+        <el-button
+          :disabled="!selectedId || !events.length || loading"
+          aria-label="导出当前范围的审计 JSON"
+          @click="exportReport"
+        >
           <KgIcon name="download" :size="15" />
           导出 JSON
         </el-button>
@@ -16,8 +20,11 @@
           <span>范围</span>
           <el-select
             :model-value="selectedId"
+            :loading="targetsLoading"
+            :disabled="targetsLoading && !auditTargets.length"
             filterable
             placeholder="选择一项任务"
+            aria-label="选择审计范围"
             @change="select"
           >
             <el-option
@@ -38,15 +45,47 @@
         </div>
       </div>
 
-      <div v-if="loading" class="kg-empty audit-empty">
-        <span class="kg-spinner" aria-hidden="true"></span>
-        <strong>正在读取审计记录</strong>
+      <div
+        v-if="targetsError && auditTargets.length"
+        class="audit-notice is-error"
+        role="alert"
+      >
+        <KgIcon name="warning" :size="16" />
+        <div>
+          <strong>审计范围刷新未完成</strong>
+          <span>{{ targetsError }}，当前显示最近一次成功读取的范围。</span>
+        </div>
+        <el-button size="small" :loading="targetsLoading" @click="loadAuditTargets">重新加载</el-button>
       </div>
 
-      <div v-else-if="loadError" class="kg-empty audit-empty is-error">
+      <div v-if="targetsLoading && !auditTargets.length" class="kg-empty audit-empty audit-state">
+        <span class="kg-spinner" aria-hidden="true"></span>
+        <strong>正在读取审计范围</strong>
+        <span>正在同步任务与系统配置记录。</span>
+      </div>
+
+      <div
+        v-else-if="targetsError && !auditTargets.length"
+        class="kg-empty audit-empty audit-state is-error"
+        role="alert"
+      >
+        <KgIcon name="warning" :size="22" />
+        <strong>审计范围暂时未加载</strong>
+        <span>{{ targetsError }}</span>
+        <el-button :loading="targetsLoading" @click="loadAuditTargets">重新加载</el-button>
+      </div>
+
+      <div v-else-if="loading" class="kg-empty audit-empty audit-state" aria-live="polite">
+        <span class="kg-spinner" aria-hidden="true"></span>
+        <strong>正在读取审计记录</strong>
+        <span>正在校验事件链与哈希连续性。</span>
+      </div>
+
+      <div v-else-if="loadError" class="kg-empty audit-empty audit-state is-error" role="alert">
         <KgIcon name="warning" :size="22" />
         <strong>无法读取审计记录</strong>
         <span>{{ loadError }}</span>
+        <el-button :loading="loading" @click="retrySelected">重新加载</el-button>
       </div>
 
       <section v-else-if="selectedId && events.length" class="timeline" aria-label="审计事件">
@@ -54,7 +93,7 @@
           v-for="ev in pagedEvents"
           :key="ev.seq"
           class="event"
-          :class="eventTone(ev)"
+          :class="[eventTone(ev), { 'is-internal': isInternalEvent(ev.event_type) }]"
         >
           <span class="event-marker" aria-hidden="true">
             <KgIcon :name="eventIcon(ev.event_type)" :size="13" />
@@ -127,15 +166,16 @@
         </div>
       </section>
 
-      <div v-else-if="selectedId" class="kg-empty audit-empty">
+      <div v-else-if="selectedId" class="kg-empty audit-empty audit-state">
         <KgIcon name="audit" :size="24" />
         <strong>这项任务还没有审计事件</strong>
       </div>
 
-      <div v-else class="kg-empty audit-empty">
+      <div v-else class="kg-empty audit-empty audit-state">
         <KgIcon name="audit" :size="24" />
-        <strong>{{ sessions.length ? '选择一项任务查看审计记录' : '还没有可审计的任务' }}</strong>
-        <span v-if="sessions.length">每次检查、确认和执行都会记录在这里。</span>
+        <strong>{{ auditTargets.length ? '选择一项范围查看审计记录' : '还没有可审计的记录' }}</strong>
+        <span v-if="auditTargets.length">每次检查、确认和执行都会记录在这里。</span>
+        <span v-else-if="targetsLoaded">任务运行或系统配置发生变更后，记录会显示在这里。</span>
       </div>
     </div>
   </div>
@@ -153,11 +193,15 @@ const events = ref([])
 const chainOk = ref(null)
 const loading = ref(false)
 const loadError = ref('')
+const targetsLoading = ref(false)
+const targetsError = ref('')
+const targetsLoaded = ref(false)
 const expanded = reactive(new Set())
 const rawExpanded = reactive(new Set())
 const currentPage = ref(1)
 const pageSize = ref(20)
 let selectRequest = 0
+let targetsRequest = 0
 
 const pagedEvents = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
@@ -187,7 +231,13 @@ const TYPE_LABELS = {
   task_error: '任务错误',
   execution: '执行结果',
   final_answer: '最终回复',
+  model_context: '模型运行快照',
+  skill_routing_catalog: 'Skill 候选目录',
+  skill_routing_decision: 'Skill 路由结果',
+  skill_not_selected: '未使用 Skill',
   skill_selected: '已选 Skill',
+  skills_composed: 'Skill 工作流已装配',
+  task_cancelled: '任务已停止',
   mcp_server_create_requested: '请求添加 MCP',
   mcp_server_created: '已添加 MCP',
   mcp_server_update_requested: '请求修改 MCP',
@@ -211,6 +261,12 @@ const TYPE_LABELS = {
   skill_disabled: '已停用 Skill',
   skill_delete_requested: '请求删除 Skill',
   skill_deleted: '已删除 Skill',
+  llm_provider_created: '已添加模型提供商',
+  llm_provider_updated: '已修改模型提供商',
+  llm_provider_deleted: '已删除模型提供商',
+  llm_models_discovered: '已读取提供商模型',
+  llm_defaults_updated: '已更新默认模型',
+  skill_selection_rejected: 'Skill 切换被拒绝',
 }
 
 const ACTION_LABELS = {
@@ -222,28 +278,55 @@ const ACTION_LABELS = {
 
 const RISK_LABELS = { low: '低风险', medium: '中等风险', high: '高风险' }
 const RULE_LABELS = { allow: '通过', review: '需复核', deny: '未通过' }
+const SKILL_ROUTING_REASONS = {
+  no_candidates: '没有可用的 Skill 候选',
+  disabled_by_user: '管理员关闭了本轮 Skill 匹配',
+  model_declined: '模型判断本轮不需要 Skill',
+  model_selected: '模型选择了匹配的 Skill',
+  selection_returned_tool_steps: '选择结果混入了工具步骤，已退回普通规划',
+  unknown_or_hidden_skill_id: '模型返回了不可用的 Skill',
+  skill_changed_or_disabled: 'Skill 已变更或停用',
+  skill_changed_during_discovery: 'Skill 在选择期间发生变更',
+  required_tools_changed: 'Skill 的工具依赖已变化',
+  selection_only_allowed_during_discovery: '执行循环中不能切换 Skill',
+}
+const INTERNAL_EVENT_TYPES = new Set([
+  'model_context',
+  'skill_routing_catalog',
+  'skill_routing_decision',
+  'skill_not_selected',
+  'skills_composed',
+])
 
 const chainStatusText = computed(() => {
+  if (loading.value) return '正在校验'
+  if (loadError.value) return '校验未完成'
   if (chainOk.value === true) return '链路校验通过'
   if (chainOk.value === false) return '链路校验失败'
-  return '正在校验'
+  return '等待校验'
 })
 
 const chainStatusClass = computed(() => ({
   'is-ok': chainOk.value === true,
   'is-bad': chainOk.value === false,
-  'is-pending': chainOk.value == null,
+  'is-warning': Boolean(loadError.value),
+  'is-pending': loading.value,
 }))
 
 const chainStatusIcon = computed(() => {
+  if (loading.value) return 'refresh'
+  if (loadError.value) return 'warning'
   if (chainOk.value === true) return 'check'
   if (chainOk.value === false) return 'warning'
-  return 'refresh'
+  return 'info'
 })
 
 const typeLabel = (type) => TYPE_LABELS[type] || type
 const actionLabel = (action) => ACTION_LABELS[action] || action || '—'
 const riskLabel = (risk) => RISK_LABELS[risk] || risk || '—'
+const skillRoutingReason = (reason) => SKILL_ROUTING_REASONS[reason] || reason || '未说明'
+const modelLabel = (model) => model?.model_id || '未配置'
+const isInternalEvent = (type) => INTERNAL_EVENT_TYPES.has(type)
 
 function eventIcon(type) {
   return {
@@ -257,6 +340,13 @@ function eventIcon(type) {
     execution_authorized: 'shield', execution_authorization_failed: 'warning',
     task_error: 'warning',
     final_answer: 'info',
+    model_context: 'model',
+    skill_routing_catalog: 'skill', skill_routing_decision: 'skill',
+    skill_not_selected: 'skill', skill_selection_rejected: 'warning', skills_composed: 'skill',
+    llm_provider_created: 'model', llm_provider_updated: 'model',
+    llm_provider_deleted: 'model', llm_models_discovered: 'model',
+    llm_defaults_updated: 'model',
+    task_cancelled: 'close',
     skill_selected: 'skill',
   }[type] || 'audit'
 }
@@ -273,6 +363,7 @@ function eventTone(ev) {
   }
   if (ev.event_type === 'confirm_request' || ev.event_type === 'permission_request'
       || ev.event_type === 'intent_signal'
+      || ev.event_type === 'task_cancelled'
       || action === 'confirm' || action === 'double_confirm') {
     return 'is-warning'
   }
@@ -311,7 +402,19 @@ function brief(ev) {
     case 'task_error': return compactText(p.error?.message || '任务未能完成', 72)
     case 'execution': return `${p.step?.tool || '执行操作'} · ${durationText(p.duration_ms)}`
     case 'final_answer': return compactText(p.answer || '', 72) || '已生成回复'
+    case 'model_context': return `Agent ${modelLabel(p.agent)} · Reviewer ${modelLabel(p.reviewer)}`
+    case 'skill_routing_catalog': return `提供 ${p.included_count ?? 0} / ${p.candidate_count ?? 0} 个候选`
+    case 'skill_routing_decision': return `${p.outcome === 'selected' ? '已选择' : '未启用'} · ${skillRoutingReason(p.reason)}`
+    case 'skill_not_selected': return skillRoutingReason(p.reason)
     case 'skill_selected': return `${p.name || p.id || 'Skill'} · v${p.version || '未标注'}`
+    case 'skill_selection_rejected': return `${p.requested_skill_id || '未知 Skill'} · ${skillRoutingReason(p.reason)}`
+    case 'skills_composed': return `已装配 ${(p.skill_ids || []).length} 个 Skill · 工具权限不变`
+    case 'task_cancelled': return `${p.reason === 'client_disconnected' ? '客户端连接中断' : '本轮已取消'} · ${durationText(p.elapsed_ms)}`
+    case 'llm_provider_created':
+    case 'llm_provider_updated': return `${p.name || p.provider_id || '提供商'} · ${(p.models || []).length} 个模型`
+    case 'llm_provider_deleted': return p.name || p.provider_id || '模型提供商'
+    case 'llm_models_discovered': return `${p.provider_id || '提供商'} · ${(p.models || []).length} 个模型`
+    case 'llm_defaults_updated': return `Agent ${modelLabel(p.agent)} · Reviewer ${modelLabel(p.reviewer)}`
     default: return '—'
   }
 }
@@ -429,6 +532,66 @@ function detailRows(ev) {
       ]
     case 'final_answer':
       return [{ label: '回复', value: p.answer || '—' }]
+    case 'model_context':
+      return [
+        { label: 'Agent 模型', value: modelContextText(p.agent) },
+        { label: 'Reviewer 模型', value: modelContextText(p.reviewer) },
+        { label: '会话配置版本', value: String(p.session_version ?? '—'), mono: true },
+      ]
+    case 'skill_routing_catalog':
+      return [
+        { label: '候选数量', value: String(p.candidate_count ?? 0) },
+        { label: '提供给模型', value: String(p.included_count ?? 0) },
+        { label: '目录是否截断', value: p.truncated ? '是' : '否' },
+        ...(p.error ? [{ label: '读取说明', value: p.error }] : []),
+      ]
+    case 'skill_routing_decision':
+      return [
+        { label: '结果', value: p.outcome === 'selected' ? '已选择 Skill' : '未启用 Skill' },
+        { label: '原因', value: skillRoutingReason(p.reason) },
+        { label: '请求的 Skill', value: p.requested_skill_id || '无', mono: true },
+      ]
+    case 'skill_not_selected':
+      return [
+        { label: '匹配方式', value: p.skill_mode === 'none' ? '本轮关闭' : '自动匹配' },
+        { label: '原因', value: skillRoutingReason(p.reason) },
+      ]
+    case 'skill_selection_rejected':
+      return [
+        { label: '请求的 Skill', value: p.requested_skill_id || '—', mono: true },
+        { label: '原因', value: skillRoutingReason(p.reason) },
+        { label: '规划轮次', value: String(p.round ?? '—'), mono: true },
+      ]
+    case 'skills_composed':
+      return [
+        { label: 'Skill', value: (p.skill_ids || []).join('、') || '—', mono: true },
+        { label: '工具依赖', value: (p.tool_dependencies || []).join('、') || '无', mono: true },
+        { label: '权限影响', value: '不改变工具权限' },
+      ]
+    case 'task_cancelled':
+      return [
+        { label: '停止原因', value: p.reason === 'client_disconnected' ? '客户端连接中断' : (p.reason || '任务取消') },
+        { label: '已运行', value: durationText(p.elapsed_ms), mono: true },
+        ...(p.stage ? [{ label: '停止阶段', value: p.stage }] : []),
+        ...(p.operation_id ? [{ label: '当前操作', value: p.operation_id, mono: true }] : []),
+      ]
+    case 'llm_provider_created':
+    case 'llm_provider_updated':
+    case 'llm_provider_deleted':
+    case 'llm_models_discovered':
+      return [
+        { label: '提供商', value: p.name || p.provider_id || '—' },
+        { label: '提供商编号', value: p.provider_id || '—', mono: true },
+        ...(p.adapter ? [{ label: '接口类型', value: p.adapter, mono: true }] : []),
+        ...(p.models ? [{ label: '模型', value: p.models.join('、') || '无', mono: true }] : []),
+        ...(p.version != null ? [{ label: '配置版本', value: String(p.version), mono: true }] : []),
+      ]
+    case 'llm_defaults_updated':
+      return [
+        { label: 'Agent 模型', value: modelContextText(p.agent) },
+        { label: 'Reviewer 模型', value: modelContextText(p.reviewer) },
+        { label: '配置版本', value: String(p.version ?? '—'), mono: true },
+      ]
     default:
       return []
   }
@@ -442,6 +605,12 @@ function planStepsText(steps = []) {
 function argsText(step) {
   const args = step?.arguments ?? step?.args ?? {}
   return Object.keys(args).length ? JSON.stringify(args) : '—'
+}
+
+function modelContextText(model) {
+  if (!model) return '未配置'
+  const provider = model.provider_name || model.provider_id || '未知提供商'
+  return `${provider} · ${model.model_id || '未知模型'} · 推理 ${model.reasoning_effort || 'auto'}`
 }
 
 function compactText(value, max) {
@@ -477,6 +646,19 @@ function toggleRaw(seq) {
   rawExpanded.has(seq) ? rawExpanded.delete(seq) : rawExpanded.add(seq)
 }
 
+function retrySelected() {
+  if (selectedId.value) select(selectedId.value)
+}
+
+async function responseError(response, fallback) {
+  try {
+    const body = await response.clone().json()
+    return body.detail || body.message || fallback
+  } catch {
+    return fallback
+  }
+}
+
 async function select(id) {
   const requestId = ++selectRequest
   selectedId.value = id || ''
@@ -497,7 +679,12 @@ async function select(id) {
       apiFetch(`/api/sessions/${id}/events`),
       apiFetch(`/api/sessions/${id}/verify`),
     ])
-    if (!eventResponse.ok || !verifyResponse.ok) throw new Error('服务器返回了错误状态')
+    if (!eventResponse.ok) {
+      throw new Error(await responseError(eventResponse, '服务器未能返回审计事件'))
+    }
+    if (!verifyResponse.ok) {
+      throw new Error(await responseError(verifyResponse, '服务器未能校验审计链'))
+    }
     const eventBody = await eventResponse.json()
     const verifyBody = await verifyResponse.json()
     if (requestId !== selectRequest || selectedId.value !== id) return
@@ -528,17 +715,35 @@ function exportReport() {
 }
 
 async function loadAuditTargets() {
-  const [scopeResponse] = await Promise.all([
-    apiFetch('/api/audit/scopes'),
+  const requestId = ++targetsRequest
+  targetsLoading.value = true
+  targetsError.value = ''
+  const scopeRequest = (async () => {
+    const scopeResponse = await apiFetch('/api/audit/scopes')
+    if (!scopeResponse.ok) {
+      throw new Error(await responseError(scopeResponse, '服务器未能返回审计范围'))
+    }
+    const body = await scopeResponse.json()
+    return Array.isArray(body.scopes) ? body.scopes : []
+  })()
+  const [scopeResult, sessionsResult] = await Promise.allSettled([
+    scopeRequest,
     refreshSessions(),
   ])
-  if (scopeResponse.ok) {
-    const body = await scopeResponse.json()
-    systemScopes.value = Array.isArray(body.scopes) ? body.scopes : []
+  if (requestId !== targetsRequest) return
+
+  const errors = []
+  if (scopeResult.status === 'fulfilled') systemScopes.value = scopeResult.value
+  else errors.push(scopeResult.reason?.message || '系统审计范围读取失败')
+  if (sessionsResult.status === 'rejected') {
+    errors.push(sessionsResult.reason?.message || '任务列表读取失败')
   }
+  targetsLoaded.value = scopeResult.status === 'fulfilled' || sessionsResult.status === 'fulfilled'
+  targetsError.value = errors.join('；')
+  targetsLoading.value = false
 }
 
-onMounted(() => { loadAuditTargets().catch(() => {}) })
+onMounted(loadAuditTargets)
 </script>
 
 <style scoped>

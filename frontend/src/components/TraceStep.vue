@@ -1,6 +1,7 @@
 <template>
   <article class="step-block" :class="[`risk-${riskClass}`, `is-${step.status}`, { open: step.expanded }]">
     <button type="button" class="step-header" :aria-expanded="step.expanded"
+            :aria-label="`${step.purpose || shortTool}，${statusText}，${riskLabel}`"
             @click="step.expanded = !step.expanded">
       <span class="status-node" :class="step.status">
         <span v-if="isActive" class="node-spinner" aria-hidden="true"></span>

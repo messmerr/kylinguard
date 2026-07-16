@@ -146,7 +146,14 @@
               </div>
               <p>{{ alert.message }}</p>
             </div>
-            <el-button size="small" plain @click.stop="ack(alert)">标记已读</el-button>
+            <el-button
+              size="small"
+              plain
+              :loading="ackingAlertIds.has(alert.id)"
+              :disabled="ackingAlertIds.has(alert.id)"
+              :aria-label="`标记告警“${alert.title}”为已读`"
+              @click.stop="ack(alert)"
+            >标记已读</el-button>
           </article>
         </div>
       </section>
@@ -175,6 +182,7 @@
 </template>
 
 <script setup>
+import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiFetch } from '../composables/useApi.js'
 import { stats } from '../composables/useChat.js'
@@ -190,6 +198,7 @@ import KgIcon from './KgIcon.vue'
 
 const props = defineProps({ open: { type: Boolean, default: true } })
 const emit = defineEmits(['close', 'closed'])
+const ackingAlertIds = ref(new Set())
 
 const status = ref(null)
 const alerts = ref([])
@@ -406,12 +415,26 @@ async function pollAlerts() {
 }
 
 async function ack(alert) {
+  if (ackingAlertIds.value.has(alert.id)) return
+  ackingAlertIds.value = new Set(ackingAlertIds.value).add(alert.id)
   try {
-    await Promise.all((alert.duplicateIds || [alert.id]).map((id) => (
+    const responses = await Promise.all((alert.duplicateIds || [alert.id]).map((id) => (
       apiFetch(`/api/alerts/${id}/ack`, { method: 'POST' })
     )))
+    const failed = responses.find((response) => !response.ok)
+    if (failed) {
+      const body = await failed.json().catch(() => ({}))
+      const detail = typeof body.detail === 'string' ? body.detail : body.detail?.message
+      throw new Error(detail || `标记失败（HTTP ${failed.status}）`)
+    }
     alerts.value = alerts.value.filter((item) => item.id !== alert.id)
-  } catch { /* 下轮刷新时重试 */ }
+  } catch (error) {
+    ElMessage.error(error.message || '告警暂时无法标记为已读，请重试')
+  } finally {
+    const next = new Set(ackingAlertIds.value)
+    next.delete(alert.id)
+    ackingAlertIds.value = next
+  }
 }
 
 onMounted(() => {

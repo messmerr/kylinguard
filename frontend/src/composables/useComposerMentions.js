@@ -26,6 +26,7 @@ export function useComposerMentions({ nodes, editorRef, workspaceRoot, disabled 
   const activeIndex = ref(0)
   let searchTimer = null
   let searchSerial = 0
+  let dismissedMentionKey = ''
 
   const mentionOpen = computed(() => Boolean(mention.value))
   const mentionQuery = computed(() => mention.value?.query || '')
@@ -71,7 +72,13 @@ export function useComposerMentions({ nodes, editorRef, workspaceRoot, disabled 
     if (candidates[activeIndex.value]?.disabled) moveActive(1, true)
   })
 
-  function closeMention() {
+  function mentionKey(value) {
+    if (!value) return ''
+    return [value.query || '', value.range?.start ?? '', value.range?.end ?? ''].join('\u0000')
+  }
+
+  function closeMention({ preserveDismissal = false } = {}) {
+    if (!preserveDismissal) dismissedMentionKey = ''
     mention.value = null
     fileResults.value = []
     filesError.value = ''
@@ -118,6 +125,12 @@ export function useComposerMentions({ nodes, editorRef, workspaceRoot, disabled 
       closeMention()
       return
     }
+    const nextMentionKey = mentionKey(next)
+    if (dismissedMentionKey && nextMentionKey === dismissedMentionKey) {
+      closeMention({ preserveDismissal: true })
+      return
+    }
+    dismissedMentionKey = ''
     const changed = !mention.value
       || mention.value.query !== next.query
       || mention.value.range?.start !== next.range?.start
@@ -166,7 +179,8 @@ export function useComposerMentions({ nodes, editorRef, workspaceRoot, disabled 
     }
     if (key === 'Enter' || key === 'Tab') return chooseCandidate()
     if (key === 'Escape') {
-      closeMention()
+      dismissedMentionKey = mentionKey(mention.value)
+      closeMention({ preserveDismissal: true })
       return true
     }
     return false
