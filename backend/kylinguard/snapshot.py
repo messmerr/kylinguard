@@ -6,12 +6,14 @@ SnapshotCache 后台定时刷新，请求路径零采集延迟；该缓存同时
 推送主动告警（磁盘/内存/CPU/失败服务），同一告警 10 分钟内不重复。
 """
 import asyncio
+import json
 import re
 import sys
 import time
 import uuid
 
 from kylinguard.executor import run_command
+from kylinguard.kylin_profile import collect_kylin_identity
 
 _IS_WINDOWS = sys.platform == "win32"
 _IS_DARWIN = sys.platform == "darwin"
@@ -98,6 +100,7 @@ _PSEUDO_FILESYSTEMS = {
 }
 
 _TITLES = {
+    "platform_identity": "银河麒麟环境身份",
     "uptime_load": "运行时长与负载", "memory": "内存(MB)", "disk": "磁盘",
     "top_cpu": "CPU 占用最高进程", "failed_units": "失败的服务",
     "recent_errors": "近期错误日志",
@@ -114,9 +117,22 @@ async def _collect_one(key: str, cmd: str | list[str]) -> tuple[str, str]:
     return key, f"[采集失败] {(r.stderr or r.stdout).strip()}"
 
 
+async def _collect_platform_identity() -> tuple[str, str]:
+    try:
+        profile = await collect_kylin_identity(runner=run_command)
+    except Exception as exc:  # 平台画像失败不能影响资源与告警快照
+        return "platform_identity", f"[采集失败] 平台身份识别失败：{exc}"
+    return (
+        "platform_identity",
+        json.dumps(profile, ensure_ascii=False, sort_keys=True),
+    )
+
+
 async def collect_snapshot() -> dict[str, str]:
     pairs = await asyncio.gather(
-        *(_collect_one(k, c) for k, c in _SNAPSHOT_COMMANDS.items()))
+        *(_collect_one(k, c) for k, c in _SNAPSHOT_COMMANDS.items()),
+        _collect_platform_identity(),
+    )
     return {**dict(pairs), **_STATIC_SNAPSHOT}
 
 

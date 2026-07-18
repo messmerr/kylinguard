@@ -147,8 +147,9 @@ async def test_启动_列举_调用_关闭(tmp_path):
     await mgr.start()
     try:
         desc = mgr.describe()
-        # 四个服务器的代表性工具都在清单里，且带风险标注
-        for token in ("sysinfo.system_snapshot", "services.stop_service",
+        # 内置服务器的代表性工具都在清单里，且带风险标注
+        for token in ("kylin.system_identity", "kylin.binary_compatibility",
+                      "sysinfo.system_snapshot", "services.stop_service",
                       "logs.journal_search", "run_command.run_command",
                       "run_command.run_batch",
                       "files.write_file", "files.replace_text",

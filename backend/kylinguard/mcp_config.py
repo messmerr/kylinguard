@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 BUILTIN_MCP_SERVER_IDS = frozenset({
-    "sysinfo", "services", "logs", "network", "disk", "security",
+    "kylin", "sysinfo", "services", "logs", "network", "disk", "security",
     "run_command", "files",
 })
 

@@ -530,6 +530,46 @@ test('已有 final_answer 时缺少 done 不会覆盖为断流失败', async () 
   assert.equal(chat.items.value.some((item) => item.kind === 'task_error'), false)
 })
 
+test('多步规划重试定稿时保留用户已经看到的前序文本', async () => {
+  reset()
+  const sse = controlledSse()
+  chatResponses.push(sse)
+  const request = chat.sendMessage('检查系统并继续处理')
+  await tick()
+
+  sse.event({ type: 'assistant_delta', text: '第一次规划尝试。' })
+  sse.event({ type: 'assistant_delta', text: '\n\n' })
+  sse.event({ type: 'assistant_delta', text: '第二次规划尝试。' })
+  sse.event({
+    type: 'plan', thought: '第二次规划尝试。', final_answer: null,
+    steps: [{
+      step_id: 'retry-step', tool: 'sysinfo.host_overview', arguments: {},
+      purpose: '检查主机状态', risk: 'low',
+    }],
+  })
+  await tick()
+
+  const thinking = chat.items.value.find((item) => item.kind === 'assistant')
+  assert.equal(thinking.role, 'thinking')
+  assert.equal(thinking.text, '第一次规划尝试。\n\n第二次规划尝试。')
+
+  sse.event({ type: 'assistant_delta', text: '第一次结论尝试。' })
+  sse.event({ type: 'assistant_delta', text: '\n\n' })
+  sse.event({ type: 'assistant_delta', text: '第二次结论尝试。' })
+  sse.event({
+    type: 'final_answer', answer: '第二次结论尝试。',
+    outcome: 'completed', elapsed_ms: 20,
+  })
+  sse.event({ type: 'done' })
+  sse.close()
+  await request
+
+  const replies = chat.items.value.filter((item) => item.kind === 'assistant')
+  assert.equal(replies.length, 2)
+  assert.equal(replies[1].role, 'answer')
+  assert.equal(replies[1].text, '第一次结论尝试。\n\n第二次结论尝试。')
+})
+
 test('取消确认会隐藏确认卡并收尾排队步骤', async () => {
   reset()
   const sse = controlledSse()

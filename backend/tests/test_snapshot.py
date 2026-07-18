@@ -1,3 +1,5 @@
+import json
+
 import kylinguard.snapshot as snap
 import kylinguard.alert_pusher as alert_pusher
 from kylinguard.models import ExecResult
@@ -14,9 +16,10 @@ async def test_全部采集成功(monkeypatch):
 
     monkeypatch.setattr(snap, "run_command", fake_run)
     s = await snap.collect_snapshot()
-    assert set(s) == {"uptime_load", "memory", "disk",
+    assert set(s) == {"platform_identity", "uptime_load", "memory", "disk",
                       "top_cpu", "failed_units", "recent_errors"}
     assert s["memory"].startswith("输出于[")
+    assert json.loads(s["platform_identity"])["schema_version"] == 1
 
 
 async def test_单项失败降级不抛错(monkeypatch):

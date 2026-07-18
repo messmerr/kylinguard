@@ -192,12 +192,19 @@ def test_skill依赖兼容自定义mcp工具名称():
     assert skill.required_tools == ("github.issues/list:2",)
 
 
-def test_store默认发现随包分发的磁盘诊断skill():
+def test_store默认发现随包分发的高质量诊断skills():
     store = SkillStore()
     skills = {item.id: item for item in store.list_skills()}
 
     assert builtin_skills_dir().is_dir()
-    assert set(skills) == {"disk-space-diagnosis"}
+    assert set(skills) == {
+        "disk-space-diagnosis",
+        "kylin-environment-readiness",
+        "kylin-io-root-cause",
+        "kylin-network-diagnosis",
+        "kylin-service-root-cause",
+        "loongarch-binary-compatibility",
+    }
     assert all(item.source == "builtin" and item.enabled
                for item in skills.values())
     disk = store.get_skill("disk-space-diagnosis")
@@ -212,6 +219,22 @@ def test_store默认发现随包分发的磁盘诊断skill():
         "disk.clean_file", "复核不完整", "不能改用 `run_command`",
     ):
         assert contract in disk.instructions
+
+    environment = store.get_skill("kylin-environment-readiness")
+    assert environment.required_tools == (
+        "kylin.system_identity",
+        "kylin.capability_matrix",
+        "kylin.deployment_readiness",
+    )
+    service = store.get_skill("kylin-service-root-cause")
+    assert "最早的明确失败" in service.instructions
+    assert "重启成功" in service.instructions
+    network = store.get_skill("kylin-network-diagnosis")
+    assert "累计值" in network.instructions and "扫描网段" in network.instructions
+    io_skill = store.get_skill("kylin-io-root-cause")
+    assert "/proc/diskstats" in io_skill.instructions and "单次采样" in io_skill.instructions
+    binary = store.get_skill("loongarch-binary-compatibility")
+    assert "不调用 `ldd`" in binary.instructions
     assert store.issues() == ()
 
 

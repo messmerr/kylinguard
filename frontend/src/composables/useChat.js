@@ -212,12 +212,34 @@ function push(context, item) {
   return r
 }
 
+function mergeStreamingText(streamed, finalized) {
+  const current = String(streamed || '')
+  const canonical = String(finalized || '')
+  if (!canonical) return current
+  if (!current) return canonical
+  if (current === canonical) return current
+
+  const visibleCurrent = current.trim()
+  const visibleCanonical = canonical.trim()
+  if (!visibleCanonical) return current
+  if (!visibleCurrent) return canonical
+
+  // 正常流式响应与定稿只有首尾空白差异；协议重试时，流式缓冲则包含
+  // “旧尝试 + 新尝试”，而定稿只包含最后一次有效尝试。两种情况都不能
+  // 用较短定稿覆盖用户已经看到的文本。
+  if (visibleCurrent.includes(visibleCanonical)) return current
+  if (visibleCanonical.includes(visibleCurrent)) return canonical
+  return `${current.trimEnd()}\n\n${visibleCanonical}`
+}
+
 function finishStreaming(context, role, text) {
   const model = context.currentTurn?.model || modelSelectionSnapshot()
   // 定稿当前流式文本项；回放模式（无流）直接新建
   if (context.streamingItem) {
     context.streamingItem.role = role
-    if (text) context.streamingItem.text = text
+    context.streamingItem.text = mergeStreamingText(
+      context.streamingItem.text, text,
+    )
     context.streamingItem.model = model
     context.streamingItem.streaming = false
     context.streamingItem = null

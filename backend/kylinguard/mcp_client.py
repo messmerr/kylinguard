@@ -34,6 +34,7 @@ from kylinguard.registry import get_meta
 from kylinguard.subprocess_env import agent_subprocess_env, safe_subprocess_env
 
 SERVERS: dict[str, str] = {
+    "kylin": "kylinguard.plugins.kylin",
     "sysinfo": "kylinguard.plugins.sysinfo",
     "services": "kylinguard.plugins.services",
     "logs": "kylinguard.plugins.logs",
@@ -45,6 +46,7 @@ SERVERS: dict[str, str] = {
 }
 
 BUILTIN_SERVER_NAMES: dict[str, str] = {
+    "kylin": "麒麟环境与诊断",
     "sysinfo": "系统状态",
     "services": "服务管理",
     "logs": "日志诊断",

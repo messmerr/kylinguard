@@ -51,6 +51,16 @@
                 </span>
               </div>
 
+              <div v-if="status" class="platform-identity" :class="`is-${platformSummary.tone}`">
+                <span class="platform-icon"><KgIcon name="server" :size="18" /></span>
+                <div class="platform-copy">
+                  <span>目标环境感知</span>
+                  <strong>{{ platformSummary.title }}</strong>
+                  <small>{{ platformSummary.detail }}</small>
+                </div>
+                <span class="platform-match">{{ platformSummary.badge }}</span>
+              </div>
+
               <div v-if="status" class="health-list">
                 <div v-for="metric in healthMetrics" :key="metric.key" class="health-metric">
                   <div class="metric-ring" :style="ringStyle(metric)" aria-hidden="true">
@@ -218,6 +228,7 @@ import {
   isMetricUnsupported,
   loadAverage,
   memoryUsagePercent as memoryPercent,
+  platformIdentity,
 } from '../utils/systemMetrics.js'
 
 const stats = ref(null)
@@ -268,6 +279,7 @@ const TONE_COLORS = Object.freeze({
 })
 
 const TITLES = {
+  platform_identity: '银河麒麟环境身份',
   uptime_load: '运行时长与负载',
   memory: '内存',
   disk: '磁盘',
@@ -282,6 +294,34 @@ const collectionState = computed(() => {
   if (!values.length) return { label: '等待采集', className: 'is-neutral' }
   if (failed) return { label: `${failed} 项不可用`, className: 'is-warning' }
   return { label: '采集正常', className: 'is-ok' }
+})
+
+const platformProfile = computed(() => (
+  platformIdentity(status.value?.snapshot?.platform_identity)
+))
+
+const platformSummary = computed(() => {
+  const profile = platformProfile.value
+  if (!profile) return {
+    title: '环境身份尚未确认', detail: '等待版本、架构和内核证据',
+    badge: '未确认', tone: 'warning',
+  }
+  const targetStatus = profile.contest_target?.status
+  const detected = Boolean(profile.kylin?.detected)
+  const title = profile.os?.pretty_name
+    || (detected ? '银河麒麟操作系统' : profile.os?.name)
+    || profile.platform || '未知系统'
+  const version = profile.kylin?.version || profile.os?.version_id || '版本未确认'
+  const architecture = profile.architecture?.normalized || '架构未确认'
+  const kernel = profile.kernel?.release ? ` · 内核 ${profile.kernel.release}` : ''
+  return {
+    title,
+    detail: `${version} · ${architecture}${kernel}`,
+    badge: targetStatus === 'matched' ? '赛题环境匹配'
+      : targetStatus === 'partial' ? '部分证据待确认' : '非目标环境',
+    tone: targetStatus === 'matched' ? 'success'
+      : targetStatus === 'partial' ? 'warning' : 'neutral',
+  }
 })
 
 const healthMetrics = computed(() => {
@@ -651,6 +691,44 @@ onUnmounted(() => {
   border-radius: 50%;
   background: currentColor;
 }
+
+.platform-identity {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  margin-top: var(--kg-space-4);
+  padding: 12px 14px;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-md);
+  background: #f8faff;
+}
+
+.platform-identity.is-success { border-color: rgb(32 154 98 / 22%); background: rgb(32 154 98 / 5%); }
+.platform-identity.is-warning { border-color: rgb(183 121 31 / 22%); background: rgb(183 121 31 / 5%); }
+.platform-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--kg-accent);
+  background: rgb(23 92 255 / 9%);
+}
+.platform-copy { min-width: 0; display: grid; gap: 2px; }
+.platform-copy > span { color: var(--kg-text-tertiary); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+.platform-copy strong { overflow: hidden; color: var(--kg-text-primary); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.platform-copy small { overflow: hidden; color: var(--kg-text-tertiary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.platform-match {
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: var(--kg-text-secondary);
+  background: rgb(123 135 157 / 10%);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.platform-identity.is-success .platform-match { color: var(--kg-success); background: rgb(32 154 98 / 10%); }
+.platform-identity.is-warning .platform-match { color: var(--kg-warning); background: rgb(183 121 31 / 10%); }
 
 .health-list {
   display: grid;

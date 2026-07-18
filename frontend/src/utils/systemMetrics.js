@@ -13,6 +13,18 @@ export function isMetricUnsupported(raw) {
   return typeof raw === 'string' && raw.startsWith('[平台不支持]')
 }
 
+export function platformIdentity(raw) {
+  if (isMetricUnavailable(raw)) return null
+  try {
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object'
+      || !parsed.kylin || !parsed.architecture || !parsed.contest_target) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 export function cpuUsagePercent(raw = '') {
   const explicit = raw.match(/CPU:\s*(\d+(?:\.\d+)?)%/i)
   if (explicit) return clampPercent(Number(explicit[1]))
