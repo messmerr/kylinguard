@@ -138,7 +138,7 @@ function slug(value, fallback = '') {
 }
 
 const BUILTIN_MCP_IDS = new Set([
-  'sysinfo', 'services', 'logs', 'network', 'disk', 'security',
+  'kylin', 'sysinfo', 'services', 'logs', 'network', 'disk', 'security',
   'run_command', 'files',
 ])
 

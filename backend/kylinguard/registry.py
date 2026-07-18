@@ -14,6 +14,21 @@ def _meta(server: str, tool: str, risk: RiskLevel, *, needs_sudo: bool = False,
 
 
 TOOL_REGISTRY: dict[str, ToolMeta] = dict([
+    # 银河麒麟环境与根因诊断（全只读）
+    _meta("kylin", "system_identity", RiskLevel.LOW,
+          description="识别银河麒麟版本、架构和运行环境"),
+    _meta("kylin", "capability_matrix", RiskLevel.LOW,
+          description="探测麒麟原生组件与诊断降级链"),
+    _meta("kylin", "deployment_readiness", RiskLevel.LOW,
+          description="检查 LoongArch V11 源码构建与运行条件"),
+    _meta("kylin", "service_diagnosis", RiskLevel.LOW,
+          description="汇总 systemd 服务状态、退出码和日志证据"),
+    _meta("kylin", "network_diagnosis", RiskLevel.LOW,
+          description="结构化采集接口、路由和链路错误证据"),
+    _meta("kylin", "io_diagnosis", RiskLevel.LOW,
+          description="结构化采集块设备拓扑和 I/O 指标"),
+    _meta("kylin", "binary_compatibility", RiskLevel.LOW,
+          description="检查 ELF 与 LoongArch 架构兼容性"),
     # 系统观测（全只读）
     _meta("sysinfo", "system_snapshot", RiskLevel.LOW, description="采集系统整体快照"),
     _meta("sysinfo", "top_processes", RiskLevel.LOW, description="资源占用最高的进程"),

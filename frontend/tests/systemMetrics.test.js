@@ -7,6 +7,7 @@ import {
   isMetricUnavailable,
   loadAverage,
   memoryUsagePercent,
+  platformIdentity,
 } from '../src/utils/systemMetrics.js'
 
 test('macOS CPU 使用率读取 idle，不把 load average 当百分比', () => {
@@ -31,4 +32,15 @@ map auto_home 0Bi 0Bi 0Bi 100% 0 0 - /System/Volumes/Data/home`
 
 test('平台不支持属于不可用数据', () => {
   assert.equal(isMetricUnavailable('[平台不支持] macOS 不提供 systemd'), true)
+})
+
+test('银河麒麟环境身份只接受完整结构化快照', () => {
+  const profile = {
+    kylin: { detected: true, version: 'V11' },
+    architecture: { normalized: 'loongarch64' },
+    contest_target: { status: 'matched' },
+  }
+  assert.deepEqual(platformIdentity(JSON.stringify(profile)), profile)
+  assert.equal(platformIdentity('{bad json'), null)
+  assert.equal(platformIdentity(JSON.stringify({ kylin: {} })), null)
 })
