@@ -137,7 +137,8 @@ ReasoningEffort = Literal[
     "auto", "none", "minimal", "low", "medium", "high", "xhigh", "max",
 ]
 ProviderAdapter = Literal[
-    "openai", "deepseek", "dashscope", "openai_compatible",
+    "openai", "deepseek", "kimi", "dashscope", "zhipu", "volcengine",
+    "minimax", "gemini", "siliconflow", "openrouter", "openai_compatible",
 ]
 
 

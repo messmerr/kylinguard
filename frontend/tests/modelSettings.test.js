@@ -26,6 +26,14 @@ test('读取模型只追加新 ID 并保留手工配置', () => {
   }])
 })
 
+test('品牌适配器只为协议明确的服务声明推理档位', () => {
+  const kimi = discoveredModelAdditions([], ['kimi-model'], 'kimi')
+  const gemini = discoveredModelAdditions([], ['gemini-model'], 'gemini')
+
+  assert.deepEqual(kimi[0].supportedEfforts, [])
+  assert.deepEqual(gemini[0].supportedEfforts, ['low', 'medium', 'high'])
+})
+
 test('自动保存单飞且连续变更采用最新快照', async () => {
   const calls = []
   const saved = []

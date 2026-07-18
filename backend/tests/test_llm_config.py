@@ -238,6 +238,38 @@ def test模型发现为兼容协议填入常用档位并保留DeepSeek语义(tmp
     store.close()
 
 
+def test常用品牌适配器保留各自安全的推理能力默认值(tmp_path):
+    settings = _settings(tmp_path)
+    store = LLMConfigStore(settings.db_path, settings)
+    cases = [
+        ("kimi", "https://api.moonshot.cn/v1", []),
+        ("zhipu", "https://open.bigmodel.cn/api/paas/v4", []),
+        ("volcengine", "https://ark.cn-beijing.volces.com/api/v3", []),
+        ("minimax", "https://api.minimaxi.com/v1", []),
+        ("gemini", "https://generativelanguage.googleapis.com/v1beta/openai",
+         ["low", "medium", "high"]),
+        ("siliconflow", "https://api.siliconflow.cn/v1", []),
+        ("openrouter", "https://openrouter.ai/api/v1", []),
+    ]
+
+    for adapter, base_url, expected_efforts in cases:
+        provider = store.create_provider(
+            name=adapter,
+            adapter=adapter,
+            base_url=base_url,
+            api_key=f"key-{adapter}",
+            models=[],
+        )
+        provider = store.add_discovered_models(
+            provider["id"], [f"{adapter}-model"],
+            expected_version=provider["version"],
+        )
+        assert provider["adapter"] == adapter
+        assert provider["models"][0]["supported_efforts"] == expected_efforts
+
+    store.close()
+
+
 async def test并发会话的contextvar路由不会串模型(tmp_path):
     settings = _settings(tmp_path)
     store = LLMConfigStore(settings.db_path, settings)
@@ -298,6 +330,21 @@ def test推理参数按适配器映射且能力未声明时可省略temperature(
     assert dashscope["extra_body"] == {
         "enable_thinking": True, "thinking_budget": 8192,
     }
+
+    kimi = LLMClient(
+        "https://api.moonshot.cn/v1", "k", "kimi-model",
+        adapter="kimi", reasoning_effort="auto",
+        supports_temperature=False,
+    )._completion_options(messages, 0.2)
+    assert kimi == {"model": "kimi-model", "messages": messages}
+
+    gemini = LLMClient(
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "k", "gemini-model", adapter="gemini", reasoning_effort="low",
+        supports_temperature=False,
+    )._completion_options(messages, 0.2)
+    assert gemini["reasoning_effort"] == "low"
+    assert "temperature" not in gemini
 
 
 class _FakePipeline:

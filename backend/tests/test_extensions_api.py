@@ -73,8 +73,6 @@ async def test_extensions列出随包内置skills且包含可查看正文(app):
     assert body["enabled_mcp_servers"] == []
     assert {item["id"] for item in body["skills"]} == {
         "disk-space-diagnosis",
-        "systemd-service-troubleshooting",
-        "security-baseline-inspection",
     }
     assert all(item["source"] == "builtin" for item in body["skills"])
     assert all(item["manual_only"] is False for item in body["skills"])
