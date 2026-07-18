@@ -196,12 +196,20 @@
           <el-form-item label="名称">
             <el-input v-model="providerForm.name" maxlength="80" placeholder="例如 DeepSeek" />
           </el-form-item>
-          <el-form-item label="接口类型">
+          <el-form-item label="服务商模板 / 接口类型">
             <el-select v-model="providerForm.adapter" style="width: 100%" @change="onAdapterChange">
-              <el-option value="openai" label="OpenAI" />
-              <el-option value="deepseek" label="DeepSeek" />
-              <el-option value="dashscope" label="阿里云百炼 / DashScope" />
-              <el-option value="openai_compatible" label="其他 OpenAI Compatible" />
+              <el-option-group
+                v-for="group in PROVIDER_TEMPLATE_GROUPS"
+                :key="group.label"
+                :label="group.label"
+              >
+                <el-option
+                  v-for="option in group.options"
+                  :key="option.id"
+                  :value="option.id"
+                  :label="option.label"
+                />
+              </el-option-group>
             </el-select>
           </el-form-item>
         </div>
@@ -341,6 +349,12 @@ import {
   createLatestSaveQueue,
   discoveredModelAdditions,
 } from '../utils/modelSettings.js'
+import {
+  PROVIDER_TEMPLATE_GROUPS,
+  providerAdapterLabel,
+  providerDiscoveryHint,
+  providerTemplatePatch,
+} from '../utils/providerTemplates.js'
 
 const EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const EFFORT_PRESETS = {
@@ -348,11 +362,6 @@ const EFFORT_PRESETS = {
   standard: ['low', 'medium', 'high'],
   full: [...EFFORT_VALUES],
   clear: [],
-}
-const ADAPTER_DEFAULT_URLS = {
-  openai: 'https://api.openai.com/v1',
-  deepseek: 'https://api.deepseek.com',
-  dashscope: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
 }
 const providerDialogOpen = ref(false)
 const providerSaving = ref(false)
@@ -403,12 +412,9 @@ const nonLocalInsecureHttp = computed(() => {
     return false
   }
 })
-const discoveryEffortHint = computed(() => ({
-  openai: '读取后默认开放 low / medium / high；扩展档位可批量设置。',
-  openai_compatible: '兼容接口读取后默认开放 low / medium / high；仍可逐模型调整。',
-  deepseek: '读取后使用官方的 none / high / max 三档。',
-  dashscope: 'DashScope 能力因模型而异，可批量设置后逐模型调整。',
-})[providerForm.adapter] || '模型接口通常不返回推理档位，可在这里手动声明。')
+const discoveryEffortHint = computed(
+  () => providerDiscoveryHint(providerForm.adapter),
+)
 
 watch(() => [
   modelDefaults.version,
@@ -429,17 +435,11 @@ function reloadModelConfiguration() {
 onMounted(reloadModelConfiguration)
 
 function adapterLabel(adapter) {
-  return ({
-    openai: 'OpenAI', deepseek: 'DeepSeek', dashscope: 'DashScope',
-    openai_compatible: 'OpenAI Compatible',
-  })[adapter] || adapter
+  return providerAdapterLabel(adapter)
 }
 
 function onAdapterChange(adapter) {
-  const current = providerForm.baseUrl.trim()
-  if (!current || Object.values(ADAPTER_DEFAULT_URLS).includes(current)) {
-    providerForm.baseUrl = ADAPTER_DEFAULT_URLS[adapter] || ''
-  }
+  Object.assign(providerForm, providerTemplatePatch(adapter, providerForm))
 }
 
 function syncDefaultDraft() {

@@ -26,7 +26,10 @@ import httpx
 from kylinguard.config import Settings
 from kylinguard.llm import LLMClient
 
-ADAPTERS = {"openai", "deepseek", "dashscope", "openai_compatible"}
+ADAPTERS = {
+    "openai", "deepseek", "kimi", "dashscope", "zhipu", "volcengine",
+    "minimax", "gemini", "siliconflow", "openrouter", "openai_compatible",
+}
 EFFORTS = {"auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"}
 _REF_RE = re.compile(r"^[a-f0-9]{32}$")
 _MAX_SECRET_BYTES = 16 * 1024
@@ -39,6 +42,7 @@ _DISCOVERED_EFFORTS_BY_ADAPTER = {
     "openai": ["low", "medium", "high"],
     "openai_compatible": ["low", "medium", "high"],
     "deepseek": ["none", "high", "max"],
+    "gemini": ["low", "medium", "high"],
 }
 
 _SCHEMA = """

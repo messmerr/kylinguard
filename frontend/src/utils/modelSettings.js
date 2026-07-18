@@ -2,6 +2,7 @@ const DISCOVERED_EFFORTS = {
   openai: ['low', 'medium', 'high'],
   openai_compatible: ['low', 'medium', 'high'],
   deepseek: ['none', 'high', 'max'],
+  gemini: ['low', 'medium', 'high'],
 }
 
 function cleanModelId(value) {
