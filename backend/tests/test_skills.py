@@ -192,18 +192,26 @@ def test_skill依赖兼容自定义mcp工具名称():
     assert skill.required_tools == ("github.issues/list:2",)
 
 
-def test_store默认发现三个随包分发的内置skill():
+def test_store默认发现随包分发的磁盘诊断skill():
     store = SkillStore()
     skills = {item.id: item for item in store.list_skills()}
 
     assert builtin_skills_dir().is_dir()
-    assert set(skills) == {
-        "disk-space-diagnosis",
-        "systemd-service-troubleshooting",
-        "security-baseline-inspection",
-    }
+    assert set(skills) == {"disk-space-diagnosis"}
     assert all(item.source == "builtin" and item.enabled
                for item in skills.values())
+    disk = store.get_skill("disk-space-diagnosis")
+    assert disk.version == "2.0.0"
+    assert disk.required_tools == (
+        "sysinfo.disk_usage",
+        "disk.disk_hotspots",
+        "disk.large_files",
+    )
+    for contract in (
+        ">= 95%", "85%–94%", "depth=1", "depth=2", "min_mb=100",
+        "disk.clean_file", "复核不完整", "不能改用 `run_command`",
+    ):
+        assert contract in disk.instructions
     assert store.issues() == ()
 
 
@@ -294,7 +302,7 @@ def test_store用户crud启停持久化且不能覆盖内置(tmp_path):
             "disk-space-diagnosis", _content(),
         )
     with pytest.raises(SkillConflictError):
-        restarted.delete_user_skill("security-baseline-inspection")
+        restarted.delete_user_skill("disk-space-diagnosis")
 
     restarted.delete_user_skill("my-check")
     assert not (user_dir / "my-check").exists()
