@@ -98,8 +98,9 @@ def test_全局默认ask且权限状态对所有会话生效(store, tmp_path):
     assert store.get_permissions("s2").auto_review_roots == [root]
 
 
-def test_完全访问入口单独揭示且隐藏时原子收回权限(store):
+def test_完全访问只覆盖指定任务且收回时原子撤销授权(store):
     store.create("s1", "执行")
+    store.create("s2", "另一任务")
     grant = store.add_grant(
         "s1",
         scope=PermissionGrantScope.SESSION,
@@ -111,36 +112,29 @@ def test_完全访问入口单独揭示且隐藏时原子收回权限(store):
         expires_at=time.time() + 60,
     )
 
-    exposed = store.set_full_access_visibility(
-        visible=True,
-        expected_version=1,
-        updated_by="admin",
-    )
-    assert exposed.full_access_visible is True
-    assert exposed.mode == PermissionMode.ASK
-    assert exposed.version == 1
-    assert store.list_grants("s1") == [grant]
-
-    enabled = store.set_permission_settings(
-        mode=PermissionMode.FULL_ACCESS,
-        auto_review_roots=[],
+    enabled = store.set_session_full_access(
+        "s1",
+        enabled=True,
         expected_version=1,
         updated_by="admin",
         execution_profile="sha256:test-profile",
     )
     assert enabled.mode == PermissionMode.FULL_ACCESS
-    assert enabled.full_access_visible is True
     assert enabled.version == 2
+    assert store.get_permissions("s2").mode == PermissionMode.ASK
+    assert store.get_permissions("s2").version == 1
+    assert store.list_grants("s1") == []
 
-    hidden = store.set_full_access_visibility(
-        visible=False,
+    revoked = store.set_session_full_access(
+        "s1",
+        enabled=False,
         expected_version=2,
         updated_by="admin",
     )
-    assert hidden.full_access_visible is False
-    assert hidden.mode == PermissionMode.ASK
-    assert hidden.execution_profile == ""
-    assert hidden.version == 3
+    assert revoked.mode == PermissionMode.ASK
+    assert revoked.execution_profile == ""
+    assert revoked.version == 1
+    assert store.get_permissions("s2").mode == PermissionMode.ASK
 
 
 def test_自动执行范围可独立于审批模式保存(store, tmp_path):
@@ -162,14 +156,18 @@ def test_完全访问持续生效并保留自动执行范围(store, tmp_path):
     root = str((tmp_path / "docs").resolve())
     store.create("s1", "记录")
     store.set_permission_settings(
-        mode=PermissionMode.FULL_ACCESS, auto_review_roots=[root],
+        mode=PermissionMode.ASK, auto_review_roots=[root],
         expected_version=1,
         updated_by="admin",
+    )
+    store.set_session_full_access(
+        "s1", enabled=True, expected_version=2,
+        updated_by="admin", execution_profile="sha256:test-profile",
     )
     context = store.get_permissions("s1")
     assert context.mode == PermissionMode.FULL_ACCESS
     assert context.auto_review_roots == [root]
-    assert context.version == 2
+    assert context.version == 3
 
 
 def test_过期授权在时钟回拨后也不会复活(store):

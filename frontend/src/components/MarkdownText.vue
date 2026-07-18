@@ -78,9 +78,9 @@ async function handleContentClick(event) {
   border-radius: var(--kg-radius-xs); background: var(--kg-bg-surface-2); color: var(--kg-accent);
   font-family: var(--kg-font-mono); font-size: .88em; }
 .md pre { position: relative; margin: 11px 0; padding: 13px 14px; overflow-x: auto;
-  border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md);
-  background: var(--kg-bg-code); box-shadow: inset 3px 0 0 #31548d; }
-.md pre code { padding: 0; border: none; background: none; color: #d9e2ef;
+  border: 1px solid var(--kg-border-default); border-radius: var(--kg-radius-md);
+  background: var(--kg-bg-surface-1); }
+.md pre code { padding: 0; border: none; background: none; color: var(--kg-text-secondary);
   font-size: 12px; line-height: 1.65; }
 .md table { display: block; width: 100%; margin: 11px 0; overflow-x: auto;
   border-collapse: collapse; border: 1px solid var(--kg-border-subtle);

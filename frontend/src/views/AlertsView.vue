@@ -1,13 +1,32 @@
 <template>
   <div class="kg-page alerts-page">
     <div class="kg-page-inner alerts-inner">
-      <header class="page-head">
-        <div>
-          <p class="page-description">设置触发条件、通知渠道，并查看告警记录。</p>
-        </div>
-        <div class="page-actions">
+      <div v-if="alertsLoading" class="alerts-state" role="status" aria-live="polite">
+        <span class="kg-spinner" aria-hidden="true"></span>
+        <div><strong>正在读取告警配置</strong><span>正在同步待处理告警、规则、渠道与历史记录。</span></div>
+      </div>
+
+      <div v-else-if="alertsLoadError" class="alerts-state is-error" role="alert">
+        <KgIcon name="warning" :size="19" />
+        <div><strong>告警配置暂时未加载</strong><span>{{ alertsLoadError }}</span></div>
+        <el-button :loading="alertsLoading" @click="loadAlerts">重新加载</el-button>
+      </div>
+
+      <div v-else class="alerts-tabs-shell">
+        <div class="tab-actions">
           <el-button
-            v-if="tab === 'rules'"
+            v-if="tab === 'pending'"
+            type="primary"
+            :loading="pendingAlertsAcknowledgingAll"
+            :disabled="alertsLoading || pendingAlertsLoading || !pendingAlerts.length || pendingAlertAckingIds.size > 0"
+            aria-label="一键确认全部待处理告警"
+            @click="ackAllPending"
+          >
+            <KgIcon v-if="!pendingAlertsAcknowledgingAll" name="check" :size="15" />
+            一键确认
+          </el-button>
+          <el-button
+            v-else-if="tab === 'rules'"
             type="primary"
             :disabled="alertsLoading || activeSectionUnavailable"
             aria-label="新建告警规则"
@@ -36,23 +55,119 @@
             @click="clearHistory"
           >清空历史</el-button>
         </div>
-      </header>
 
-      <div v-if="alertsLoading" class="alerts-state" role="status" aria-live="polite">
-        <span class="kg-spinner" aria-hidden="true"></span>
-        <div><strong>正在读取告警配置</strong><span>正在同步规则、渠道与历史记录。</span></div>
-      </div>
+      <el-tabs v-model="tab" class="main-tabs">
+        <el-tab-pane name="pending">
+          <template #label>
+            <span class="tab-label">
+              待处理
+              <span>{{ tabCountText(pendingAlertCount) }}</span>
+            </span>
+          </template>
 
-      <div v-else-if="alertsLoadError" class="alerts-state is-error" role="alert">
-        <KgIcon name="warning" :size="19" />
-        <div><strong>告警配置暂时未加载</strong><span>{{ alertsLoadError }}</span></div>
-        <el-button :loading="alertsLoading" @click="loadAlerts">重新加载</el-button>
-      </div>
+          <section class="alerts-section" aria-label="待处理告警">
+            <div
+              v-if="pendingAlertsError && pendingAlertsLoaded"
+              class="section-refresh-warning"
+              role="status"
+            >
+              <KgIcon name="warning" :size="15" />
+              <span>待处理告警刷新未完成，当前显示最近一次结果。</span>
+              <el-button text size="small" :loading="pendingAlertsLoading" @click="refreshPendingSection">重试</el-button>
+            </div>
+            <div
+              v-if="pendingAlertsError && !pendingAlertsLoaded"
+              class="kg-empty alerts-empty is-error"
+              role="alert"
+            >
+              <KgIcon name="warning" :size="24" />
+              <strong>暂时无法读取待处理告警</strong>
+              <span>{{ pendingAlertsError }}</span>
+              <el-button :loading="pendingAlertsLoading" @click="refreshPendingSection">重新加载</el-button>
+            </div>
+            <template v-else-if="pendingAlerts.length">
+              <el-table :data="pagedPendingAlerts" class="wide-table alert-table pending-table">
+                <el-table-column label="产生时间" width="150">
+                  <template #default="{ row }"><span class="time-text">{{ fmtTime(row.ts) }}</span></template>
+                </el-table-column>
+                <el-table-column label="告警" min-width="290">
+                  <template #default="{ row }">
+                    <div class="pending-copy">
+                      <strong>{{ row.title }}</strong>
+                      <span>{{ row.message }}</span>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="当前值" width="92">
+                  <template #default="{ row }"><code class="condition">{{ row.metric || '—' }}</code></template>
+                </el-table-column>
+                <el-table-column label="严重度" width="90">
+                  <template #default="{ row }">
+                    <span class="severity" :class="row.severity">
+                      <span class="severity-dot"></span>{{ severityLabel(row.severity) }}
+                    </span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="" width="94" align="right">
+                  <template #default="{ row }">
+                    <el-button
+                      text
+                      :loading="pendingAlertAckingIds.has(row.id)"
+                      :disabled="pendingAlertsAcknowledgingAll || pendingAlertAckingIds.has(row.id)"
+                      :aria-label="`确认告警 ${row.title}`"
+                      @click="ackPending(row)"
+                    >确认</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
 
-      <el-tabs v-else v-model="tab" class="main-tabs">
+              <div class="compact-list pending-compact">
+                <article v-for="alert in pagedPendingAlerts" :key="alert.id" class="compact-record pending-record">
+                  <div class="compact-head">
+                    <strong>{{ alert.title }}</strong>
+                    <span class="severity" :class="alert.severity">
+                      <span class="severity-dot"></span>{{ severityLabel(alert.severity) }}
+                    </span>
+                    <time>{{ fmtTime(alert.ts) }}</time>
+                  </div>
+                  <div class="compact-meta">
+                    <span>{{ alert.metric || '暂无指标值' }}</span>
+                    <span>{{ alert.kind || '系统状态' }}</span>
+                  </div>
+                  <p class="compact-message">{{ alert.message }}</p>
+                  <div class="compact-actions">
+                    <el-button
+                      text
+                      :loading="pendingAlertAckingIds.has(alert.id)"
+                      :disabled="pendingAlertsAcknowledgingAll || pendingAlertAckingIds.has(alert.id)"
+                      @click="ackPending(alert)"
+                    >确认告警</el-button>
+                  </div>
+                </article>
+              </div>
+
+              <div class="alerts-pagination">
+                <el-pagination
+                  v-model:current-page="pendingPage"
+                  :page-size="PAGE_SIZE"
+                  :total="pendingAlerts.length"
+                  :pager-count="5"
+                  layout="total, prev, pager, next"
+                />
+              </div>
+            </template>
+
+            <div v-else class="kg-empty alerts-empty pending-empty">
+              <KgIcon name="check" :size="24" />
+              <strong>当前没有待处理告警</strong>
+              <span>系统检测到需要关注的风险时，会在这里提醒你。</span>
+            </div>
+          </section>
+        </el-tab-pane>
+
         <el-tab-pane name="rules">
           <template #label>
-            <span class="tab-label">规则 <span>{{ rules.length }}</span></span>
+            <span class="tab-label">规则 <span>{{ tabCountText(rules.length) }}</span></span>
           </template>
 
           <section class="alerts-section" aria-label="告警规则">
@@ -68,7 +183,7 @@
             <el-button :loading="ruleRefreshing" @click="refreshRules">重新加载</el-button>
           </div>
           <template v-else-if="rules.length">
-            <el-table :data="rules" class="wide-table alert-table">
+            <el-table :data="pagedRules" class="wide-table alert-table">
               <el-table-column label="规则名称" prop="name" min-width="145" />
               <el-table-column label="指标" min-width="150">
                 <template #default="{ row }">{{ metricLabel(row.metric) }}</template>
@@ -86,17 +201,19 @@
               <el-table-column label="沉默期" width="86">
                 <template #default="{ row }">{{ row.silence_minutes }} 分钟</template>
               </el-table-column>
-              <el-table-column label="通知" min-width="150">
+              <el-table-column label="通知" width="156">
                 <template #default="{ row }">
-                  <span v-if="!row.channel_ids.length" class="muted">仅记录</span>
-                  <span v-else class="channel-list">
-                    <span v-for="channelId in row.channel_ids" :key="channelId" class="channel-chip">
-                      {{ channelName(channelId) }}
+                  <div class="notification-cell">
+                    <span v-if="!ruleChannels(row).length" class="notification-empty">仅记录</span>
+                    <span v-else class="channel-list">
+                      <span v-for="channel in ruleChannels(row)" :key="channel.id" class="channel-chip">
+                        {{ channel.name }}
+                      </span>
                     </span>
-                  </span>
+                  </div>
                 </template>
               </el-table-column>
-              <el-table-column label="状态" width="66" align="center">
+              <el-table-column label="状态" width="84" align="left">
                 <template #default="{ row }">
                   <el-switch
                     :model-value="row.enabled"
@@ -108,9 +225,9 @@
                   />
                 </template>
               </el-table-column>
-              <el-table-column label="" width="106" align="right">
+              <el-table-column label="操作" width="176" align="center">
                 <template #default="{ row }">
-                  <div class="row-actions">
+                  <div class="row-actions rule-row-actions">
                     <el-button text :disabled="isRuleBusy(row.id)" @click="openRuleDialog(row)">编辑</el-button>
                     <el-button
                       text
@@ -126,7 +243,7 @@
             </el-table>
 
             <div class="compact-list rules-compact">
-              <article v-for="rule in rules" :key="rule.id" class="compact-record">
+              <article v-for="rule in pagedRules" :key="rule.id" class="compact-record">
                 <div class="compact-head">
                   <strong>{{ rule.name }}</strong>
                   <span class="severity" :class="rule.severity">
@@ -159,6 +276,16 @@
                 </div>
               </article>
             </div>
+
+            <div class="alerts-pagination">
+              <el-pagination
+                v-model:current-page="rulesPage"
+                :page-size="PAGE_SIZE"
+                :total="rules.length"
+                :pager-count="5"
+                layout="total, prev, pager, next"
+              />
+            </div>
           </template>
 
           <div v-else class="kg-empty alerts-empty">
@@ -172,7 +299,7 @@
 
         <el-tab-pane name="channels">
           <template #label>
-            <span class="tab-label">渠道 <span>{{ channels.length }}</span></span>
+            <span class="tab-label">渠道 <span>{{ tabCountText(channels.length) }}</span></span>
           </template>
 
           <section class="alerts-section" aria-label="推送渠道">
@@ -188,7 +315,7 @@
             <el-button :loading="channelRefreshing" @click="refreshChannels">重新加载</el-button>
           </div>
           <template v-else-if="channels.length">
-            <el-table :data="channels" class="wide-table alert-table">
+            <el-table :data="pagedChannels" class="wide-table alert-table">
               <el-table-column label="渠道名称" prop="name" min-width="170" />
               <el-table-column label="类型" width="108">
                 <template #default="{ row }">
@@ -198,7 +325,7 @@
               <el-table-column label="目标" min-width="310">
                 <template #default="{ row }"><code class="target">{{ chTarget(row) }}</code></template>
               </el-table-column>
-              <el-table-column label="状态" width="70" align="center">
+              <el-table-column label="状态" width="76" align="center">
                 <template #default="{ row }">
                   <el-switch
                     :model-value="row.enabled"
@@ -210,7 +337,7 @@
                   />
                 </template>
               </el-table-column>
-              <el-table-column label="" width="164" align="right">
+              <el-table-column label="操作" width="184" align="center">
                 <template #default="{ row }">
                   <div class="row-actions">
                     <el-button
@@ -235,7 +362,7 @@
             </el-table>
 
             <div class="compact-list channels-compact">
-              <article v-for="channel in channels" :key="channel.id" class="compact-record">
+              <article v-for="channel in pagedChannels" :key="channel.id" class="compact-record">
                 <div class="compact-head">
                   <strong>{{ channel.name }}</strong>
                   <span class="type-badge">{{ channelTypeLabel(channel.type) }}</span>
@@ -267,6 +394,16 @@
                 </div>
               </article>
             </div>
+
+            <div class="alerts-pagination">
+              <el-pagination
+                v-model:current-page="channelsPage"
+                :page-size="PAGE_SIZE"
+                :total="channels.length"
+                :pager-count="5"
+                layout="total, prev, pager, next"
+              />
+            </div>
           </template>
 
           <div v-else class="kg-empty alerts-empty">
@@ -280,7 +417,7 @@
 
         <el-tab-pane name="history">
           <template #label>
-            <span class="tab-label">历史 <span>{{ history.length }}</span></span>
+            <span class="tab-label">历史 <span>{{ tabCountText(history.length) }}</span></span>
           </template>
 
           <section class="alerts-section" aria-label="告警历史">
@@ -296,7 +433,11 @@
             <el-button :loading="historyRefreshing" @click="refreshHistory">重新加载</el-button>
           </div>
           <template v-else-if="history.length">
-            <el-table :data="history" class="wide-table alert-table history-table">
+            <el-table
+              :data="pagedHistory"
+              class="wide-table alert-table history-table"
+              @row-click="openHistoryDetail"
+            >
               <el-table-column label="时间" width="150">
                 <template #default="{ row }"><span class="time-text">{{ fmtTime(row.fired_at) }}</span></template>
               </el-table-column>
@@ -322,10 +463,28 @@
               <el-table-column label="说明" prop="message" min-width="210">
                 <template #default="{ row }"><span class="history-message">{{ row.message }}</span></template>
               </el-table-column>
+              <el-table-column label="" width="48" align="right">
+                <template #default="{ row }">
+                  <el-button
+                    text
+                    circle
+                    title="查看详情"
+                    :aria-label="`查看告警“${row.rule_name}”详情`"
+                    @click.stop="openHistoryDetail(row)"
+                  ><KgIcon name="info" :size="15" /></el-button>
+                </template>
+              </el-table-column>
             </el-table>
 
             <div class="compact-list history-compact">
-              <article v-for="item in history" :key="`${item.fired_at}-${item.rule_name}`" class="compact-record">
+              <button
+                v-for="item in pagedHistory"
+                :key="item.id"
+                type="button"
+                class="compact-record history-record"
+                :aria-label="`查看告警“${item.rule_name}”详情`"
+                @click="openHistoryDetail(item)"
+              >
                 <div class="compact-head">
                   <strong>{{ item.rule_name }}</strong>
                   <span class="severity" :class="item.severity">
@@ -338,7 +497,18 @@
                   <span>{{ notifiedSummary(item) }}</span>
                 </div>
                 <p class="compact-message">{{ item.message }}</p>
-              </article>
+                <span class="compact-detail-hint">查看详情<KgIcon name="chevron" :size="12" /></span>
+              </button>
+            </div>
+
+            <div class="alerts-pagination">
+              <el-pagination
+                v-model:current-page="historyPage"
+                :page-size="PAGE_SIZE"
+                :total="history.length"
+                :pager-count="5"
+                layout="total, prev, pager, next"
+              />
             </div>
           </template>
 
@@ -350,7 +520,49 @@
           </section>
         </el-tab-pane>
       </el-tabs>
+      </div>
     </div>
+
+    <el-dialog
+      v-model="historyDetailOpen"
+      class="alert-history-dialog"
+      title="告警详情"
+      width="min(620px, calc(100vw - 28px))"
+      align-center
+      destroy-on-close
+      @closed="clearHistoryDetail"
+    >
+      <template v-if="selectedHistory">
+        <div class="history-detail-head">
+          <span class="history-detail-icon" :class="selectedHistory.severity">
+            <KgIcon name="warning" :size="18" />
+          </span>
+          <div>
+            <strong>{{ selectedHistory.rule_name }}</strong>
+            <span>{{ fmtFullTime(selectedHistory.fired_at) }}</span>
+          </div>
+          <span class="severity" :class="selectedHistory.severity">
+            <span class="severity-dot"></span>{{ severityLabel(selectedHistory.severity) }}
+          </span>
+        </div>
+
+        <dl class="history-detail-list">
+          <div><dt>监控指标</dt><dd>{{ metricLabel(selectedHistory.metric) }}</dd></div>
+          <div><dt>触发值</dt><dd><code>{{ metricValueText(selectedHistory) }}</code></dd></div>
+          <div><dt>通知渠道</dt><dd>{{ notifiedSummary(selectedHistory) }}</dd></div>
+          <div><dt>记录编号</dt><dd><code>#{{ selectedHistory.id }}</code></dd></div>
+          <div><dt>规则编号</dt><dd>{{ selectedHistory.rule_id == null ? '规则已删除或不可用' : `#${selectedHistory.rule_id}` }}</dd></div>
+        </dl>
+
+        <section class="history-detail-message" aria-label="告警说明">
+          <strong>告警说明</strong>
+          <p>{{ selectedHistory.message || '暂无说明' }}</p>
+        </section>
+      </template>
+      <template #footer>
+        <el-button @click="historyDetailOpen = false">关闭</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="ruleDialog"
@@ -552,14 +764,33 @@
 
 <script setup>
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useApi.js'
+import {
+  acknowledgePendingAlert,
+  acknowledgeAllPendingAlerts,
+  pendingAlertAckingIds,
+  pendingAlertCount,
+  pendingAlerts,
+  pendingAlertsError,
+  pendingAlertsLoaded,
+  pendingAlertsLoading,
+  pendingAlertsAcknowledgingAll,
+  refreshPendingAlerts,
+} from '../composables/useAlerts.js'
+import { alertBadgeText, resolveRuleChannels } from '../utils/alerts.js'
 
-const tab = ref('rules')
+const tab = ref('pending')
 const rules = ref([])
 const channels = ref([])
 const history = ref([])
+const pendingPage = ref(1)
+const rulesPage = ref(1)
+const channelsPage = ref(1)
+const historyPage = ref(1)
+const historyDetailOpen = ref(false)
+const selectedHistory = ref(null)
 const alertsLoading = ref(true)
 const alertsLoadError = ref('')
 const ruleLoadError = ref('')
@@ -577,6 +808,27 @@ const deletingChannelId = ref(null)
 const testingChannelId = ref(null)
 const clearingHistory = ref(false)
 
+const PAGE_SIZE = 10
+
+function pageItems(items, page) {
+  const start = (page - 1) * PAGE_SIZE
+  return items.slice(start, start + PAGE_SIZE)
+}
+
+function clampPage(page, count) {
+  page.value = Math.min(page.value, Math.max(1, Math.ceil(count / PAGE_SIZE)))
+}
+
+const pagedPendingAlerts = computed(() => pageItems(pendingAlerts.value, pendingPage.value))
+const pagedRules = computed(() => pageItems(rules.value, rulesPage.value))
+const pagedChannels = computed(() => pageItems(channels.value, channelsPage.value))
+const pagedHistory = computed(() => pageItems(history.value, historyPage.value))
+
+watch(() => pendingAlerts.value.length, count => clampPage(pendingPage, count))
+watch(() => rules.value.length, count => clampPage(rulesPage, count))
+watch(() => channels.value.length, count => clampPage(channelsPage, count))
+watch(() => history.value.length, count => clampPage(historyPage, count))
+
 const METRICS = [
   { value: 'memory_pct', label: '内存使用率 (%)' },
   { value: 'cpu_pct', label: 'CPU 使用率 (%)' },
@@ -587,7 +839,8 @@ const METRICS = [
 const metricLabel = (value) => METRICS.find(metric => metric.value === value)?.label ?? value
 const severityLabel = (value) => ({ warning: '警告', critical: '严重' }[value] ?? value)
 const channelTypeLabel = (value) => ({ webhook: 'Webhook', email: '邮件' }[value] ?? value)
-const channelName = (id) => channels.value.find(channel => channel.id === id)?.name ?? `#${id}`
+const tabCountText = (count) => alertBadgeText(count) || '0'
+const ruleChannels = (rule) => resolveRuleChannels(rule.channel_ids, channels.value)
 const chTarget = (channel) => channel.type === 'webhook'
   ? channel.config.url || '—'
   : `${channel.config.user || '—'} → ${channel.config.to || '—'}`
@@ -604,7 +857,8 @@ function conditionText(rule) {
 }
 
 function channelSummary(rule) {
-  return rule.channel_ids.length ? rule.channel_ids.map(channelName).join('、') : '仅记录'
+  const names = ruleChannels(rule).map(channel => channel.name)
+  return names.length ? names.join('、') : '仅记录'
 }
 
 function notifiedSummary(item) {
@@ -614,6 +868,13 @@ function notifiedSummary(item) {
 function fmtTime(timestamp) {
   return new Date(timestamp * 1000).toLocaleString('zh-CN', {
     month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+}
+
+function fmtFullTime(timestamp) {
+  return new Date(timestamp * 1000).toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   })
 }
@@ -653,13 +914,25 @@ async function refreshSection(loader, errorState, refreshingState) {
 const refreshRules = () => refreshSection(loadRules, ruleLoadError, ruleRefreshing)
 const refreshChannels = () => refreshSection(loadChannels, channelLoadError, channelRefreshing)
 const refreshHistory = () => refreshSection(loadHistory, historyLoadError, historyRefreshing)
+async function refreshPendingSection() {
+  try {
+    await refreshPendingAlerts()
+    return true
+  } catch {
+    return false
+  }
+}
 
 async function loadAlerts() {
   alertsLoading.value = true
   alertsLoadError.value = ''
-  const results = await Promise.all([refreshChannels(), refreshRules(), refreshHistory()])
-  if (results.every((result) => !result)) {
-    alertsLoadError.value = '规则、渠道与历史记录均暂时无法读取，请检查后端服务后重试'
+  const results = await Promise.all([
+    refreshPendingSection(), refreshChannels(), refreshRules(), refreshHistory(),
+  ])
+  const hasRetainedData = pendingAlertsLoaded.value || rules.value.length
+    || channels.value.length || history.value.length
+  if (results.every((result) => !result) && !hasRetainedData) {
+    alertsLoadError.value = '待处理告警、规则、渠道与历史记录均暂时无法读取，请检查后端服务后重试'
   }
   alertsLoading.value = false
 }
@@ -689,6 +962,7 @@ async function requestJson(url, options = {}, fallback = '请求失败') {
 }
 
 const activeSectionUnavailable = computed(() => ({
+  pending: Boolean(pendingAlertsError.value && !pendingAlertsLoaded.value),
   rules: Boolean(ruleLoadError.value && !rules.value.length),
   channels: Boolean(channelLoadError.value && !channels.value.length),
   history: Boolean(historyLoadError.value && !history.value.length),
@@ -701,6 +975,33 @@ const isDialogCancel = (reason) => reason === 'cancel' || reason === 'close'
   || reason?.action === 'cancel' || reason?.action === 'close'
 
 onMounted(loadAlerts)
+
+async function ackPending(alert) {
+  try {
+    await acknowledgePendingAlert(alert)
+    ElMessage.success('告警已确认')
+  } catch (reason) {
+    ElMessage.error(reason.message || '告警暂时无法确认，请重试')
+  }
+}
+
+async function ackAllPending() {
+  try {
+    const count = await acknowledgeAllPendingAlerts()
+    ElMessage.success(count ? `已确认 ${count} 条待处理告警` : '待处理告警已同步')
+  } catch (error) {
+    ElMessage.error(error.message || '待处理告警批量确认失败，请重试')
+  }
+}
+
+function openHistoryDetail(item) {
+  selectedHistory.value = item
+  historyDetailOpen.value = true
+}
+
+function clearHistoryDetail() {
+  selectedHistory.value = null
+}
 
 const ruleDialog = ref(false)
 const ruleForm = reactive({
@@ -970,6 +1271,11 @@ async function deleteChannel(id) {
   deletingChannelId.value = id
   try {
     await request(`/api/alert-channels/${id}`, { method: 'DELETE' }, '渠道删除失败')
+    channels.value = channels.value.filter(channel => channel.id !== id)
+    rules.value = rules.value.map(rule => ({
+      ...rule,
+      channel_ids: rule.channel_ids.filter(channelId => channelId !== id),
+    }))
     const [channelsRefreshed, rulesRefreshed] = await Promise.all([
       refreshChannels(),
       refreshRules(),
@@ -1016,6 +1322,8 @@ async function clearHistory() {
   clearingHistory.value = true
   try {
     await request('/api/alert-history', { method: 'DELETE' }, '告警历史清空失败')
+    historyDetailOpen.value = false
+    selectedHistory.value = null
     const refreshed = await refreshHistory()
     if (refreshed) ElMessage.success('告警历史已清空')
     else ElMessage.warning('告警历史已清空，但列表刷新失败；当前显示可能未更新')
@@ -1028,24 +1336,25 @@ async function clearHistory() {
 </script>
 
 <style scoped>
-.alerts-inner { width: min(100%, 1120px); }
+.alerts-inner { width: 100%; }
 
-.page-head {
+.alerts-tabs-shell { position: relative; }
+
+.tab-actions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  height: 38px;
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--kg-space-6);
+  align-items: center;
 }
 
-.page-description {
-  margin: 0;
-  color: var(--kg-text-tertiary);
-  font-size: 13px;
-}
-
-.page-actions :deep(.el-button) { gap: 7px; }
-.main-tabs { margin-top: var(--kg-space-5); }
+.tab-actions :deep(.el-button) { gap: 7px; }
+.main-tabs { margin-top: 0; }
+.main-tabs :deep(.el-tabs__nav-wrap) { padding-right: 132px; }
 .main-tabs :deep(.el-tabs__header) { margin-bottom: var(--kg-space-3); }
+.main-tabs :deep(.el-tabs__content) { overflow: visible; }
 
 .tab-label {
   display: inline-flex;
@@ -1066,6 +1375,30 @@ async function clearHistory() {
 }
 
 .alert-table { width: 100%; }
+
+.pending-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.pending-copy strong {
+  overflow: hidden;
+  color: var(--kg-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-copy span {
+  overflow: hidden;
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .condition,
 .target,
@@ -1103,10 +1436,18 @@ async function clearHistory() {
   background: currentColor;
 }
 
-.channel-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.notification-cell {
+  min-width: 0;
+  min-height: 23px;
+  display: flex;
+  align-items: center;
+}
+
+.channel-list { min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 
 .channel-chip,
-.type-badge {
+.type-badge,
+.notification-empty {
   display: inline-flex;
   align-items: center;
   min-height: 21px;
@@ -1118,16 +1459,21 @@ async function clearHistory() {
 }
 
 .type-badge { color: var(--kg-info); }
+.notification-empty {
+  border-color: transparent;
+  color: var(--kg-text-disabled);
+}
 .muted { color: var(--kg-text-disabled); font-size: 12px; }
 
 .row-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 2px;
+  gap: 0;
   white-space: nowrap;
 }
 
 .row-actions :deep(.el-button + .el-button) { margin-left: 0; }
+.rule-row-actions { justify-content: center; }
 
 .history-message {
   display: block;
@@ -1138,17 +1484,30 @@ async function clearHistory() {
   white-space: nowrap;
 }
 
+.history-table :deep(.el-table__row) { cursor: pointer; }
+.history-table :deep(.el-table__row:hover .history-message) { color: var(--kg-text-secondary); }
+
 .alerts-empty {
   min-height: 230px;
   border-bottom: 1px solid var(--kg-border-subtle);
 }
 
+.alerts-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--kg-space-4) 0 var(--kg-space-2);
+}
+
 .compact-list { display: none; }
 
 .compact-record {
+  width: 100%;
   padding: var(--kg-space-3) 0;
   border-bottom: 1px solid var(--kg-border-subtle);
 }
+
+.pending-record { border-left: 3px solid var(--kg-warning-border); padding-left: var(--kg-space-3); }
+.pending-record:has(.severity.critical) { border-left-color: var(--kg-danger); }
 
 .compact-head {
   display: flex;
@@ -1201,6 +1560,133 @@ async function clearHistory() {
   margin: 6px 0 0;
   color: var(--kg-text-secondary);
   font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.history-record {
+  display: block;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--kg-motion-fast);
+}
+
+.history-record:hover { background: var(--kg-bg-surface-2); }
+.history-record:focus-visible { outline: 2px solid var(--kg-focus); outline-offset: 2px; }
+
+.compact-detail-hint {
+  margin-top: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--kg-accent);
+  font-size: 11px;
+}
+
+:global(.alert-history-dialog .el-dialog__body) {
+  max-height: calc(100vh - 190px);
+  overflow-y: auto;
+}
+
+.history-detail-head {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--kg-space-3);
+  padding-bottom: var(--kg-space-4);
+  border-bottom: 1px solid var(--kg-border-subtle);
+}
+
+.history-detail-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--kg-warning-border);
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-warning-soft);
+  color: var(--kg-warning);
+}
+
+.history-detail-icon.critical {
+  border-color: var(--kg-danger-border);
+  background: var(--kg-danger-soft);
+  color: var(--kg-danger);
+}
+
+.history-detail-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.history-detail-head strong {
+  overflow: hidden;
+  color: var(--kg-text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-detail-head > div > span {
+  color: var(--kg-text-tertiary);
+  font-family: var(--kg-font-mono);
+  font-size: 11px;
+}
+
+.history-detail-list {
+  margin: var(--kg-space-4) 0 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: var(--kg-space-6);
+}
+
+.history-detail-list > div {
+  min-width: 0;
+  padding: 9px 0;
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: var(--kg-space-2);
+  border-bottom: 1px solid var(--kg-border-subtle);
+}
+
+.history-detail-list dt {
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+}
+
+.history-detail-list dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--kg-text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.history-detail-list code {
+  color: var(--kg-text-secondary);
+  font: 11px/1.5 var(--kg-font-mono);
+}
+
+.history-detail-message { margin-top: var(--kg-space-4); }
+.history-detail-message strong { color: var(--kg-text-primary); font-size: 12px; font-weight: 600; }
+.history-detail-message p {
+  margin: 7px 0 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--kg-warning-border);
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .dialog-form :deep(.el-form-item) { margin-bottom: 17px; }
@@ -1269,8 +1755,23 @@ async function clearHistory() {
   font-size: 11px;
 }
 
-@media (max-width: 1080px) {
+@media (max-width: 1280px) {
   .wide-table { display: none; }
   .compact-list { display: grid; }
+}
+
+@media (max-width: 560px) {
+  .main-tabs :deep(.el-tabs__nav-wrap) { padding-right: 112px; }
+
+  .alerts-pagination {
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  .alerts-pagination :deep(.el-pager li) { min-width: 24px; }
+  .history-detail-head { grid-template-columns: 34px minmax(0, 1fr); }
+  .history-detail-icon { width: 34px; height: 34px; }
+  .history-detail-head > .severity { grid-column: 2; }
+  .history-detail-list { grid-template-columns: 1fr; }
 }
 </style>

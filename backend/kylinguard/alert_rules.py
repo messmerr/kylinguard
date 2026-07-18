@@ -11,7 +11,7 @@ import json
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ---------- 数据类 ----------
 
@@ -50,6 +50,7 @@ class AlertHistoryEntry:
     message: str
     channels_notified: list[str]
     fired_at: float
+    acknowledged_at: float | None
 
 
 # ---------- 存储 ----------
@@ -84,7 +85,8 @@ CREATE TABLE IF NOT EXISTS alert_history (
     severity           TEXT    NOT NULL,
     message            TEXT    NOT NULL,
     channels_notified  TEXT    NOT NULL DEFAULT '[]',
-    fired_at           REAL    NOT NULL
+    fired_at           REAL    NOT NULL,
+    acknowledged_at    REAL
 );
 CREATE TABLE IF NOT EXISTS alert_last_fired (
     rule_id   INTEGER PRIMARY KEY,
@@ -102,6 +104,20 @@ class AlertRuleStore:
             s = stmt.strip()
             if s:
                 self._conn.execute(s)
+        history_columns = {
+            row[1] for row in self._conn.execute(
+                "PRAGMA table_info(alert_history)").fetchall()
+        }
+        if "acknowledged_at" not in history_columns:
+            self._conn.execute(
+                "ALTER TABLE alert_history ADD COLUMN acknowledged_at REAL")
+            # Existing history predates the pending queue and must not become unread.
+            self._conn.execute(
+                "UPDATE alert_history SET acknowledged_at=fired_at")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_alert_history_pending "
+            "ON alert_history(acknowledged_at, fired_at DESC)")
+        self._prune_missing_channel_ids_locked()
         self._conn.commit()
 
     def close(self) -> None:
@@ -125,6 +141,7 @@ class AlertRuleStore:
                  threshold: float, severity: str, silence_minutes: int,
                  channel_ids: list[int], enabled: bool = True) -> int:
         with self._lock:
+            channel_ids = self._valid_channel_ids_locked(channel_ids)
             cur = self._conn.execute(
                 "INSERT INTO alert_rules(name,metric,operator,threshold,severity,"
                 "silence_minutes,channel_ids,enabled,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -139,12 +156,13 @@ class AlertRuleStore:
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if not fields:
             return False
-        if "channel_ids" in fields:
-            fields["channel_ids"] = json.dumps(fields["channel_ids"])
         if "enabled" in fields:
             fields["enabled"] = int(fields["enabled"])
-        sets = ", ".join(f"{k}=?" for k in fields)
         with self._lock:
+            if "channel_ids" in fields:
+                fields["channel_ids"] = json.dumps(
+                    self._valid_channel_ids_locked(fields["channel_ids"]))
+            sets = ", ".join(f"{k}=?" for k in fields)
             cur = self._conn.execute(
                 f"UPDATE alert_rules SET {sets} WHERE id=?",
                 [*fields.values(), rule_id])
@@ -205,6 +223,8 @@ class AlertRuleStore:
         with self._lock:
             cur = self._conn.execute(
                 "DELETE FROM alert_channels WHERE id=?", (ch_id,))
+            if cur.rowcount > 0:
+                self._prune_missing_channel_ids_locked()
             self._conn.commit()
         return cur.rowcount > 0
 
@@ -222,6 +242,33 @@ class AlertRuleStore:
             self._conn.commit()
             return cur.lastrowid
 
+    def record_trigger(self, rule_id: int, rule_name: str, metric: str,
+                       metric_value: str, severity: str, message: str) -> int:
+        """Persist a new unread rule alert and its cooldown timestamp atomically."""
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO alert_history(rule_id,rule_name,metric,metric_value,"
+                "severity,message,channels_notified,fired_at,acknowledged_at) "
+                "VALUES(?,?,?,?,?,?,?,?,NULL)",
+                (rule_id, rule_name, metric, metric_value, severity, message,
+                 "[]", now))
+            self._conn.execute(
+                "INSERT INTO alert_last_fired(rule_id,fired_at) VALUES(?,?)"
+                " ON CONFLICT(rule_id) DO UPDATE SET fired_at=excluded.fired_at",
+                (rule_id, now))
+            self._conn.commit()
+            return cur.lastrowid
+
+    def update_history_channels(self, history_id: int,
+                                channels_notified: list[str]) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE alert_history SET channels_notified=? WHERE id=?",
+                (json.dumps(channels_notified), history_id))
+            self._conn.commit()
+        return cur.rowcount > 0
+
     def list_history(self, limit: int = 200) -> list[AlertHistoryEntry]:
         with self._lock:
             rows = self._conn.execute(
@@ -229,9 +276,40 @@ class AlertRuleStore:
                 (limit,)).fetchall()
         return [self._row_to_history(r) for r in rows]
 
+    def list_pending(self) -> list[AlertHistoryEntry]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM alert_history WHERE acknowledged_at IS NULL "
+                "ORDER BY fired_at DESC").fetchall()
+        return [self._row_to_history(r) for r in rows]
+
+    def acknowledge_history(self, history_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE alert_history "
+                "SET acknowledged_at=COALESCE(acknowledged_at, ?) WHERE id=?",
+                (time.time(), history_id))
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def acknowledge_all_pending(self) -> list[int]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM alert_history WHERE acknowledged_at IS NULL"
+            ).fetchall()
+            history_ids = [row["id"] for row in rows]
+            if history_ids:
+                self._conn.execute(
+                    "UPDATE alert_history SET acknowledged_at=? "
+                    "WHERE acknowledged_at IS NULL",
+                    (time.time(),))
+                self._conn.commit()
+        return history_ids
+
     def clear_history(self) -> None:
         with self._lock:
-            self._conn.execute("DELETE FROM alert_history")
+            self._conn.execute(
+                "DELETE FROM alert_history WHERE acknowledged_at IS NOT NULL")
             self._conn.commit()
 
     # ---- 冷却时间 ----
@@ -250,6 +328,41 @@ class AlertRuleStore:
                 " ON CONFLICT(rule_id) DO UPDATE SET fired_at=excluded.fired_at",
                 (rule_id, time.time()))
             self._conn.commit()
+
+    def _valid_channel_ids_locked(self, channel_ids: list[int]) -> list[int]:
+        requested = list(dict.fromkeys(int(item) for item in channel_ids))
+        if not requested:
+            return []
+        placeholders = ",".join("?" for _ in requested)
+        existing = {
+            row[0] for row in self._conn.execute(
+                f"SELECT id FROM alert_channels WHERE id IN ({placeholders})",
+                requested).fetchall()
+        }
+        return [channel_id for channel_id in requested if channel_id in existing]
+
+    def _prune_missing_channel_ids_locked(self) -> None:
+        valid_ids = {
+            row[0] for row in self._conn.execute(
+                "SELECT id FROM alert_channels").fetchall()
+        }
+        rows = self._conn.execute(
+            "SELECT id, channel_ids FROM alert_rules").fetchall()
+        for row in rows:
+            invalid_json = False
+            try:
+                channel_ids = json.loads(row["channel_ids"])
+            except (TypeError, ValueError):
+                channel_ids = []
+                invalid_json = True
+            filtered = [
+                channel_id for channel_id in channel_ids
+                if channel_id in valid_ids
+            ]
+            if invalid_json or filtered != channel_ids:
+                self._conn.execute(
+                    "UPDATE alert_rules SET channel_ids=? WHERE id=?",
+                    (json.dumps(filtered), row["id"]))
 
     # ---- 内部转换 ----
 
@@ -279,4 +392,5 @@ class AlertRuleStore:
             severity=r["severity"], message=r["message"],
             channels_notified=json.loads(r["channels_notified"]),
             fired_at=r["fired_at"],
+            acknowledged_at=r["acknowledged_at"],
         )

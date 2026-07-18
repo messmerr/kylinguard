@@ -38,6 +38,31 @@ export function memoryUsagePercent(raw = '') {
   return macos ? clampPercent(100 - Number(macos[1])) : null
 }
 
+export function formatMemoryTable(raw = '') {
+  const lines = String(raw).split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  const headerIndex = lines.findIndex(line => /^total\s+used\s+free\b/i.test(line))
+  if (headerIndex < 0) return String(raw)
+
+  const header = lines[headerIndex].split(/\s+/)
+  const body = lines.slice(headerIndex + 1)
+    .filter(line => /^(?:Mem|Swap):/i.test(line))
+    .map(line => line.split(/\s+/))
+  if (!body.length) return String(raw)
+
+  const rows = [['', ...header], ...body]
+  const columnCount = Math.max(...rows.map(row => row.length))
+  const widths = Array.from({ length: columnCount }, (_, index) => (
+    Math.max(...rows.map(row => (row[index] || '').length))
+  ))
+
+  return rows.map(row => (
+    Array.from({ length: columnCount }, (_, index) => {
+      const cell = row[index] || ''
+      return index === 0 ? cell.padEnd(widths[index]) : cell.padStart(widths[index])
+    }).join('  ').trimEnd()
+  )).join('\n')
+}
+
 export function diskUsagePercent(raw = '') {
   let highest = null
   for (const line of String(raw).split('\n')) {

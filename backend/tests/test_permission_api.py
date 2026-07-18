@@ -63,6 +63,16 @@ async def _expose_full_access(client, headers, *, version=1):
     )
 
 
+async def _set_session_full_access(
+    client, headers, session_id, *, enabled=True, version=1,
+):
+    return await client.put(
+        f"/api/sessions/{session_id}/full-access",
+        headers=headers,
+        json={"enabled": enabled, "version": version},
+    )
+
+
 def _sse(text: str) -> list[dict]:
     return [
         json.loads(block.removeprefix("data: "))
@@ -191,76 +201,74 @@ async def test_完全访问可由环境显式关闭并返回明确原因(tmp_pat
             "/api/permissions", headers=headers, json={
                 "mode": "full_access", "version": 1,
             })
-        expose_attempt = await _expose_full_access(client, headers)
+        session_attempt = await _set_session_full_access(
+            client, headers, "s1")
     assert status.json()["full_access_available"] is False
-    assert response.status_code == 403
-    assert response.json()["detail"]["code"] == "full_access_disabled"
-    assert expose_attempt.status_code == 403
-    assert expose_attempt.json()["detail"]["code"] == "full_access_disabled"
-    assert "KG_ALLOW_FULL_ACCESS=false" in response.json()["detail"]["message"]
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "full_access_session_required"
+    assert session_attempt.status_code == 403
+    assert session_attempt.json()["detail"]["code"] == "full_access_disabled"
+    assert "KG_ALLOW_FULL_ACCESS=false" in session_attempt.json()["detail"]["message"]
 
 
-async def test_完全访问默认隐藏且服务端拒绝跳过揭示步骤(app):
-    app.state.sessions.create("visibility-pending", "等待授权")
-    _, pending = app.state.permission_requests.create(
-        "visibility-pending", "fp", 1, "files.write", "/srv/report.md",
+async def test_完全访问只影响指定任务并拒绝全局开启(app):
+    app.state.sessions.create("task-a", "任务 A")
+    app.state.sessions.create("task-b", "任务 B")
+    _, pending_a = app.state.permission_requests.create(
+        "task-a", "fp-a", 1, "files.write", "/srv/a.md",
+    )
+    _, pending_b = app.state.permission_requests.create(
+        "task-b", "fp-b", 1, "files.write", "/srv/b.md",
     )
     async with _client(app) as client:
         headers = await _request_headers(client)
-        hidden_attempt = await client.put(
+        global_attempt = await client.put(
             "/api/permissions", headers=headers, json={
                 "mode": "full_access", "version": 1,
             },
         )
-        exposed = await _expose_full_access(client, headers)
-        assert pending.done() is False
-        enabled = await client.put(
-            "/api/permissions", headers=headers, json={
-                "mode": "full_access", "version": 1,
-            },
-        )
+        enabled = await _set_session_full_access(
+            client, headers, "task-a")
+        task_a = await client.get(
+            "/api/sessions/task-a/permissions", headers=headers)
+        task_b = await client.get(
+            "/api/sessions/task-b/permissions", headers=headers)
 
-    assert hidden_attempt.status_code == 403
-    assert hidden_attempt.json()["detail"]["code"] == "full_access_hidden"
-    assert exposed.status_code == 200
-    assert exposed.json()["full_access_visible"] is True
-    assert exposed.json()["mode"] == "ask"
-    assert exposed.json()["version"] == 1
+    assert global_attempt.status_code == 400
+    assert global_attempt.json()["detail"]["code"] == "full_access_session_required"
     assert enabled.status_code == 200
     assert enabled.json()["mode"] == "full_access"
     assert enabled.json()["version"] == 2
-    assert pending.done() is True
-    events = app.state.audit.events("__permissions__")
-    assert [event["event_type"] for event in events[-2:]] == [
-        "full_access_visibility_changed", "permission_changed",
-    ]
+    assert enabled.json()["session_id"] == "task-a"
+    assert task_a.json()["mode"] == "full_access"
+    assert task_b.json()["mode"] == "ask"
+    assert task_b.json()["version"] == 1
+    assert pending_a.done() is True
+    assert pending_b.done() is False
+    event = app.state.audit.events("task-a")[-1]
+    assert event["event_type"] == "permission_changed"
+    assert event["payload"]["source"] == "session_full_access"
 
 
-async def test_隐藏入口会立即收回完全访问并使旧版本请求失效(app):
+async def test_收回任务完全访问会使该任务旧版本请求失效(app):
+    app.state.sessions.create("revoke-task", "收回权限")
     async with _client(app) as client:
         headers = await _request_headers(client)
-        exposed = await _expose_full_access(client, headers)
-        enabled = await client.put(
-            "/api/permissions", headers=headers, json={
-                "mode": "full_access", "version": exposed.json()["version"],
-            },
+        enabled = await _set_session_full_access(
+            client, headers, "revoke-task")
+        revoked = await _set_session_full_access(
+            client, headers, "revoke-task", enabled=False,
+            version=enabled.json()["version"],
         )
-        hidden = await client.put(
-            "/api/permissions/full-access-visibility",
-            headers=headers,
-            json={"visible": False, "version": enabled.json()["version"]},
-        )
-        stale_enable = await client.put(
-            "/api/permissions", headers=headers, json={
-                "mode": "full_access", "version": enabled.json()["version"],
-            },
+        stale_enable = await _set_session_full_access(
+            client, headers, "revoke-task",
+            version=enabled.json()["version"],
         )
 
-    assert hidden.status_code == 200
-    assert hidden.json()["full_access_visible"] is False
-    assert hidden.json()["mode"] == "ask"
-    assert stale_enable.status_code == 403
-    assert stale_enable.json()["detail"]["code"] == "full_access_hidden"
+    assert revoked.status_code == 200
+    assert revoked.json()["mode"] == "ask"
+    assert revoked.json()["session_id"] == "revoke-task"
+    assert stale_enable.status_code == 409
 
 
 def test_服务端关闭完全访问会在启动时永久收回旧会话(tmp_path):
@@ -270,10 +278,9 @@ def test_服务端关闭完全访问会在启动时永久收回旧会话(tmp_pat
         "old-full",
         "旧完全访问",
     )
-    store.set_permission_settings(
-        mode=PermissionMode.FULL_ACCESS, auto_review_roots=[],
-        expected_version=1,
-        updated_by="admin",
+    store.set_session_full_access(
+        "old-full", enabled=True, expected_version=1,
+        updated_by="admin", execution_profile="sha256:any-profile",
     )
     store.close()
 
@@ -284,10 +291,10 @@ def test_服务端关闭完全访问会在启动时永久收回旧会话(tmp_pat
         allow_full_access=False,
     ), with_tools=False)
     context = disabled_app.state.sessions.get_permissions("old-full")
-    events = disabled_app.state.audit.events("__permissions__")
+    events = disabled_app.state.audit.events("old-full")
 
     assert context.mode == PermissionMode.ASK
-    assert context.version == 3
+    assert context.version == 1
     assert events[-1]["event_type"] == "permission_changed"
     assert events[-1]["payload"]["reason"] == "full_access_disabled"
 
@@ -299,9 +306,8 @@ def test_后端重启总会收回完全访问并要求重新开启(tmp_path):
         "old-profile",
         "旧执行边界",
     )
-    store.set_permission_settings(
-        mode=PermissionMode.FULL_ACCESS, auto_review_roots=[],
-        expected_version=1,
+    store.set_session_full_access(
+        "old-profile", enabled=True, expected_version=1,
         # 即使执行指纹看似未改变，也不能证明 sudoers/groups/capabilities
         # 没有变化；进程重启后必须重新开启完全访问。
         execution_profile="sha256:any-profile",
@@ -316,7 +322,7 @@ def test_后端重启总会收回完全访问并要求重新开启(tmp_path):
         allow_full_access=True,
     ), with_tools=False)
     context = app.state.sessions.get_permissions("old-profile")
-    events = app.state.audit.events("__permissions__")
+    events = app.state.audit.events("old-profile")
 
     assert context.mode == PermissionMode.ASK
     assert context.execution_profile == ""
@@ -332,9 +338,8 @@ def test_后端重启收回草稿完全访问但保留草稿生命周期(tmp_pat
         draft=True,
         strict=True,
     )
-    store.set_permission_settings(
-        mode=PermissionMode.FULL_ACCESS, auto_review_roots=[],
-        expected_version=1,
+    store.set_session_full_access(
+        "draft-profile", enabled=True, expected_version=1,
         execution_profile="sha256:any-profile", updated_by="admin",
     )
     store.close()
@@ -347,7 +352,7 @@ def test_后端重启收回草稿完全访问但保留草稿生命周期(tmp_pat
     ), with_tools=False)
     context = restarted.state.sessions.get_permissions("draft-profile")
     summary = restarted.state.sessions.list()[0]
-    events = restarted.state.audit.events("__permissions__")
+    events = restarted.state.audit.events("draft-profile")
 
     assert context.mode == PermissionMode.ASK
     assert context.execution_profile == ""
@@ -375,12 +380,8 @@ async def test_完全访问不会把无效执行配置报告为可用(
         headers = await _request_headers(client)
         status = await client.get(
             "/api/permissions", headers=headers)
-        create_attempt = await client.put(
-            "/api/permissions", headers=headers, json={
-                "mode": "full_access",
-                "version": 1,
-            },
-        )
+        create_attempt = await _set_session_full_access(
+            client, headers, "s1")
 
     assert status.json()["full_access_available"] is False
     assert message in status.json()["full_access_unavailable_reason"]
@@ -420,7 +421,7 @@ async def test_独立执行账户须真实通过非交互sudo与工作目录探�
     assert "sudo -n" in response.json()["full_access_unavailable_reason"]
 
 
-async def test_首条消息前开启全局完全访问无需创建草稿会话(tmp_path):
+async def test_完全访问必须在任务创建后单独开启(tmp_path):
     workspace = tmp_path / "project"
     workspace.mkdir()
     settings = Settings(
@@ -435,29 +436,31 @@ async def test_首条消息前开启全局完全访问无需创建草稿会话(t
     draft_app.state.pipeline = FakePipeline()
     async with _client(draft_app) as client:
         headers = await _request_headers(client)
-        exposed = await _expose_full_access(client, headers)
-        enabled = await client.put("/api/permissions", headers=headers, json={
-            "mode": "full_access",
-            "version": exposed.json()["version"],
-        })
+        global_attempt = await client.put(
+            "/api/permissions", headers=headers,
+            json={"mode": "full_access", "version": 1},
+        )
         listed_before = await client.get("/api/sessions", headers=headers)
         first_turn = await client.post("/api/chat", headers=headers, json={
             "message": "第一条真实任务",
             "workspace_root": str(workspace),
         })
-    assert enabled.status_code == 200
-    assert enabled.json()["mode"] == "full_access"
-    assert enabled.json()["version"] == 2
-    assert enabled.json()["execution_profile"]
+        session_id = _sse(first_turn.text)[0]["session_id"]
+        enabled = await _set_session_full_access(
+            client, headers, session_id)
+    assert global_attempt.status_code == 400
     assert listed_before.json()["sessions"] == []
     assert first_turn.status_code == 200
-    session_id = _sse(first_turn.text)[0]["session_id"]
+    assert enabled.status_code == 200
+    assert enabled.json()["mode"] == "full_access"
+    assert enabled.json()["session_id"] == session_id
+    assert enabled.json()["execution_profile"]
     context = draft_app.state.sessions.get_permissions(session_id)
     assert context.mode == PermissionMode.FULL_ACCESS
     assert context.version == 2
     assert draft_app.state.sessions.get_workspace_root(session_id) == str(workspace)
-    events = draft_app.state.audit.events("__permissions__")
-    assert events[-1]["payload"]["source"] == "global_settings"
+    events = draft_app.state.audit.events(session_id)
+    assert events[-1]["payload"]["source"] == "session_full_access"
 
 
 async def test_完全访问无需账户但仍受TTL限制(tmp_path):
@@ -474,11 +477,8 @@ async def test_完全访问无需账户但仍受TTL限制(tmp_path):
         headers = await _request_headers(client)
         status = await client.get(
             "/api/permissions", headers=headers)
-        exposed = await _expose_full_access(client, headers)
-        enabled = await client.put(
-            "/api/permissions", headers=headers, json={
-                "mode": "full_access", "version": exposed.json()["version"],
-            })
+        enabled = await _set_session_full_access(
+            client, headers, "s1")
     payload = status.json()
     assert payload["full_access_available"] is True
     assert payload["execution_identity"]
@@ -566,11 +566,6 @@ async def test_权限状态与审计原子提交_审计失败不启用完全访�
     app.state.sessions.create("atomic", "执行")
     original = app.state.audit.append
 
-    async with _client(app) as client:
-        headers = await _request_headers(client)
-        exposed = await _expose_full_access(client, headers)
-    assert exposed.status_code == 200
-
     def fail_permission_change(session_id, event_type, payload, **kwargs):
         if event_type == "permission_changed":
             raise AuditError("模拟审计磁盘故障")
@@ -580,14 +575,10 @@ async def test_权限状态与审计原子提交_审计失败不启用完全访�
     async with _client(app) as client:
         headers = await _request_headers(client)
         with pytest.raises(AuditError):
-            await client.put(
-                "/api/permissions",
-                headers=headers,
-                json={"mode": "full_access", "version": 1},
-            )
+            await _set_session_full_access(
+                client, headers, "atomic")
     context = app.state.sessions.get_permissions("atomic")
     assert context.mode == PermissionMode.ASK
-    assert context.full_access_visible is True
     assert context.version == 1
 
 

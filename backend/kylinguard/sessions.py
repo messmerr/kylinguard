@@ -31,7 +31,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     draft INTEGER NOT NULL DEFAULT 0,
-    workspace_root TEXT NOT NULL DEFAULT ''
+    workspace_root TEXT NOT NULL DEFAULT '',
+    full_access_enabled INTEGER NOT NULL DEFAULT 0,
+    permission_version INTEGER NOT NULL DEFAULT 1,
+    permission_updated_at REAL NOT NULL DEFAULT 0,
+    permission_updated_by TEXT NOT NULL DEFAULT '',
+    full_access_execution_profile TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS permission_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -77,6 +82,11 @@ def _migrate_permission_schema(connection: sqlite3.Connection) -> None:
         "sessions": {
             "draft": "INTEGER NOT NULL DEFAULT 0",
             "workspace_root": "TEXT NOT NULL DEFAULT ''",
+            "full_access_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "permission_version": "INTEGER NOT NULL DEFAULT 1",
+            "permission_updated_at": "REAL NOT NULL DEFAULT 0",
+            "permission_updated_by": "TEXT NOT NULL DEFAULT ''",
+            "full_access_execution_profile": "TEXT NOT NULL DEFAULT ''",
         },
         "permission_settings": {
             "auto_review_roots": "TEXT NOT NULL DEFAULT '[]'",
@@ -270,12 +280,25 @@ class SessionStore:
             return self._get_permission_settings_locked()
 
     def _get_permissions_locked(self, session_id: str) -> PermissionContext | None:
-        if self._conn.execute(
-            "SELECT 1 FROM sessions WHERE id=?", (session_id,)
-        ).fetchone() is None:
+        row = self._conn.execute(
+            "SELECT full_access_enabled, permission_version, "
+            "permission_updated_at, permission_updated_by, "
+            "full_access_execution_profile FROM sessions WHERE id=?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
             return None
-        return self._get_permission_settings_locked().model_copy(
-            update={"session_id": session_id})
+        base = self._get_permission_settings_locked()
+        if not bool(row[0]):
+            return base.model_copy(update={"session_id": session_id})
+        return base.model_copy(update={
+            "session_id": session_id,
+            "mode": PermissionMode.FULL_ACCESS,
+            "version": row[1],
+            "updated_at": row[2],
+            "updated_by": row[3],
+            "execution_profile": row[4],
+        })
 
     def get_permissions(self, session_id: str) -> PermissionContext | None:
         with self._lock:
@@ -283,6 +306,61 @@ class SessionStore:
 
     # 供流水线使用的语义化别名。
     get_permission_context = get_permissions
+
+    def full_access_session_ids(self) -> list[str]:
+        with self._lock:
+            return [
+                str(row[0]) for row in self._conn.execute(
+                    "SELECT id FROM sessions WHERE full_access_enabled=1"
+                ).fetchall()
+            ]
+
+    def set_session_full_access(
+        self,
+        session_id: str,
+        *,
+        enabled: bool,
+        expected_version: int,
+        updated_by: str,
+        execution_profile: str = "",
+        commit: bool = True,
+    ) -> PermissionContext:
+        """Enable or revoke full access for exactly one task."""
+        now = time.time()
+        enabled = bool(enabled)
+        with self._lock:
+            current = self._get_permissions_locked(session_id)
+            if current is None:
+                raise PermissionError("session_not_found", "会话不存在。")
+            if current.version != expected_version:
+                raise PermissionVersionConflict()
+            row = self._conn.execute(
+                "SELECT full_access_enabled, permission_version FROM sessions "
+                "WHERE id=?", (session_id,),
+            ).fetchone()
+            assert row is not None
+            if bool(row[0]) == enabled:
+                return current
+            next_version = max(int(row[1]), expected_version) + 1
+            self._conn.execute(
+                "UPDATE sessions SET full_access_enabled=?, permission_version=?, "
+                "permission_updated_at=?, permission_updated_by=?, "
+                "full_access_execution_profile=? WHERE id=?",
+                (
+                    int(enabled), next_version, now, updated_by,
+                    execution_profile if enabled else "", session_id,
+                ),
+            )
+            self._conn.execute(
+                "UPDATE permission_grants SET revoked_at=? WHERE session_id=? "
+                "AND revoked_at IS NULL AND consumed_at IS NULL",
+                (now, session_id),
+            )
+            if commit:
+                self._conn.commit()
+            context = self._get_permissions_locked(session_id)
+            assert context is not None
+            return context
 
     def set_permission_settings(
         self,
@@ -296,6 +374,11 @@ class SessionStore:
     ) -> PermissionContext:
         now = time.time()
         mode = PermissionMode(mode)
+        if mode == PermissionMode.FULL_ACCESS:
+            raise PermissionError(
+                "full_access_session_required",
+                "完全访问只能为具体任务开启，不能写入全局权限设置。",
+            )
         roots = self._validate_permission_values(mode, auto_review_roots or [])
         with self._lock:
             row = self._conn.execute(

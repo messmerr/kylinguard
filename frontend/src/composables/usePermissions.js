@@ -28,8 +28,8 @@ export const PERMISSION_MODES = Object.freeze([
   {
     value: 'full_access',
     label: '完全访问',
-    short: '完整能力，不逐项确认',
-    description: '可使用完整 shell、文件、网络和进程能力，不再逐项确认；仍受当前 OS 身份约束，工具子进程不会继承控制面密钥。',
+    short: '仅当前任务，不逐项确认',
+    description: '仅当前任务可使用完整 shell、文件、网络和进程能力；其他任务继续使用全局基础模式。',
     tone: 'danger',
   },
 ])
@@ -47,6 +47,8 @@ const DEFAULT_CONTEXT = Object.freeze({
   sessionId: '',
   mode: 'ask',
   version: 0,
+  baseMode: 'ask',
+  baseVersion: 0,
   executorIdentity: '将在任务创建后确认',
   executorIdentitySource: 'unknown',
   workspaceRoot: '',
@@ -59,6 +61,7 @@ const DEFAULT_CONTEXT = Object.freeze({
   autoReviewRoots: [],
   fullAccessAvailable: true,
   fullAccessVisible: false,
+  fullAccessScope: 'session',
   fullAccessUnavailableReason: '',
   synced: false,
 })
@@ -78,12 +81,10 @@ export const permissionModeMeta = computed(() => (
   PERMISSION_MODES.find((mode) => mode.value === permissionContext.mode)
   || PERMISSION_MODES[1]
 ))
-export const visiblePermissionModes = computed(() => PERMISSION_MODES.filter(
-  (mode) => mode.value !== 'full_access'
-    || permissionContext.fullAccessVisible
-    || permissionContext.mode === 'full_access',
+export const visiblePermissionModes = computed(() => PERMISSION_MODES)
+export const fullAccessActive = computed(() => (
+  permissionContext.mode === 'full_access' && Boolean(permissionContext.sessionId)
 ))
-export const fullAccessActive = computed(() => permissionContext.mode === 'full_access')
 // 自动执行范围只来自全局权限配置的 auto_review_roots。
 // PermissionGrant.resource 是一次/会话动作的匹配资源，即使长得像路径，
 // 也绝不能被提升为工作区根目录。
@@ -177,12 +178,36 @@ function removeGrantLocal(id) {
 }
 
 function applyContext(raw = {}, { synced = true } = {}) {
-  permissionContext.mode = normalizeMode(raw.mode || raw.permission_mode || permissionContext.mode)
+  const responseHasSession = Object.hasOwn(raw, 'session_id')
+  const responseSessionId = responseHasSession ? String(raw.session_id || '') : null
+  const responseIsGlobal = responseSessionId === ''
+  const reportedMode = normalizeMode(raw.mode || raw.permission_mode || permissionContext.mode)
+  const nextMode = responseIsGlobal && reportedMode === 'full_access'
+    ? 'ask' : reportedMode
   const previousVersion = permissionContext.version
   const nextVersion = Number(raw.version ?? raw.context_version ?? previousVersion) || 0
-  permissionContext.version = nextVersion
-  if (previousVersion > 0 && nextVersion > 0 && previousVersion !== nextVersion) {
-    // 全局权限版本变化会在后端收回所有旧版本的会话动作授权。
+  const previousBaseVersion = permissionContext.baseVersion
+  const preserveSessionOverride = Boolean(
+    responseIsGlobal && permissionContext.sessionId && fullAccessActive.value,
+  )
+  if (responseIsGlobal) {
+    permissionContext.baseMode = nextMode
+    permissionContext.baseVersion = nextVersion
+  } else if (responseSessionId) {
+    permissionContext.baseMode = normalizeMode(raw.base_mode || permissionContext.baseMode)
+    permissionContext.baseVersion = Number(
+      raw.base_version ?? permissionContext.baseVersion,
+    ) || 0
+  }
+  if (!preserveSessionOverride) {
+    permissionContext.mode = nextMode
+    permissionContext.version = nextVersion
+  }
+  if ((previousVersion > 0 && permissionContext.version > 0
+      && previousVersion !== permissionContext.version)
+      || (previousBaseVersion > 0 && permissionContext.baseVersion > 0
+        && previousBaseVersion !== permissionContext.baseVersion)) {
+    // 有效任务版本或全局基础版本变化都会使旧动作授权失效。
     permissionGrants.value = []
   }
   const rawIdentity = raw.executor_identity || raw.executor_user
@@ -210,6 +235,8 @@ function applyContext(raw = {}, { synced = true } = {}) {
   if (Array.isArray(raw.full_access_capabilities)) {
     permissionContext.fullAccessCapabilities = [...raw.full_access_capabilities]
   }
+  permissionContext.fullAccessScope = raw.full_access_scope
+    ?? permissionContext.fullAccessScope
   permissionContext.executionAccountSeparated = Boolean(
     raw.execution_account_separated
     ?? raw.control_plane_isolated
@@ -249,7 +276,7 @@ export function applyPermissionCapabilities(raw = {}) {
   const metadata = {}
   const keys = [
     'full_access_available', 'full_access_unavailable_reason',
-    'full_access_visible',
+    'full_access_visible', 'full_access_scope',
     'execution_identity', 'execution_identity_source', 'executor_identity',
     'executor_identity_source', 'command_shell',
     'command_max_timeout', 'full_access_capabilities',
@@ -291,11 +318,13 @@ function isCompatibilityMiss(response) {
 export function beginNewPermissionSession() {
   permissionLoadToken++
   permissionContext.sessionId = ''
+  permissionContext.mode = permissionContext.baseMode
+  permissionContext.version = permissionContext.baseVersion
   permissionContext.workspaceRoot = permissionContext.defaultWorkspaceRoot
   permissionLoading.value = false
   permissionLoadError.value = ''
   permissionError.value = ''
-  // 审批模式和自动执行范围是全局设置；只有动作授权随会话清空。
+  // 新任务只继承全局基础模式；完全访问和动作授权都不跨任务继承。
   permissionGrants.value = []
 }
 
@@ -304,6 +333,9 @@ export function bindPermissionSession(sessionId, { workspaceRoot = '' } = {}) {
   if (permissionContext.sessionId !== nextSessionId) {
     permissionLoadToken++
     permissionLoading.value = false
+    permissionContext.mode = permissionContext.baseMode
+    permissionContext.version = permissionContext.baseVersion
+    permissionGrants.value = []
   }
   permissionContext.sessionId = nextSessionId
   if (workspaceRoot) permissionContext.workspaceRoot = normalizePath(workspaceRoot)
@@ -340,7 +372,9 @@ export async function loadPermissionContext(
   permissionError.value = ''
   try {
     const response = await apiFetch(
-      '/api/permissions',
+      id
+        ? `/api/sessions/${encodeURIComponent(id)}/permissions`
+        : '/api/permissions',
       { signal },
     )
     if (!isCurrentLoad()) return { supported: false, reason: 'stale' }
@@ -387,7 +421,7 @@ export async function loadPermissionContext(
 
 // 审批模式与自动执行范围通过全局接口统一更新。
 async function persistPermissionMode(mode, { autoReviewRoots: roots = null } = {}) {
-  const contextVersion = permissionContext.version
+  const contextVersion = permissionContext.baseVersion || permissionContext.version
   let effectiveRoots = roots || autoReviewRoots.value
   if (mode === 'auto_review' && !effectiveRoots.length && permissionContext.defaultWorkspaceRoot) {
     effectiveRoots = [permissionContext.defaultWorkspaceRoot]
@@ -413,25 +447,52 @@ async function persistPermissionMode(mode, { autoReviewRoots: roots = null } = {
   return { supported: true, body }
 }
 
+async function persistSessionFullAccess(enabled) {
+  const sessionId = String(permissionContext.sessionId || '')
+  if (!sessionId) throw new Error('完全访问只能为已创建的任务开启')
+  const response = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/full-access`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: Boolean(enabled),
+        version: permissionContext.version,
+      }),
+    },
+  )
+  const body = await readJson(response)
+  if (!response.ok) {
+    throw new Error(detailMessage(
+      body,
+      `${enabled ? '完全访问开启' : '完全访问收回'}失败（HTTP ${response.status}）`,
+    ))
+  }
+  applyContext(body.permission || body.context || body)
+  permissionLoadError.value = ''
+  return { supported: true, body }
+}
+
 export async function setPermissionMode(mode, options = {}) {
   const normalized = normalizeMode(mode)
   permissionError.value = ''
   if (permissionContext.version < 1) {
     await loadPermissionContext(permissionContext.sessionId)
   }
-  if (normalized === 'full_access') {
-    if (!permissionContext.fullAccessAvailable) {
-      throw new Error(permissionContext.fullAccessUnavailableReason || '当前服务未开放完全访问')
-    }
-    if (!permissionContext.fullAccessVisible) {
-      throw new Error('完全访问入口仍处于隐藏状态，请先在“权限与安全”中显式显示')
-    }
-  }
-  const previous = {
-    mode: permissionContext.mode,
-    synced: permissionContext.synced,
-  }
   try {
+    if (normalized === 'full_access') {
+      if (!permissionContext.sessionId) {
+        throw new Error('请先发送一条消息创建任务，再为该任务开启完全访问')
+      }
+      if (!permissionContext.fullAccessAvailable) {
+        throw new Error(permissionContext.fullAccessUnavailableReason || '当前服务未开放完全访问')
+      }
+      return await persistSessionFullAccess(true)
+    }
+    let revoked = null
+    if (fullAccessActive.value) revoked = await persistSessionFullAccess(false)
+    const rootsChanged = options.autoReviewRoots != null
+    if (normalized === permissionContext.mode && !rootsChanged) return revoked
     const result = await persistPermissionMode(normalized, options)
     if (!result.supported) {
       throw new Error('当前后端未提供全局权限设置接口，权限未更改')
@@ -440,44 +501,19 @@ export async function setPermissionMode(mode, options = {}) {
     }
     return result
   } catch (error) {
-    Object.assign(permissionContext, previous)
     permissionError.value = error.message || '权限修改失败'
     throw error
   }
 }
 
-export async function setFullAccessVisibility(visible) {
-  permissionError.value = ''
-  if (permissionContext.version < 1) {
-    await loadPermissionContext(permissionContext.sessionId)
-  }
-  if (visible && !permissionContext.fullAccessAvailable) {
-    throw new Error(permissionContext.fullAccessUnavailableReason || '当前服务未开放完全访问')
-  }
-  const response = await apiFetch(
-    '/api/permissions/full-access-visibility',
-    {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        visible: Boolean(visible),
-        version: permissionContext.version,
-      }),
-    },
-  )
-  const body = await readJson(response)
-  if (!response.ok) {
-    const message = detailMessage(body, `完全访问入口更新失败（HTTP ${response.status}）`)
-    permissionError.value = message
-    throw new Error(message)
-  }
-  applyContext(body.permission || body.context || body)
-  permissionLoadError.value = ''
-  return { supported: true, body }
-}
-
 export async function revokeFullAccess() {
-  return setPermissionMode('ask')
+  if (!fullAccessActive.value) return { supported: permissionContext.synced }
+  try {
+    return await persistSessionFullAccess(false)
+  } catch (error) {
+    permissionError.value = error.message || '完全访问收回失败'
+    throw error
+  }
 }
 
 export async function addAutoReviewRoot(path) {
@@ -487,18 +523,25 @@ export async function addAutoReviewRoot(path) {
     return { path: normalizedPath, supported: permissionContext.synced }
   }
   const nextRoots = [...autoReviewRoots.value, normalizedPath]
-  const result = await setPermissionMode(permissionContext.mode, {
+  const result = await persistPermissionMode(permissionContext.baseMode, {
     autoReviewRoots: nextRoots,
   })
+  if (!result.supported) {
+    throw new Error('当前后端未提供全局权限设置接口，自动执行范围未更改')
+  }
   return { path: normalizedPath, ...result }
 }
 
 export async function revokeAutoReviewRoot(path) {
   const normalizedPath = normalizePath(path)
   const remainingRoots = autoReviewRoots.value.filter((root) => root !== normalizedPath)
-  return setPermissionMode(permissionContext.mode, {
+  const result = await persistPermissionMode(permissionContext.baseMode, {
     autoReviewRoots: remainingRoots,
   })
+  if (!result.supported) {
+    throw new Error('当前后端未提供全局权限设置接口，自动执行范围未更改')
+  }
+  return result
 }
 
 export async function revokePermissionGrant(grantOrId) {

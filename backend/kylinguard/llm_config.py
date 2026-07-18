@@ -426,6 +426,9 @@ class LLMConfigStore:
             "DELETE FROM llm_defaults WHERE agent_provider_id='legacy-env' "
             "OR reviewer_provider_id='legacy-env'"
         )
+        self._conn.execute(
+            "DELETE FROM llm_providers WHERE id='legacy-env'"
+        )
         self._lock = threading.RLock()
         self._repair_missing_defaults_locked()
         self._conn.commit()

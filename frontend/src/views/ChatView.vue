@@ -114,6 +114,9 @@
 
             <el-alert v-else-if="it.kind === 'fatal'" type="error"
                       :closable="false" :title="it.error" class="fatal" />
+
+            <el-alert v-else-if="it.kind === 'history_warning'" type="warning"
+                      :closable="false" :title="it.error" class="fatal" />
           </template>
 
           <div v-if="showTurnActivity" class="turn-activity"

@@ -27,7 +27,7 @@
           :key="mode.value"
           :command="mode.value"
           :disabled="mode.value === 'full_access'
-            && !permissionContext.fullAccessAvailable"
+            && (!permissionContext.sessionId || !permissionContext.fullAccessAvailable)"
           :class="{ selected: mode.value === permissionMode }"
         >
           <span class="mode-check">
@@ -36,10 +36,12 @@
           <span class="mode-copy">
             <strong>{{ mode.label }}</strong>
             <small>
-              {{ mode.value === 'full_access' && !permissionContext.fullAccessAvailable
+              {{ mode.value === 'full_access' && !permissionContext.sessionId
+                ? '发送第一条消息后可为当前任务开启'
+                : mode.value === 'full_access' && !permissionContext.fullAccessAvailable
                 ? (permissionContext.fullAccessUnavailableReason || '服务端未开放')
                 : mode.value === 'full_access' && permissionContext.grantsRoot
-                ? '完整能力 · 将获得 root 权限'
+                ? '仅当前任务 · 将获得 root 权限'
                 : mode.value === 'auto_review' && autoReviewRoots.length
                 ? `自动范围 ${autoReviewRoots.length} 个目录`
                 : mode.short }}

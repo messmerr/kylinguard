@@ -210,18 +210,119 @@
 .el-overlay {
   background: var(--kg-overlay);
 }
-.kg-critical-confirm.el-message-box {
-  border: 2px solid var(--kg-danger-border);
-  box-shadow: 0 20px 60px color-mix(in srgb, var(--kg-danger) 24%, transparent);
+.kg-full-access-confirm.el-message-box {
+  width: min(560px, calc(100vw - 32px));
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--kg-danger-border);
+  border-radius: var(--kg-radius-lg);
+  box-shadow: 0 22px 64px rgb(24 34 52 / 22%);
 }
 
-.kg-critical-confirm .el-message-box__title,
-.kg-critical-confirm .el-message-box__status.el-message-box-icon--error {
+.kg-full-access-confirm .el-message-box__header { padding: 21px 24px 0; }
+.kg-full-access-confirm .el-message-box__title {
+  color: var(--kg-text-primary);
+  font-size: 18px;
+  font-weight: 650;
+}
+.kg-full-access-confirm .el-message-box__headerbtn { top: 17px; right: 18px; }
+.kg-full-access-confirm .el-message-box__content { padding: 17px 24px 10px; }
+.kg-full-access-confirm .el-message-box__message {
+  width: 100%;
+  margin: 0;
+  color: var(--kg-text-primary);
+}
+
+.kg-full-access-confirm__content { display: grid; gap: 14px; }
+.kg-full-access-confirm__intro {
+  margin: 0;
+  color: var(--kg-text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.kg-full-access-confirm__facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-top: 1px solid var(--kg-border-subtle);
+  border-bottom: 1px solid var(--kg-border-subtle);
+  background: var(--kg-bg-surface-2);
+}
+.kg-full-access-confirm__fact { min-width: 0; display: grid; gap: 4px; padding: 12px 13px; }
+.kg-full-access-confirm__fact + .kg-full-access-confirm__fact { border-left: 1px solid var(--kg-border-subtle); }
+.kg-full-access-confirm__fact span {
+  color: var(--kg-text-tertiary);
+  font-size: 10px;
+}
+.kg-full-access-confirm__fact strong {
+  overflow: hidden;
+  color: var(--kg-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kg-full-access-confirm__impacts { margin: 0; padding: 0; list-style: none; }
+.kg-full-access-confirm__impacts li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 2px;
+}
+.kg-full-access-confirm__impacts li + li { border-top: 1px solid var(--kg-border-subtle); }
+.kg-full-access-confirm__impacts .kg-icon { color: var(--kg-warning); }
+.kg-full-access-confirm__impacts li > span { display: grid; gap: 2px; }
+.kg-full-access-confirm__impacts strong {
+  color: var(--kg-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+.kg-full-access-confirm__impacts small {
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.kg-full-access-confirm__root-alert {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--kg-danger-border);
+  border-radius: var(--kg-radius-sm);
+  background: var(--kg-danger-soft);
   color: var(--kg-danger);
 }
+.kg-full-access-confirm__root-alert > span { display: grid; gap: 2px; }
+.kg-full-access-confirm__root-alert strong { font-size: 12px; font-weight: 650; }
+.kg-full-access-confirm__root-alert small {
+  color: var(--kg-text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.kg-full-access-confirm__note {
+  margin: 0;
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+  line-height: 1.55;
+}
 
-.kg-critical-confirm .el-message-box__message {
-  color: var(--kg-text-primary);
-  font-weight: 550;
-  line-height: 1.65;
+.kg-full-access-confirm .el-message-box__btns {
+  gap: 8px;
+  padding: 14px 24px 20px;
+  border-top: 1px solid var(--kg-border-subtle);
+}
+
+@media (max-width: 560px) {
+  .kg-full-access-confirm .el-message-box__header { padding-right: 48px; }
+  .kg-full-access-confirm .el-message-box__content { padding-right: 18px; padding-left: 18px; }
+  .kg-full-access-confirm .el-message-box__btns { padding-right: 18px; padding-left: 18px; }
+  .kg-full-access-confirm__facts { grid-template-columns: 1fr; }
+  .kg-full-access-confirm__fact + .kg-full-access-confirm__fact {
+    border-top: 1px solid var(--kg-border-subtle);
+    border-left: 0;
+  }
 }

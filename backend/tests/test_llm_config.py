@@ -49,6 +49,18 @@ def test环境变量不再生成提供商且旧绑定会在启动时清理(tmp_p
 
     now = 1.0
     store._conn.execute(
+        "INSERT INTO llm_providers(id, name, adapter, base_url, secret_ref, "
+        "enabled, allow_insecure_http, version, created_at, updated_at, updated_by) "
+        "VALUES ('legacy-env','旧环境变量 API','openai_compatible',"
+        "'https://legacy.example.test/v1','',1,0,1,?,?,?)",
+        (now, now, "migration-test"),
+    )
+    store._conn.execute(
+        "INSERT INTO llm_models(provider_id, model_id, label, enabled, "
+        "supported_efforts, supports_temperature) "
+        "VALUES ('legacy-env','legacy-agent','legacy-agent',1,'[]',0)"
+    )
+    store._conn.execute(
         "INSERT INTO llm_defaults(singleton, agent_provider_id, agent_model_id, "
         "agent_reasoning_effort, reviewer_provider_id, reviewer_model_id, "
         "reviewer_reasoning_effort, version, updated_at, updated_by) "
@@ -70,6 +82,9 @@ def test环境变量不再生成提供商且旧绑定会在启动时清理(tmp_p
     assert reopened.get_defaults()["version"] == 0
     assert reopened.get_session("old-session", ensure=False) is None
     assert reopened.list_providers() == []
+    assert reopened._conn.execute(
+        "SELECT 1 FROM llm_models WHERE provider_id='legacy-env'"
+    ).fetchone() is None
     reopened.close()
 
 

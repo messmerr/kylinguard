@@ -79,7 +79,12 @@ def make_pipeline(tmp_path, outputs, mode=PermissionMode.ASK, roots=None,
     audit = AuditLog(db)
     sessions = SessionStore(db)
     sessions.create("s1", "测试", workspace_root=workspace_root)
-    if mode != PermissionMode.ASK or roots:
+    if mode == PermissionMode.FULL_ACCESS:
+        sessions.set_session_full_access(
+            "s1", enabled=True, expected_version=1,
+            updated_by="admin", execution_profile="sha256:test-profile",
+        )
+    elif mode != PermissionMode.ASK or roots:
         sessions.set_permission_settings(
             mode=mode, auto_review_roots=roots or [],
             expected_version=1, updated_by="admin",

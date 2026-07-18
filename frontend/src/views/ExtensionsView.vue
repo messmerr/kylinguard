@@ -1,10 +1,6 @@
 <template>
   <div class="kg-page extensions-page">
     <div class="kg-page-inner extensions-inner">
-      <header class="page-head">
-        <p class="page-description">管理第三方 MCP 与 Skill。系统自带 MCP 独立运行，可在总览查看。</p>
-      </header>
-
       <div v-if="extensionError" class="extension-error" role="alert">
         <KgIcon name="warning" :size="15" />
         <span>{{ extensionError }}</span>
@@ -82,7 +78,7 @@
               />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="218" align="right">
+          <el-table-column label="操作" width="218" align="center">
             <template #default="{ row }">
               <div class="row-actions">
                 <el-button text :disabled="!mcpDetailAvailable(row)" @click="openMcpDetail(row)">详情</el-button>
@@ -161,14 +157,23 @@
               />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="178" align="right">
+          <el-table-column label="操作" width="178" align="center">
             <template #default="{ row }">
               <div class="row-actions">
                 <el-button text @click="openSkillDetail(row)">详情</el-button>
-                <template v-if="row.source !== 'builtin'">
-                  <el-button text :disabled="skillActionBusy(row.id)" @click="openSkillDialog(row)">编辑</el-button>
-                  <el-button text type="danger" :disabled="skillActionBusy(row.id)" @click="removeSkill(row)">删除</el-button>
-                </template>
+                <el-button
+                  text
+                  :class="{ 'restricted-skill-action': row.source === 'builtin' }"
+                  :disabled="row.source !== 'builtin' && skillActionBusy(row.id)"
+                  @click="openSkillDialog(row)"
+                >编辑</el-button>
+                <el-button
+                  text
+                  type="danger"
+                  :class="{ 'restricted-skill-action': row.source === 'builtin' }"
+                  :disabled="row.source !== 'builtin' && skillActionBusy(row.id)"
+                  @click="removeSkill(row)"
+                >删除</el-button>
               </div>
             </template>
           </el-table-column>
@@ -779,7 +784,10 @@ async function importSkillFile(event) {
 
 function openSkillDialog(skill = null) {
   clearSkillForm()
-  if (skill?.source === 'builtin') return
+  if (skill?.source === 'builtin') {
+    showBuiltinSkillRestriction('编辑')
+    return
+  }
   if (skill) Object.assign(skillForm, {
     id: skill.id,
     originalId: skill.id,
@@ -830,6 +838,10 @@ function openSkillDetail(skill) {
 }
 
 async function removeSkill(skill) {
+  if (skill?.source === 'builtin') {
+    await showBuiltinSkillRestriction('删除')
+    return
+  }
   try {
     await ElMessageBox.confirm(`确定删除“${skill.name}”？`, '确认删除', {
       type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
@@ -844,12 +856,19 @@ async function removeSkill(skill) {
     ElMessage.error(error.message || 'Skill 删除失败')
   }
 }
+
+function showBuiltinSkillRestriction(action) {
+  const message = action === '删除'
+    ? '该 Skill 为平台内置，不可删除。'
+    : '该 Skill 为平台内置，不可编辑。'
+  return ElMessageBox.alert(message, '操作受限', {
+    type: 'info', confirmButtonText: '我知道了',
+  }).catch(() => {})
+}
 </script>
 
 <style scoped>
 .extensions-inner { width: min(100%, 1160px); }
-.page-head { display: flex; align-items: center; justify-content: space-between; gap: var(--kg-space-5); }
-.page-description { margin: 0; color: var(--kg-text-tertiary); font-size: 13px; }
 .extension-error { min-height: 40px; display: flex; align-items: center; gap: 8px; margin-top: var(--kg-space-4); padding: 7px 10px; border: 1px solid var(--kg-danger-border); border-radius: var(--kg-radius-sm); background: var(--kg-danger-soft); color: var(--kg-danger); font-size: 12px; }
 .extension-error > span { min-width: 0; flex: 1; }
 .extension-loading { min-height: 48px; display: flex; align-items: center; gap: 10px; margin-top: var(--kg-space-4); padding: 8px 11px; border: 1px solid var(--kg-info-border); border-radius: var(--kg-radius-sm); background: var(--kg-info-soft); color: var(--kg-info); }
@@ -861,7 +880,8 @@ async function removeSkill(skill) {
 .skill-issues strong { color: var(--kg-text-primary); font-size: 12px; }
 .skill-issues span { overflow-wrap: anywhere; }
 .extension-section { margin-top: var(--kg-space-6); }
-.section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--kg-space-5); margin-bottom: var(--kg-space-3); }
+.extensions-inner > .extension-section:first-child { margin-top: 0; }
+.section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--kg-space-5); margin-bottom: var(--kg-space-3); }
 .section-head p { margin: 3px 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
 .section-meta { display: flex; align-items: center; gap: var(--kg-space-2); }
 .section-meta :deep(.el-button) { gap: 5px; margin-left: 0; }
@@ -878,8 +898,11 @@ async function removeSkill(skill) {
 .connection-state.failed { color: var(--kg-danger); }
 .connection-state.pending { color: var(--kg-warning); }
 .connection-state.unknown, .connection-state.muted, .muted { color: var(--kg-text-tertiary); }
-.row-actions { display: flex; justify-content: flex-end; white-space: nowrap; }
+.row-actions { display: flex; justify-content: center; white-space: nowrap; }
 .row-actions :deep(.el-button + .el-button) { margin-left: 0; }
+.row-actions :deep(.restricted-skill-action) { color: var(--kg-text-disabled); }
+.row-actions :deep(.restricted-skill-action:hover),
+.row-actions :deep(.restricted-skill-action:focus-visible) { color: var(--kg-text-tertiary); }
 .loading-line { min-height: 78px; display: flex; align-items: center; gap: 9px; color: var(--kg-text-tertiary); font-size: 12px; }
 .empty-state { min-height: 92px; display: flex; align-items: center; gap: 13px; padding: 15px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-1); }
 .empty-mark { width: 38px; height: 38px; display: grid; flex: none; place-items: center; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); color: var(--kg-text-tertiary); }
@@ -951,7 +974,7 @@ async function removeSkill(skill) {
   .skill-table :deep(.el-table__cell:nth-child(4)) { display: none; }
 }
 @media (max-width: 700px) {
-  .section-head { flex-direction: column; gap: var(--kg-space-3); }
+  .section-head { align-items: stretch; flex-direction: column; gap: var(--kg-space-3); }
   .section-head p { display: none; }
   .section-meta { display: grid; width: 100%; grid-template-columns: 1fr auto; }
   .section-meta :deep(.el-button) { min-width: 132px; }

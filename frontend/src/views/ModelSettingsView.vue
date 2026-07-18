@@ -1,13 +1,6 @@
 <template>
   <div class="kg-page models-page">
     <div class="kg-page-inner models-inner">
-      <header class="page-head">
-        <p class="page-description">管理 Agent 使用的 API 连接、模型与新任务默认值。</p>
-        <el-button type="primary" aria-label="添加 API 提供商" @click="openProviderDialog()">
-          <KgIcon name="plus" :size="15" />添加提供商
-        </el-button>
-      </header>
-
       <div
         v-if="modelSecurity.message"
         class="security-note"
@@ -27,9 +20,14 @@
             <h2 class="kg-section-title">API 提供商</h2>
             <p>密钥不会再次返回浏览器。测试只验证凭据与 /models 列表端点；具体模型和推理参数仍以任务调用为准。</p>
           </div>
-          <span class="section-count">{{ modelConfigLoading && !modelProviders.length
-            ? '正在同步' : modelConfigLoadError && !modelProviders.length
-              ? '状态未同步' : `${modelProviders.length} 个连接` }}</span>
+          <div class="section-meta">
+            <span class="section-count">{{ modelConfigLoading && !modelProviders.length
+              ? '正在同步' : modelConfigLoadError && !modelProviders.length
+                ? '状态未同步' : `${modelProviders.length} 个连接` }}</span>
+            <el-button size="small" type="primary" aria-label="添加 API 提供商" @click="openProviderDialog()">
+              <KgIcon name="plus" :size="14" />添加提供商
+            </el-button>
+          </div>
         </div>
 
         <div v-if="modelConfigLoadError && modelProviders.length" class="load-error is-inline" role="alert">
@@ -52,37 +50,20 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="API 地址" min-width="220">
+          <el-table-column label="API 地址" min-width="190">
             <template #default="{ row }"><code class="endpoint" :title="row.baseUrl">{{ row.baseUrl }}</code></template>
           </el-table-column>
-          <el-table-column label="模型" width="82">
+          <el-table-column label="模型" width="150" align="center">
             <template #default="{ row }">{{ row.models.filter(model => model.enabled).length }}</template>
           </el-table-column>
-          <el-table-column label="凭据" width="86">
-            <template #default="{ row }">
-              <span :class="row.apiKeyConfigured ? 'status-ok' : 'status-warn'">
-                {{ row.apiKeyConfigured ? '已保存' : '未设置' }}
-              </span>
-            </template>
-          </el-table-column>
-          <el-table-column label="连接状态" min-width="132">
+          <el-table-column label="连接状态" width="150">
             <template #default="{ row }">
               <span class="test-status" :class="testStatusClass(row)">
                 {{ testStatusText(row) }}
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="218" align="right">
-            <template #default="{ row }">
-              <div class="row-actions">
-                <el-button text :disabled="actionBusy" @click="testProvider(row)">测试</el-button>
-                <el-button text :disabled="actionBusy" @click="discoverModels(row)">读取模型</el-button>
-                <el-button text :disabled="actionBusy" @click="openProviderDialog(row)">编辑</el-button>
-                <el-button text type="danger" :disabled="actionBusy" @click="deleteProvider(row)">删除</el-button>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="启用" width="76" align="center">
+          <el-table-column label="启用" width="72" align="center">
             <template #default="{ row }">
               <el-switch
                 :model-value="row.enabled"
@@ -91,6 +72,15 @@
                 :aria-label="`${row.enabled ? '停用' : '启用'}提供商 ${row.name}`"
                 @change="toggleProvider(row, $event)"
               />
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="218" align="center">
+            <template #default="{ row }">
+              <div class="row-actions">
+                <el-button text :disabled="actionBusy" @click="testProvider(row)">测试</el-button>
+                <el-button text :disabled="actionBusy" @click="openProviderDialog(row)">编辑</el-button>
+                <el-button text type="danger" :disabled="actionBusy" @click="deleteProvider(row)">删除</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -298,7 +288,6 @@
               >
                 <el-option v-for="effort in EFFORT_VALUES" :key="effort" :label="effortLabel(effort)" :value="effort" />
               </el-select>
-              <el-checkbox v-model="model.supportsTemperature" class="temperature-capability">温度</el-checkbox>
               <el-switch v-model="model.enabled" :aria-label="`${model.label || model.id || '未命名模型'} 启用状态`" />
               <button
                 type="button"
@@ -311,7 +300,6 @@
               </button>
             </div>
           </div>
-          <div v-else class="no-model-rows">填写 Base URL 与 API Key 后可直接读取，也可以手动添加。</div>
         </div>
 
       </el-form>
@@ -777,13 +765,6 @@ function testProvider(provider) {
   return providerAction(provider, 'test', '连接测试完成')
 }
 
-async function discoverModels(provider) {
-  const updated = await providerAction(provider, 'discover-models', '模型列表已读取')
-  if (!updated) return
-  const refreshed = modelProviders.value.find((item) => item.id === provider.id)
-  if (refreshed) openProviderDialog(refreshed)
-}
-
 async function deleteProvider(provider) {
   try {
     await ElMessageBox.confirm(
@@ -850,10 +831,7 @@ function originChanged() {
 
 <style scoped>
 .models-inner { width: min(100%, 1120px); }
-.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--kg-space-6); }
-.page-head :deep(.el-button) { gap: 7px; }
-.page-description { margin: 0; color: var(--kg-text-tertiary); font-size: 13px; }
-.security-note { min-height: 44px; display: flex; align-items: flex-start; gap: 9px; margin-top: var(--kg-space-5); padding: 9px 11px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-2); color: var(--kg-text-secondary); font-size: 12px; }
+.security-note { min-height: 44px; display: flex; align-items: flex-start; gap: 9px; padding: 9px 11px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-2); color: var(--kg-text-secondary); font-size: 12px; }
 .security-note > .kg-icon { margin-top: 2px; color: var(--kg-text-muted); }
 .security-note > div { display: grid; gap: 2px; }
 .security-note strong { color: var(--kg-text-primary); font-weight: 600; }
@@ -861,8 +839,12 @@ function originChanged() {
 .security-note.isolated { border-color: var(--kg-success-border); background: var(--kg-success-soft); }
 .security-note.isolated > .kg-icon { color: var(--kg-success); }
 .model-section { margin-top: var(--kg-space-6); }
-.section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--kg-space-5); margin-bottom: var(--kg-space-3); }
+.provider-section { margin-top: 0; }
+.security-note + .provider-section { margin-top: var(--kg-space-6); }
+.section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--kg-space-5); margin-bottom: var(--kg-space-3); }
 .section-head p { margin: 3px 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
+.section-meta { display: flex; align-items: center; gap: var(--kg-space-2); }
+.section-meta :deep(.el-button) { gap: 5px; margin-left: 0; }
 .section-count { color: var(--kg-text-tertiary); font-size: 12px; white-space: nowrap; }
 .provider-cell { display: flex; align-items: center; gap: 9px; }
 .provider-cell > span:last-child { min-width: 0; display: grid; }
@@ -875,7 +857,7 @@ function originChanged() {
 .test-status.ok { color: var(--kg-success); }
 .test-status.failed { color: var(--kg-danger); }
 .test-status.unknown { color: var(--kg-text-tertiary); }
-.row-actions { display: flex; justify-content: flex-end; gap: 0; white-space: nowrap; }
+.row-actions { display: flex; justify-content: center; gap: 0; white-space: nowrap; }
 .row-actions :deep(.el-button + .el-button) { margin-left: 0; }
 .empty-providers { min-height: 92px; display: flex; align-items: center; gap: 13px; padding: 15px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-1); }
 .load-error { min-height: 92px; display: flex; align-items: center; gap: 13px; padding: 15px; border: 1px solid var(--kg-warning-border); border-radius: var(--kg-radius-md); background: var(--kg-warning-soft); }
@@ -890,6 +872,8 @@ function originChanged() {
 .empty-providers p { margin: 3px 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
 .loading-line { display: flex; align-items: center; gap: 9px; min-height: 72px; color: var(--kg-text-tertiary); font-size: 12px; }
 .default-option-section { display: grid; min-height: 58px; grid-template-columns: minmax(180px, 1fr) minmax(240px, 360px) 126px; align-items: center; gap: var(--kg-space-4); padding-bottom: var(--kg-space-3); border-bottom: 1px solid var(--kg-border-subtle); }
+.provider-section + .default-option-section { margin-top: var(--kg-space-8); }
+.default-option-section + .default-option-section { margin-top: var(--kg-space-3); }
 .default-option-section .kg-section-title { margin: 0; }
 .default-option-section :deep(.el-select) { width: 100%; }
 .defaults-unavailable { min-height: 62px; display: flex; align-items: center; border-bottom: 1px solid var(--kg-border-subtle); color: var(--kg-text-tertiary); font-size: 12px; }
@@ -909,13 +893,10 @@ function originChanged() {
 .models-editor-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 7px; }
 .models-editor-actions :deep(.el-button .kg-icon) { margin-left: 5px; }
 .model-rows { display: grid; gap: 7px; margin-top: 10px; }
-.model-row { display: grid; grid-template-columns: minmax(110px, 1.1fr) minmax(105px, 1fr) minmax(120px, .9fr) 50px 34px 28px; align-items: center; gap: 7px; }
-.temperature-capability { margin-right: 0; }
-.temperature-capability :deep(.el-checkbox__label) { padding-left: 4px; color: var(--kg-text-tertiary); font-size: 10px; }
+.model-row { display: grid; grid-template-columns: minmax(110px, 1.1fr) minmax(105px, 1fr) minmax(120px, .9fr) 34px 28px; align-items: center; gap: 7px; }
 .remove-model { width: 28px; height: 28px; display: grid; padding: 0; place-items: center; border: 0; border-radius: var(--kg-radius-sm); background: transparent; color: var(--kg-text-tertiary); cursor: pointer; }
 .remove-model:hover { background: var(--kg-danger-soft); color: var(--kg-danger); }
 .remove-model:disabled { background: transparent; color: var(--kg-text-disabled); cursor: not-allowed; }
-.no-model-rows { padding: 12px 0 2px; color: var(--kg-text-tertiary); font-size: 11px; }
 :global(.provider-dialog .el-dialog__body) { max-height: calc(100vh - 180px); overflow-y: auto; }
 
 @media (max-width: 1080px) {
@@ -923,12 +904,10 @@ function originChanged() {
 }
 
 @media (max-width: 900px) {
-  .provider-table :deep(.el-table__cell:nth-child(3)),
-  .provider-table :deep(.el-table__cell:nth-child(4)) { display: none; }
+  .provider-table :deep(.el-table__cell:nth-child(3)) { display: none; }
 }
 
 @media (max-width: 760px) {
-  .page-head { align-items: center; }
   .section-head { align-items: center; }
   .section-head p { display: none; }
   .provider-table :deep(.el-table__cell:nth-child(5)) { display: none; }
@@ -937,7 +916,7 @@ function originChanged() {
   .form-grid { grid-template-columns: 1fr; gap: 0; }
   .models-editor-head { align-items: flex-start; flex-direction: column; }
   .models-editor-actions { width: 100%; }
-  .model-row { grid-template-columns: 1fr 1fr 50px 28px; }
+  .model-row { grid-template-columns: 1fr 1fr 28px; }
   .model-row :deep(.el-select),
   .model-row :deep(.el-switch) { display: none; }
 }

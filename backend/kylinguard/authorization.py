@@ -447,7 +447,7 @@ def apply_permission_mode(
             action=GateAction.AUTO,
             risk=base.risk,
             reason=(
-                "管理员已在全局权限中启用完全访问；产品层不再限制该动作，"
+                "管理员已为当前任务启用完全访问；产品层不再限制该动作，"
                 "仍受执行账户 OS 权限约束。"
             ),
         )

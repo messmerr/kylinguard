@@ -56,8 +56,9 @@ _SNAPSHOT_COMMANDS_WINDOWS: dict[str, list[str]] = {
     ],
 }
 
-_SNAPSHOT_COMMANDS_LINUX: dict[str, str] = {
-    "uptime_load": "uptime",
+_SNAPSHOT_COMMANDS_LINUX: dict[str, str | list[str]] = {
+    # top 同时提供运行时长、load average 和真实 CPU idle 百分比。
+    "uptime_load": ["/usr/bin/env", "LC_ALL=C", "/usr/bin/top", "-bn1"],
     "memory": "free -m",
     "disk": "df -h",
     # 自动送入规划模型的快照只包含可执行文件名，不包含完整 argv；后者经常
@@ -290,6 +291,17 @@ class AlertStore:
         self._last_fired[a["kind"]] = time.time()
         return True
 
+    def ack_all(self) -> list[str]:
+        now = time.time()
+        alert_ids = []
+        for alert_id, alert in self._alerts.items():
+            if alert["acked"]:
+                continue
+            alert["acked"] = True
+            self._last_fired[alert["kind"]] = now
+            alert_ids.append(alert_id)
+        return alert_ids
+
 
 class SnapshotCache:
     """后台定时轮询的快照缓存。
@@ -395,8 +407,6 @@ async def _evaluate_rules(snapshot: dict[str, str], rule_store) -> None:
         if now - last < rule.silence_minutes * 60:
             continue
 
-        rule_store.update_last_fired(rule.id)
-
         # 构建推送载荷
         metric_value = "存在" if rule.metric == "failed_services" else f"{val:.0f}%"
         payload = {
@@ -408,16 +418,21 @@ async def _evaluate_rules(snapshot: dict[str, str], rule_store) -> None:
             "message": f"{rule.metric} 当前值 {metric_value}，触发规则「{rule.name}」",
         }
 
-        # 推送到关联渠道
-        channels = [rule_store.get_channel(cid) for cid in rule.channel_ids
-                    if rule_store.get_channel(cid)]
-        notified = await push_all(channels, payload)
-
-        # 写历史
-        rule_store.add_history(
+        # 先持久化待处理记录与冷却时间，外部渠道异常不能造成告警丢失。
+        history_id = rule_store.record_trigger(
             rule_id=rule.id, rule_name=rule.name,
             metric=rule.metric, metric_value=metric_value,
-            severity=rule.severity,
-            message=payload["message"],
-            channels_notified=notified,
+            severity=rule.severity, message=payload["message"],
         )
+
+        # 推送到关联渠道
+        channels = []
+        for channel_id in rule.channel_ids:
+            channel = rule_store.get_channel(channel_id)
+            if channel is not None:
+                channels.append(channel)
+        try:
+            notified = await push_all(channels, payload)
+        except Exception:
+            notified = []
+        rule_store.update_history_channels(history_id, notified)

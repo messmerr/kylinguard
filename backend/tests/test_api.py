@@ -658,3 +658,63 @@ async def test_失败服务告警规则归一为布尔条件(app):
     rule = listed.json()["rules"][0]
     assert rule["operator"] == ">="
     assert rule["threshold"] == 1.0
+
+
+async def test_规则告警进入待处理并在确认后保留历史(app):
+    history_id = app.state.alert_rule_store.record_trigger(
+        rule_id=41,
+        rule_name="CPU 零阈值",
+        metric="cpu_pct",
+        metric_value="12%",
+        severity="critical",
+        message="CPU 使用率命中规则",
+    )
+    system_alert = app.state.snapshot_cache.alert_store.ingest([{
+        "kind": "api_test_system",
+        "severity": "warning",
+        "title": "系统告警",
+        "message": "系统告警测试",
+        "metric": "1",
+    }])[0]
+
+    async with _client(app) as client:
+        headers = await _request_headers(client)
+        listed = await client.get("/api/alerts", headers=headers)
+        assert listed.status_code == 200
+        alerts = listed.json()["alerts"]
+        assert {item["id"] for item in alerts} >= {
+            f"rule:{history_id}", system_alert["id"],
+        }
+        rule_alert = next(item for item in alerts if item["id"] == f"rule:{history_id}")
+        assert rule_alert["title"] == "CPU 零阈值"
+        assert rule_alert["metric"] == "12%"
+
+        acknowledged = await client.post(
+            f"/api/alerts/rule:{history_id}/ack", headers=headers)
+        assert acknowledged.status_code == 200
+        after_ack = await client.get("/api/alerts", headers=headers)
+        assert f"rule:{history_id}" not in {
+            item["id"] for item in after_ack.json()["alerts"]
+        }
+        assert system_alert["id"] in {
+            item["id"] for item in after_ack.json()["alerts"]
+        }
+
+        second_history_id = app.state.alert_rule_store.record_trigger(
+            42, "内存零阈值", "memory_pct", "8%", "warning", "内存命中")
+        acknowledged_all = await client.post("/api/alerts/ack-all", headers=headers)
+        assert acknowledged_all.status_code == 200
+        assert set(acknowledged_all.json()["acknowledged_ids"]) == {
+            system_alert["id"], f"rule:{second_history_id}",
+        }
+        assert acknowledged_all.json()["acknowledged_count"] == 2
+        assert (await client.get("/api/alerts", headers=headers)).json()["alerts"] == []
+
+        missing = await client.post("/api/alerts/rule:not-a-number/ack", headers=headers)
+        assert missing.status_code == 404
+
+    entry = next(
+        item for item in app.state.alert_rule_store.list_history()
+        if item.id == history_id
+    )
+    assert entry.acknowledged_at is not None

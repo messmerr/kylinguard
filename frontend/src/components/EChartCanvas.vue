@@ -1,13 +1,7 @@
 <template>
   <section class="visual-canvas chart-canvas" :class="{ embedded }">
     <header class="canvas-head">
-      <div>
-        <span class="canvas-kicker">实时视图</span>
-        <strong>{{ title }}</strong>
-      </div>
-      <button type="button" title="恢复图表" aria-label="恢复图表" @click="restore">
-        <KgIcon name="refresh" :size="14" />
-      </button>
+      <strong>{{ title }}</strong>
     </header>
     <div ref="host" class="chart-host" role="img" :aria-label="title"
          :style="{ height: `${Number(height) || 320}px` }"></div>
@@ -17,7 +11,6 @@
 
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import KgIcon from './KgIcon.vue'
 
 const props = defineProps({
   option: { type: Object, required: true },
@@ -46,10 +39,6 @@ function normalizedOption() {
       fontFamily: 'Inter, "Noto Sans SC", "Microsoft YaHei UI", sans-serif',
     },
     tooltip: { trigger: 'axis', confine: true },
-    toolbox: {
-      right: 8,
-      feature: { dataView: { readOnly: true }, restore: {}, saveAsImage: {} },
-    },
     ...props.option,
   }
 }
@@ -66,11 +55,6 @@ async function render() {
   } catch (reason) {
     error.value = reason?.message || '图表配置无法渲染'
   }
-}
-
-function restore() {
-  chart?.dispatchAction({ type: 'restore' })
-  render()
 }
 
 onMounted(() => {
@@ -96,7 +80,11 @@ onBeforeUnmount(() => {
   box-shadow: 0 5px 18px rgb(32 49 82 / 7%);
 }
 .visual-canvas.embedded { margin: 6px -8px 0; border: 0; box-shadow: none; }
-.visual-canvas.embedded .canvas-head { padding-right: 8px; padding-left: 8px; }
+.visual-canvas.embedded .canvas-head {
+  min-height: 0;
+  padding: 0 8px;
+  border-bottom: 0;
+}
 
 .canvas-head {
   min-height: 48px;
@@ -108,21 +96,7 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--kg-border-subtle);
 }
 
-.canvas-head > div { display: grid; gap: 1px; }
-.canvas-kicker { color: var(--kg-accent); font: 600 9px/1.4 var(--kg-font-mono); }
-.canvas-head strong { color: var(--kg-text-primary); font-size: 13px; font-weight: 600; }
-.canvas-head button {
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--kg-border-subtle);
-  border-radius: var(--kg-radius-sm);
-  background: #fff;
-  color: var(--kg-text-tertiary);
-  cursor: pointer;
-}
-.canvas-head button:hover { border-color: #aec4f8; background: var(--kg-accent-soft); color: var(--kg-accent); }
+.canvas-head strong { color: var(--kg-text-primary); font-size: 16px; font-weight: 600; }
 .chart-host { width: 100%; min-height: 220px; }
 .canvas-error { margin: 0; padding: 10px 14px; border-top: 1px solid var(--kg-danger-border); background: var(--kg-danger-soft); color: var(--kg-danger); font-size: 12px; }
 </style>

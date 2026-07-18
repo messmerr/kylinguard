@@ -108,7 +108,11 @@
                   <KgIcon name="close" :size="14" />
                 </button>
               </div>
-              <div v-if="expandedLines.length" class="detail-lines">
+              <div
+                v-if="expandedLines.length"
+                class="detail-lines"
+                :class="{ 'is-memory-table': expandedMetric.key === 'memory' }"
+              >
                 <div v-for="(line, index) in expandedLines" :key="`${index}-${line}`">{{ line }}</div>
               </div>
               <p v-else class="empty-detail">暂无需要展示的明细</p>
@@ -183,12 +187,24 @@
 
 <script setup>
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { apiFetch } from '../composables/useApi.js'
+import { computed, ref, watch } from 'vue'
+import {
+  acknowledgePendingAlert,
+  pendingAlertAckingIds as ackingAlertIds,
+  pendingAlerts as alerts,
+} from '../composables/useAlerts.js'
+import {
+  refreshSystemStatus,
+  systemStatus as status,
+  systemStatusAgeText as ageText,
+  systemStatusError as statusError,
+  systemStatusIsStale as isStale,
+} from '../composables/useSystemStatus.js'
 import { stats } from '../composables/useChat.js'
 import {
   cpuUsagePercent,
   diskUsagePercent as diskPercent,
+  formatMemoryTable,
   isMetricUnavailable as isUnavailable,
   isMetricUnsupported,
   loadAverage,
@@ -198,17 +214,8 @@ import KgIcon from './KgIcon.vue'
 
 const props = defineProps({ open: { type: Boolean, default: true } })
 const emit = defineEmits(['close', 'closed'])
-const ackingAlertIds = ref(new Set())
 
-const status = ref(null)
-const alerts = ref([])
 const expanded = ref('')
-const statusError = ref(false)
-const statusReceivedAt = ref(0)
-const clock = ref(Date.now())
-let timer = null
-let alertTimer = null
-let clockTimer = null
 
 const snapshot = computed(() => status.value?.snapshot || {})
 
@@ -243,7 +250,10 @@ const allMetrics = computed(() => [...resourceMetrics.value, ...signalMetrics.va
 const expandedMetric = computed(() => (
   allMetrics.value.find((metric) => metric.key === expanded.value) || null
 ))
-const expandedLines = computed(() => detailLines(expandedMetric.value?.raw))
+const expandedLines = computed(() => detailLines(
+  expandedMetric.value?.raw,
+  expandedMetric.value?.key,
+))
 
 const taskStats = computed(() => [
   { label: '工具调用', value: stats.value.steps, tone: 'info', icon: 'terminal' },
@@ -351,30 +361,17 @@ function statusRows(raw = '', kind) {
   })
 }
 
-function detailLines(raw = '') {
+function detailLines(raw = '', key = '') {
   if (!raw || isUnavailable(raw)) return []
-  return meaningfulLines(raw).filter((line) => !/^\(无输出\)$/.test(line)).slice(0, 24)
+  const lines = key === 'memory'
+    ? formatMemoryTable(raw).split(/\r?\n/).filter(line => line.trim())
+    : meaningfulLines(raw)
+  return lines.filter((line) => !/^\(无输出\)$/.test(line)).slice(0, 24)
 }
 
 function toggleDetail(key) {
   expanded.value = expanded.value === key ? '' : key
 }
-
-const statusAgeSeconds = computed(() => {
-  if (!status.value || !statusReceivedAt.value) return 0
-  const base = Number(status.value.collected_ago_seconds) || 0
-  return Math.max(0, base + (clock.value - statusReceivedAt.value) / 1000)
-})
-
-const ageText = computed(() => {
-  const age = Math.round(statusAgeSeconds.value)
-  if (age < 3) return '刚刚'
-  if (age < 60) return `${age} 秒前`
-  if (age < 3600) return `${Math.floor(age / 60)} 分钟前`
-  return `${Math.floor(age / 3600)} 小时前`
-})
-
-const isStale = computed(() => !!status.value && statusAgeSeconds.value > 90)
 
 const statusHeaderText = computed(() => {
   if (!status.value) return statusError.value ? '状态读取失败' : '正在读取当前主机'
@@ -384,72 +381,22 @@ const statusHeaderText = computed(() => {
 })
 
 watch(() => props.open, (open) => {
-  if (!open) expanded.value = ''
+  if (open) refreshSystemStatus().catch(() => {})
+  else expanded.value = ''
 })
 
-async function poll() {
-  try {
-    const response = await apiFetch('/api/status')
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    status.value = await response.json()
-    statusReceivedAt.value = Date.now()
-    statusError.value = false
-  } catch {
-    statusError.value = true
-  }
-}
-
-async function pollAlerts() {
-  try {
-    const response = await apiFetch('/api/alerts')
-    if (response.ok) {
-      const grouped = new Map()
-      for (const alert of (await response.json()).alerts || []) {
-        const key = alert.kind || alert.id
-        if (!grouped.has(key)) grouped.set(key, { ...alert, duplicateIds: [alert.id] })
-        else grouped.get(key).duplicateIds.push(alert.id)
-      }
-      alerts.value = [...grouped.values()]
-    }
-  } catch { /* 下轮重试 */ }
+function poll() {
+  return refreshSystemStatus().catch(() => {})
 }
 
 async function ack(alert) {
-  if (ackingAlertIds.value.has(alert.id)) return
-  ackingAlertIds.value = new Set(ackingAlertIds.value).add(alert.id)
   try {
-    const responses = await Promise.all((alert.duplicateIds || [alert.id]).map((id) => (
-      apiFetch(`/api/alerts/${id}/ack`, { method: 'POST' })
-    )))
-    const failed = responses.find((response) => !response.ok)
-    if (failed) {
-      const body = await failed.json().catch(() => ({}))
-      const detail = typeof body.detail === 'string' ? body.detail : body.detail?.message
-      throw new Error(detail || `标记失败（HTTP ${failed.status}）`)
-    }
-    alerts.value = alerts.value.filter((item) => item.id !== alert.id)
+    await acknowledgePendingAlert(alert)
   } catch (error) {
     ElMessage.error(error.message || '告警暂时无法标记为已读，请重试')
-  } finally {
-    const next = new Set(ackingAlertIds.value)
-    next.delete(alert.id)
-    ackingAlertIds.value = next
   }
 }
 
-onMounted(() => {
-  poll()
-  pollAlerts()
-  timer = setInterval(poll, 30000)
-  alertTimer = setInterval(pollAlerts, 30000)
-  clockTimer = setInterval(() => { clock.value = Date.now() }, 1000)
-})
-
-onUnmounted(() => {
-  clearInterval(timer)
-  clearInterval(alertTimer)
-  clearInterval(clockTimer)
-})
 </script>
 
 <style scoped>
@@ -756,6 +703,9 @@ onUnmounted(() => {
 
 .detail-lines > div { padding: 2px 0; white-space: pre-wrap; word-break: break-word; }
 .detail-lines > div + div { border-top: 1px solid var(--kg-border-subtle); }
+
+.detail-lines.is-memory-table { overflow-x: auto; }
+.detail-lines.is-memory-table > div { white-space: pre; word-break: normal; }
 
 .empty-detail {
   margin: 0;

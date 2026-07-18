@@ -64,6 +64,17 @@ def test_load_average不会被当成cpu百分比(monkeypatch):
     }) == 37
 
 
+def test_linux_top快照可以解析真实cpu使用率(monkeypatch):
+    monkeypatch.setattr(snap, "_IS_WINDOWS", False)
+    assert "/usr/bin/top" in snap._SNAPSHOT_COMMANDS_LINUX["uptime_load"]
+    assert snap._parse_cpu_pct({
+        "uptime_load": (
+            "top - 12:30:01 up 1 day, load average: 0.20, 0.30, 0.40\n"
+            "%Cpu(s):  4.0 us,  2.0 sy,  0.0 ni, 87.0 id, 7.0 wa"
+        ),
+    }) == 13
+
+
 def test_macos内存压力使用空闲百分比(monkeypatch):
     monkeypatch.setattr(snap, "_IS_WINDOWS", False)
     assert snap._parse_memory_pct({
@@ -96,6 +107,22 @@ def test_未读同类告警不会重复堆积(monkeypatch):
     assert store.ingest([alert]) == []  # 确认后从当前时刻重新计算冷却期
 
 
+def test_内存告警支持一键确认且重复调用幂等():
+    store = snap.AlertStore()
+    first = store.ingest([{
+        "kind": "memory", "severity": "warning", "title": "内存",
+        "message": "内存偏高", "metric": "86%",
+    }])[0]
+    second = store.ingest([{
+        "kind": "cpu", "severity": "warning", "title": "CPU",
+        "message": "CPU 偏高", "metric": "81%",
+    }])[0]
+    assert store.ack(first["id"]) is True
+    assert store.ack_all() == [second["id"]]
+    assert store.ack_all() == []
+    assert store.active() == []
+
+
 async def test_规则评估使用磁盘最高值并正确表达失败服务(monkeypatch):
     histories = []
 
@@ -109,9 +136,12 @@ async def test_规则评估使用磁盘最高值并正确表达失败服务(monk
             ]
 
         def get_last_fired(self, _rule_id): return 0
-        def update_last_fired(self, _rule_id): pass
         def get_channel(self, _channel_id): return None
-        def add_history(self, **entry): histories.append(entry)
+        def record_trigger(self, **entry):
+            histories.append(entry)
+            return len(histories)
+        def update_history_channels(self, history_id, channels_notified):
+            histories[history_id - 1]["channels_notified"] = channels_notified
 
     async def fake_push_all(_channels, _payload): return []
 

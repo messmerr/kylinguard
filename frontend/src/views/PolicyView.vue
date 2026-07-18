@@ -1,33 +1,14 @@
 <template>
   <div class="kg-page policy-page">
     <div class="kg-page-inner policy-inner">
-      <header class="page-head">
-        <div>
-          <p class="page-description">决定 Agent 什么时候可以直接执行，并管理额外的固定限制。</p>
-        </div>
-        <el-button
-          v-if="policyTab === 'rules'"
-          type="primary"
-          :disabled="policyLoading || Boolean(policyLoadError)"
-          aria-label="添加自定义安全策略"
-          @click="openAddDialog"
-        >
-          <KgIcon name="plus" :size="15" />
-          添加策略
-        </el-button>
-      </header>
-
       <el-tabs v-model="policyTab" class="main-tabs">
-        <el-tab-pane name="access">
-          <template #label>
-            <span class="tab-label"><KgIcon name="shield" :size="14" />权限模式</span>
-          </template>
+        <el-tab-pane label="权限模式" name="access">
 
           <section class="policy-section permission-section">
         <div class="section-head permission-heading">
           <div>
             <h2 class="kg-section-title">Agent 权限</h2>
-            <p>这是全局设置，对当前任务和以后创建的所有任务生效；已经开始的系统调用无法回滚。</p>
+            <p>基础模式全局生效；完全访问只绑定当前任务，不会影响其他任务。</p>
           </div>
           <span
             class="sync-state"
@@ -46,7 +27,7 @@
           aria-live="polite"
         >
           <span class="kg-spinner" aria-hidden="true"></span>
-          <div><strong>正在同步全局权限</strong><span>同步完成前不会把本地状态显示为已生效。</span></div>
+          <div><strong>正在同步任务权限</strong><span>同步完成前不会把本地状态显示为已生效。</span></div>
         </div>
 
         <div
@@ -55,7 +36,7 @@
           role="alert"
         >
           <KgIcon name="warning" :size="17" />
-          <div><strong>全局权限同步失败</strong><span>{{ permissionLoadError }}</span></div>
+          <div><strong>任务权限同步失败</strong><span>{{ permissionLoadError }}</span></div>
           <el-button size="small" :loading="permissionLoading" @click="retryPermissionContext">重新同步</el-button>
         </div>
 
@@ -64,7 +45,7 @@
           class="mode-grid"
           role="radiogroup"
           aria-label="Agent 权限模式"
-          :aria-busy="permissionChanging || fullAccessVisibilityChanging"
+          :aria-busy="permissionChanging"
         >
           <button
             v-for="mode in visiblePermissionModes"
@@ -77,7 +58,7 @@
             :aria-checked="permissionMode === mode.value"
             :aria-label="`${mode.label}：${mode.short}`"
             :tabindex="permissionModeTabIndex(mode.value)"
-            :disabled="permissionChanging || fullAccessVisibilityChanging || permissionModeUnavailable(mode.value)"
+            :disabled="permissionChanging || permissionModeUnavailable(mode.value)"
             @keydown="handlePermissionModeKeydown($event, mode.value)"
             @click="choosePermissionMode(mode.value)"
           >
@@ -86,43 +67,12 @@
               <strong>{{ mode.label }}</strong>
               <KgIcon v-if="permissionMode === mode.value" name="check" :size="14" class="mode-selected" />
             </span>
-            <span>{{ mode.value === 'full_access' && !permissionContext.fullAccessAvailable
+            <span>{{ mode.value === 'full_access' && !permissionContext.sessionId
+              ? '请先在任务页发送一条消息'
+              : mode.value === 'full_access' && !permissionContext.fullAccessAvailable
               ? (permissionContext.fullAccessUnavailableReason || '服务端未开放')
               : mode.short }}</span>
           </button>
-        </div>
-
-        <div
-          class="full-access-visibility"
-          :class="{ exposed: permissionContext.fullAccessVisible }"
-          role="group"
-          aria-label="完全访问入口可见性"
-        >
-          <span class="full-access-visibility-icon"><KgIcon name="warning" :size="18" /></span>
-          <div class="full-access-visibility-copy">
-            <strong>显示“完全访问”高风险模式</strong>
-            <p v-if="permissionContext.fullAccessVisible">
-              入口已经显示在全局权限菜单中；真正启用时仍需经过另一组独立的警告和二次确认。
-            </p>
-            <p v-else>
-              默认隐藏。只有在这里显式揭示后，其他页面才能看到并尝试启用完全访问。
-            </p>
-            <small v-if="!permissionContext.fullAccessAvailable">
-              {{ permissionContext.fullAccessUnavailableReason || '服务端未开放完全访问' }}
-            </small>
-          </div>
-          <div class="full-access-visibility-control">
-            <span :class="{ active: permissionContext.fullAccessVisible }">
-              {{ permissionContext.fullAccessVisible ? '已显示' : '已隐藏' }}
-            </span>
-            <el-switch
-              :model-value="permissionContext.fullAccessVisible"
-              :loading="fullAccessVisibilityChanging"
-              :disabled="permissionChanging || (!permissionContext.fullAccessAvailable && !permissionContext.fullAccessVisible)"
-              aria-label="显示完全访问模式"
-              @change="changeFullAccessVisibility"
-            />
-          </div>
         </div>
 
         <div class="effective-access" :class="{ danger: fullAccessActive }">
@@ -165,13 +115,7 @@
           </section>
         </el-tab-pane>
 
-        <el-tab-pane name="grants">
-          <template #label>
-            <span class="tab-label">
-              <KgIcon name="lock" :size="14" />授权管理
-              <span>{{ autoReviewRoots.length + activePermissionGrants.length }}</span>
-            </span>
-          </template>
+        <el-tab-pane label="授权管理" name="grants">
 
           <section class="policy-section grants-section">
         <div class="section-head">
@@ -255,13 +199,7 @@
           </section>
         </el-tab-pane>
 
-        <el-tab-pane name="rules">
-          <template #label>
-            <span class="tab-label">
-              <KgIcon name="audit" :size="14" />策略规则
-              <span>{{ custom.length }}</span>
-            </span>
-          </template>
+        <el-tab-pane label="策略规则" name="rules">
 
           <div v-if="policyLoading" class="policy-state policy-page-state" role="status">
             <span class="kg-spinner" aria-hidden="true"></span>
@@ -281,7 +219,17 @@
             <h2 class="kg-section-title">自定义策略</h2>
             <p>命令正则和保护路径会提升确认强度；完全访问可覆盖这些风险策略。</p>
           </div>
-          <span class="section-count">{{ custom.length }} 条</span>
+          <div class="section-meta">
+            <span class="section-count">{{ custom.length }} 条</span>
+            <el-button
+              type="primary"
+              aria-label="添加自定义安全策略"
+              @click="openAddDialog"
+            >
+              <KgIcon name="plus" :size="15" />
+              添加策略
+            </el-button>
+          </div>
         </div>
 
         <el-table v-if="custom.length" :data="custom" class="policy-table">
@@ -455,14 +403,11 @@
 
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useApi.js'
 import { activeId, setChatPermissionMode } from '../composables/useChat.js'
-import {
-  confirmFullAccessEnable,
-  confirmFullAccessExposure,
-} from '../utils/fullAccessWarnings.js'
+import { confirmFullAccessEnable } from '../utils/fullAccessWarnings.js'
 import {
   addAutoReviewRoot,
   autoReviewRoots,
@@ -477,7 +422,6 @@ import {
   permissionModeMeta,
   revokePermissionGrant,
   revokeAutoReviewRoot,
-  setFullAccessVisibility,
   visiblePermissionModes,
 } from '../composables/usePermissions.js'
 
@@ -491,7 +435,6 @@ const saving = ref(false)
 const removingId = ref(null)
 const form = reactive({ kind: 'blacklist', pattern: '', note: '' })
 const permissionChanging = ref(false)
-const fullAccessVisibilityChanging = ref(false)
 const grantSaving = ref(false)
 const removingGrantId = ref('')
 const removingRootPath = ref('')
@@ -544,7 +487,8 @@ function lifetimeLabel(lifetime) {
 }
 
 function permissionModeUnavailable(mode) {
-  return mode === 'full_access' && !permissionContext.fullAccessAvailable
+  return mode === 'full_access'
+    && (!permissionContext.sessionId || !permissionContext.fullAccessAvailable)
 }
 
 function navigablePermissionModes() {
@@ -628,36 +572,6 @@ async function choosePermissionMode(mode) {
     ElMessage.error(reason.message || '权限修改失败')
   } finally {
     permissionChanging.value = false
-  }
-}
-
-async function changeFullAccessVisibility(visible) {
-  if (fullAccessVisibilityChanging.value) return
-  fullAccessVisibilityChanging.value = true
-  try {
-    if (visible) {
-      await confirmFullAccessExposure({ grantsRoot: permissionContext.grantsRoot })
-    } else if (fullAccessActive.value) {
-      await ElMessageBox.confirm(
-        '隐藏入口会立即收回当前全局完全访问并恢复为“确认后执行”。已经开始的系统调用无法回滚。',
-        '隐藏并收回完全访问',
-        {
-          type: 'warning',
-          confirmButtonText: '隐藏并立即收回',
-          cancelButtonText: '取消',
-          distinguishCancelAndClose: true,
-        },
-      )
-    }
-    await setFullAccessVisibility(visible)
-    ElMessage.success(visible
-      ? '完全访问入口已显示，当前并未启用'
-      : '完全访问入口已隐藏')
-  } catch (reason) {
-    if (reason === 'cancel' || reason === 'close' || reason?.action === 'cancel') return
-    ElMessage.error(reason.message || '完全访问入口更新失败')
-  } finally {
-    fullAccessVisibilityChanging.value = false
   }
 }
 
@@ -806,43 +720,11 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.policy-inner { width: min(100%, 960px); }
+.policy-inner { width: 100%; }
 
-.page-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--kg-space-6);
-}
-
-.page-head :deep(.el-button) { gap: 7px; }
-
-.page-description {
-  margin: 0;
-  color: var(--kg-text-tertiary);
-  font-size: 13px;
-}
-
-.main-tabs { margin-top: var(--kg-space-5); }
-.main-tabs :deep(.el-tabs__header) { margin-bottom: var(--kg-space-3); }
-
-.tab-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.tab-label > span {
-  min-width: 18px;
-  padding: 0 5px;
-  border-radius: var(--kg-radius-pill);
-  background: var(--kg-bg-surface-2);
-  color: var(--kg-text-tertiary);
-  font-family: var(--kg-font-mono);
-  font-size: 10px;
-  line-height: 18px;
-  text-align: center;
-}
+.main-tabs { margin-top: 0; }
+.main-tabs :deep(.el-tabs__header) { margin-bottom: var(--kg-space-4); }
+.main-tabs :deep(.el-tabs__content) { overflow: visible; }
 
 .policy-section { margin-top: var(--kg-space-4); }
 
@@ -852,7 +734,7 @@ onMounted(() => {
   border-bottom: 1px solid var(--kg-border-subtle);
 }
 
-.permission-heading { align-items: center; }
+.permission-heading { align-items: flex-end; }
 .sync-state {
   display: inline-flex;
   align-items: center;
@@ -903,57 +785,6 @@ onMounted(() => {
 .mode-selected { margin-left: auto; color: var(--kg-accent); }
 .mode-card.is-danger .mode-card-head :deep(.kg-icon) { color: var(--kg-danger); }
 
-.full-access-visibility {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--kg-space-3);
-  margin-top: var(--kg-space-3);
-  padding: 12px;
-  border: 1px solid var(--kg-border-subtle);
-  border-radius: var(--kg-radius-md);
-  background: var(--kg-bg-surface-2);
-}
-.full-access-visibility.exposed {
-  border-color: var(--kg-danger-border);
-  background: var(--kg-danger-soft);
-}
-.full-access-visibility-icon {
-  display: grid;
-  width: 32px;
-  height: 32px;
-  place-items: center;
-  border-radius: 50%;
-  background: var(--kg-danger-soft);
-  color: var(--kg-danger);
-}
-.full-access-visibility-copy { display: grid; gap: 3px; }
-.full-access-visibility strong { color: var(--kg-text-primary); font-size: 12px; }
-.full-access-visibility p,
-.full-access-visibility small {
-  margin: 0;
-  color: var(--kg-text-secondary);
-  font-size: 11px;
-  line-height: 1.5;
-}
-.full-access-visibility small { color: var(--kg-danger); }
-.full-access-visibility-control {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  white-space: nowrap;
-}
-.full-access-visibility-control > span {
-  min-width: 36px;
-  color: var(--kg-text-tertiary);
-  font-size: 11px;
-  text-align: right;
-}
-.full-access-visibility-control > span.active {
-  color: var(--kg-danger);
-  font-weight: 600;
-}
-
 .effective-access {
   min-height: 52px;
   display: flex;
@@ -970,7 +801,7 @@ onMounted(() => {
 .execution-facts > div { display: grid; min-width: 0; gap: 2px; }
 .execution-facts span { color: var(--kg-text-tertiary); font-size: 10px; }
 .effective-access code { color: var(--kg-text-primary); font: 11px/1.5 var(--kg-font-mono); }
-.effective-access p { min-width: 0; flex: 1; margin: 0; color: var(--kg-text-secondary); font-size: 11px; line-height: 1.5; }
+.effective-access p { min-width: 0; flex: 1; margin: 0; color: var(--kg-text-secondary); font-size: 11px; line-height: 1.5; text-align: right; }
 .root-access-warning {
   display: flex;
   align-items: flex-start;
@@ -1030,7 +861,18 @@ onMounted(() => {
 .grant-copy { min-width: 0; flex: 1; display: grid; gap: 3px; }
 .grant-copy code { overflow: hidden; color: var(--kg-text-primary); font: 11px/1.4 var(--kg-font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .grant-copy span { color: var(--kg-text-tertiary); font-size: 10px; }
-.grant-lifetime { flex: none; color: var(--kg-text-tertiary); font-size: 10px; }
+.grant-lifetime {
+  width: 72px;
+  flex: none;
+  color: var(--kg-text-tertiary);
+  font-size: 10px;
+  text-align: center;
+}
+.grant-row > :deep(.el-button) {
+  width: 84px;
+  flex: none;
+  justify-content: center;
+}
 .grant-empty {
   min-height: 64px;
   display: flex;
@@ -1046,7 +888,7 @@ onMounted(() => {
 
 .section-head {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
   gap: var(--kg-space-5);
   margin-bottom: var(--kg-space-3);
@@ -1063,6 +905,14 @@ onMounted(() => {
   font-family: var(--kg-font-mono);
   font-size: 11px;
 }
+
+.section-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--kg-space-3);
+}
+
+.section-meta :deep(.el-button) { gap: 7px; }
 
 .policy-table { width: 100%; }
 .policy-pattern { color: var(--kg-text-primary); font-family: var(--kg-font-mono); font-size: 12px; }
@@ -1196,6 +1046,7 @@ onMounted(() => {
 @media (max-width: 1080px) {
   .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .effective-access { align-items: flex-start; flex-wrap: wrap; }
+  .effective-access p { width: 100%; text-align: left; }
   .execution-facts { width: 100%; flex-wrap: wrap; }
   .root-entry { grid-template-columns: minmax(0, 1fr) auto; }
   .root-entry > :deep(.el-button) { grid-column: 1 / -1; justify-self: end; }

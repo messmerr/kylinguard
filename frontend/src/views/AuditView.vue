@@ -1,23 +1,8 @@
 <template>
   <div class="kg-page audit-page">
     <div class="kg-page-inner audit-inner">
-      <header class="page-head">
-        <div>
-          <p class="page-description">按任务或系统配置范围查看可校验审计链。</p>
-        </div>
-        <el-button
-          :disabled="!selectedId || !events.length || loading"
-          aria-label="导出当前范围的审计 JSON"
-          @click="exportReport"
-        >
-          <KgIcon name="download" :size="15" />
-          导出 JSON
-        </el-button>
-      </header>
-
       <div class="audit-toolbar">
         <label class="session-picker">
-          <span>范围</span>
           <el-select
             :model-value="selectedId"
             :loading="targetsLoading"
@@ -43,6 +28,15 @@
           </span>
           <span class="event-count">{{ events.length }} 条事件</span>
         </div>
+        <el-button
+          class="audit-export"
+          :disabled="!selectedId || !events.length || loading"
+          aria-label="导出当前范围的审计 JSON"
+          @click="exportReport"
+        >
+          <KgIcon name="download" :size="15" />
+          导出 JSON
+        </el-button>
       </div>
 
       <div
@@ -158,10 +152,10 @@
         <div class="pagination-bar">
           <el-pagination
             v-model:current-page="currentPage"
-            v-model:page-size="pageSize"
-            :page-sizes="[20, 50, 100]"
             :total="events.length"
-            layout="total, sizes, prev, pager, next"
+            :page-size="pageSize"
+            :pager-count="5"
+            layout="total, prev, pager, next"
           />
         </div>
       </section>
@@ -199,13 +193,13 @@ const targetsLoaded = ref(false)
 const expanded = reactive(new Set())
 const rawExpanded = reactive(new Set())
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = 10
 let selectRequest = 0
 let targetsRequest = 0
 
 const pagedEvents = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  return events.value.slice(start, start + pageSize.value)
+  const start = (currentPage.value - 1) * pageSize
+  return events.value.slice(start, start + pageSize)
 })
 const auditTargets = computed(() => [...systemScopes.value, ...sessions.value])
 
@@ -766,29 +760,12 @@ onMounted(loadAuditTargets)
   min-height: 100%;
 }
 
-.page-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--kg-space-6);
-}
-
-.page-head :deep(.el-button) {
-  gap: 7px;
-}
-
-.page-description {
-  margin: 0;
-  color: var(--kg-text-tertiary);
-  font-size: 13px;
-}
-
 .audit-toolbar {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: var(--kg-space-5);
-  margin-top: var(--kg-space-6);
+  margin-top: var(--kg-space-2);
   padding-bottom: var(--kg-space-4);
   border-bottom: 1px solid var(--kg-border-subtle);
 }
@@ -801,11 +778,16 @@ onMounted(loadAuditTargets)
   font-size: 12px;
 }
 
+.audit-export {
+  gap: 7px;
+}
+
 .chain-summary {
   display: flex;
   align-items: center;
   gap: var(--kg-space-3);
   min-height: 32px;
+  margin-left: auto;
 }
 
 .chain-status {
@@ -1034,14 +1016,25 @@ onMounted(loadAuditTargets)
 
 @media (max-width: 720px) {
   .audit-toolbar {
-    align-items: stretch;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: flex-end;
     gap: var(--kg-space-3);
-    margin-top: var(--kg-space-4);
   }
 
   .session-picker { width: 100%; }
-  .chain-summary { justify-content: space-between; }
+
+  .chain-summary {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+
+  .audit-export {
+    grid-column: 2;
+    grid-row: 1;
+  }
   .timeline { overflow-x: hidden; }
   .event { padding-left: 24px; }
   .event:not(:last-child)::before { left: 7px; }
@@ -1065,9 +1058,6 @@ onMounted(loadAuditTargets)
     padding-left: 0;
     overflow: hidden;
   }
-
-  .pagination-bar :deep(.el-pagination__total),
-  .pagination-bar :deep(.el-pagination__sizes) { display: none; }
 
   .pagination-bar :deep(.el-pager li) { min-width: 24px; }
 }

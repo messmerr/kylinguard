@@ -11,10 +11,11 @@ class RiskLevel(str, Enum):
 
 
 class PermissionMode(str, Enum):
-    """全局审批模式。
+    """审批模式。
 
     模式只决定 KylinGuard 是否自动批准一类操作，不会提升运行服务的
     Linux/Windows 账户权限；即使 ``full_access`` 也仍受操作系统约束。
+    ``full_access`` 只能作为单个任务的覆盖模式，其余模式可作为全局基础设置。
     """
 
     READ_ONLY = "read_only"
@@ -36,13 +37,12 @@ class PermissionDecision(str, Enum):
 
 
 class PermissionContext(BaseModel):
-    # 审批模式与自动执行范围是全局设置；流水线读取时会附上当前会话 ID，
-    # 全局设置接口返回空字符串。
+    # 普通审批模式与自动执行范围是全局基础设置；full_access 只能覆盖当前任务。
+    # 全局设置接口返回空 session_id，流水线和任务权限接口返回具体任务 ID。
     session_id: str = ""
     mode: PermissionMode = PermissionMode.ASK
     auto_review_roots: list[str] = Field(default_factory=list)
-    # 完全访问入口默认隐藏；只有管理员在“权限与安全”中单独揭示后，
-    # 全局权限接口才接受切换到 full_access。
+    # 兼容旧版客户端和数据库；新界面始终显示任务级完全访问入口。
     full_access_visible: bool = False
     version: int = Field(default=1, ge=1)
     updated_at: float

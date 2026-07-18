@@ -33,7 +33,8 @@ import {
 
 export const sessions = ref([])
 const ACTIVE_TURN_STATES = new Set(['running', 'retry_wait', 'waiting_user', 'cancelling'])
-const SESSION_LOAD_TIMEOUT_MS = 20_000
+const SESSION_HISTORY_LOAD_TIMEOUT_MS = 60_000
+const SESSION_CONTEXT_SYNC_TIMEOUT_MS = 15_000
 
 const contexts = reactive(new Map())
 const activeContextKey = ref('')
@@ -918,6 +919,56 @@ function abortContextLoad(context) {
   context.sessionLoading = false
 }
 
+function resetSessionHydration(context) {
+  context.items = []
+  context.currentTurn = null
+  context.stepsById = {}
+  context.confirmsById = {}
+  context.activitiesById = {}
+  context.streamingItem = null
+}
+
+function replaySessionHistory(context, events) {
+  let skipped = 0
+  for (const event of events) {
+    if (!event || typeof event !== 'object') {
+      skipped++
+      continue
+    }
+    try {
+      const payload = event.payload && typeof event.payload === 'object'
+        ? event.payload : {}
+      handleEvent({
+        type: event.event_type,
+        event_timestamp: event.ts,
+        ...payload,
+      }, context)
+    } catch {
+      // 单条旧版事件不兼容时保留其余历史，避免整个任务无法打开。
+      skipped++
+    }
+  }
+  if (skipped) {
+    push(context, {
+      kind: 'history_warning',
+      error: `${skipped} 条旧版记录无法完整还原，其余任务记录已正常加载。`,
+    })
+  }
+}
+
+function retireHistoricalConfirmations(context, sessionBusy = false) {
+  if (sessionBusy) return
+  for (const card of Object.values(context.confirmsById)) {
+    if (card.hidden) continue
+    card.hidden = true
+    card.expired = true
+    const step = context.stepsById[card.stepId]
+    if (step && ['queued', 'waiting', 'ready'].includes(step.status)) {
+      step.status = 'timed_out'
+    }
+  }
+}
+
 function sessionSummaryModel(summary) {
   return summary?.model_context || summary?.session_model
     || (summary?.model && typeof summary.model === 'object' ? summary.model : null)
@@ -973,11 +1024,16 @@ export async function loadSession(id) {
   }
   if (context.sessionLoading) return context.loadPromise
 
+  resetSessionHydration(context)
   const requestId = ++context.loadRequest
   context.sessionLoading = true
   const controller = new AbortController()
   context.loadController = controller
-  const timeout = setTimeout(() => controller.abort(), SESSION_LOAD_TIMEOUT_MS)
+  let historyLoaded = false
+  let contextSyncTimeout = null
+  const historyTimeout = setTimeout(
+    () => controller.abort(), SESSION_HISTORY_LOAD_TIMEOUT_MS,
+  )
   const loading = (async () => {
     try {
       const r = await apiFetch(`/api/sessions/${sessionId}/events`, {
@@ -986,28 +1042,34 @@ export async function loadSession(id) {
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       const body = await r.json()
       if (requestId !== context.loadRequest) return
-      for (const ev of body.events || []) {
-        handleEvent({ type: ev.event_type, event_timestamp: ev.ts, ...ev.payload }, context)
-      }
+      if (!Array.isArray(body.events)) throw new Error('任务记录响应格式不正确')
+      replaySessionHistory(context, body.events)
+      retireHistoricalConfirmations(context, Boolean(summary?.busy))
       context.hydrated = true
+      historyLoaded = true
+      clearTimeout(historyTimeout)
       // 历史 permission_changed 事件只用于回放；当前可见时再以服务端状态校准。
       if (!isActiveContext(context)) return
+      contextSyncTimeout = setTimeout(
+        () => controller.abort(), SESSION_CONTEXT_SYNC_TIMEOUT_MS,
+      )
       await loadPermissionContext(sessionId, { signal: controller.signal }).catch(() => {})
       if (requestId !== context.loadRequest || !isActiveContext(context)) return
-      if (controller.signal.aborted) throw new Error('任务上下文加载超时')
+      if (controller.signal.aborted) return
       await loadSessionModel(sessionId, { signal: controller.signal }).catch(() => {})
-      if (controller.signal.aborted) throw new Error('任务上下文加载超时')
     } catch (error) {
-      if (requestId === context.loadRequest) {
+      if (requestId === context.loadRequest && !historyLoaded) {
+        context.hydrated = false
         push(context, {
           kind: 'fatal',
           error: controller.signal.aborted
-            ? '任务上下文加载超时，请重新打开该任务。'
+            ? '任务记录加载超时，请重新打开该任务。'
             : `任务记录读取失败：${error.message}`,
         })
       }
     } finally {
-      clearTimeout(timeout)
+      clearTimeout(historyTimeout)
+      clearTimeout(contextSyncTimeout)
       if (context.loadController === controller) context.loadController = null
       if (requestId === context.loadRequest) {
         context.sessionLoading = false

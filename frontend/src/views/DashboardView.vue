@@ -1,24 +1,20 @@
 <template>
   <div class="kg-page dashboard-page">
     <div class="kg-page-inner dashboard-inner">
-      <header class="page-head">
-        <div>
-          <p class="page-description">查看当前系统状态和累计安全活动。</p>
-        </div>
+      <div v-if="dashboardError && hasDashboardData" class="dashboard-notice" role="alert">
+        <KgIcon name="warning" :size="15" />
+        <span><strong>部分信息未能刷新</strong>{{ dashboardError }}；{{ dashboardNoticeDetail }}</span>
+        <el-button text :loading="refreshing" @click="poll({ forceStatus: true })">重试</el-button>
+      </div>
+
+      <div class="dashboard-tabs-shell">
         <div class="refresh-state">
-          <span v-if="status" class="kg-meta">{{ ageText }}更新 · 每 30 秒刷新</span>
-          <el-button :loading="refreshing" @click="poll">
+          <span v-if="status" class="kg-meta">{{ ageText }}更新</span>
+          <el-button :loading="refreshing" @click="poll({ forceStatus: true })">
             <KgIcon v-if="!refreshing" name="refresh" :size="15" />
             刷新
           </el-button>
         </div>
-      </header>
-
-      <div v-if="dashboardError && hasDashboardData" class="dashboard-notice" role="alert">
-        <KgIcon name="warning" :size="15" />
-        <span><strong>部分信息未能刷新</strong>{{ dashboardError }}；{{ dashboardNoticeDetail }}</span>
-        <el-button text :loading="refreshing" @click="poll">重试</el-button>
-      </div>
 
       <el-tabs v-model="activeTab" class="dashboard-tabs">
         <el-tab-pane label="运行概览" name="overview">
@@ -124,14 +120,6 @@
             </section>
 
             <section class="overview-panel activity-panel">
-              <div class="section-head">
-                <div>
-                  <h2 class="kg-section-title">安全活动</h2>
-                  <span class="kg-meta">累计记录</span>
-                </div>
-                <span v-if="stats" class="event-total">{{ stats.total_events || 0 }} 条审计事件</span>
-              </div>
-
               <template v-if="stats">
                 <EChartCanvas :option="activityChartOption" title="安全活动分布" :height="250" embedded />
                 <dl class="activity-list">
@@ -176,7 +164,10 @@
                     <span v-else class="collapse-summary">{{ metric.summary }}</span>
                   </div>
                 </template>
-                <pre class="raw-output">{{ metric.raw }}</pre>
+                <pre
+                  class="raw-output"
+                  :class="{ 'is-memory-table': metric.key === 'memory' }"
+                >{{ metric.raw }}</pre>
               </el-collapse-item>
             </el-collapse>
 
@@ -192,6 +183,7 @@
           </section>
         </el-tab-pane>
       </el-tabs>
+      </div>
     </div>
   </div>
 </template>
@@ -202,6 +194,18 @@ import EChartCanvas from '../components/EChartCanvas.vue'
 import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useApi.js'
 import {
+  pendingAlerts as alerts,
+  pendingAlertsError,
+  pendingAlertsLoaded,
+  refreshPendingAlerts,
+} from '../composables/useAlerts.js'
+import {
+  refreshSystemStatus,
+  systemStatus as status,
+  systemStatusAgeText as ageText,
+  systemStatusError as sharedSystemStatusError,
+} from '../composables/useSystemStatus.js'
+import {
   enabledMcpServers,
   extensionSkills,
   loadExtensions,
@@ -209,6 +213,7 @@ import {
 import {
   cpuUsagePercent,
   diskUsagePercent as diskPercent,
+  formatMemoryTable,
   isMetricUnavailable as isUnavailable,
   isMetricUnsupported,
   loadAverage,
@@ -216,18 +221,13 @@ import {
 } from '../utils/systemMetrics.js'
 
 const stats = ref(null)
-const status = ref(null)
-const alerts = ref(null)
 const refreshing = ref(false)
 const endpointErrors = ref({})
 const retainedErrorKeys = ref([])
 const initialLoadComplete = ref(false)
 const openDetails = ref([])
 const activeTab = ref('overview')
-const statusReceivedAt = ref(0)
-const clock = ref(Date.now())
 let timer = null
-let clockTimer = null
 const endpointLoaded = {
   status: false,
   stats: false,
@@ -236,13 +236,17 @@ const endpointLoaded = {
 }
 
 const hasDashboardData = computed(() => Boolean(
-  status.value || stats.value || alerts.value !== null,
+  status.value || stats.value || pendingAlertsLoaded.value,
 ))
 const initialLoading = computed(() => (
   (!initialLoadComplete.value || refreshing.value) && !hasDashboardData.value
 ))
-const dashboardError = computed(() => Object.values(endpointErrors.value).filter(Boolean).join('；'))
-const statusError = computed(() => endpointErrors.value.status || '')
+const dashboardError = computed(() => {
+  const errors = { ...endpointErrors.value }
+  if (sharedSystemStatusError.value) errors.status = sharedSystemStatusError.value
+  return Object.values(errors).filter(Boolean).join('；')
+})
+const statusError = computed(() => sharedSystemStatusError.value || endpointErrors.value.status || '')
 const statsError = computed(() => endpointErrors.value.stats || '')
 const alertError = computed(() => endpointErrors.value.alerts || '')
 const dashboardNoticeDetail = computed(() => {
@@ -272,19 +276,6 @@ const TITLES = {
   recent_errors: '近期错误日志',
 }
 
-const ageText = computed(() => {
-  if (!status.value) return ''
-  const baseAge = Number(status.value.collected_ago_seconds) || 0
-  const elapsed = statusReceivedAt.value
-    ? Math.max(0, clock.value - statusReceivedAt.value) / 1000
-    : 0
-  const age = Math.max(0, Math.round(baseAge + elapsed))
-  if (age < 3) return '刚刚'
-  if (age < 60) return `${age} 秒前`
-  if (age < 3600) return `${Math.floor(age / 60)} 分钟前`
-  return `${Math.floor(age / 3600)} 小时前`
-})
-
 const collectionState = computed(() => {
   const values = Object.values(status.value?.snapshot || {})
   const failed = values.filter(raw => isUnavailable(raw)).length
@@ -312,7 +303,7 @@ const activityStats = computed(() => [
 
 const summaryStats = computed(() => [
   {
-    label: '待处理告警', value: alerts.value == null ? '—' : activeAlertCount.value,
+    label: '待处理告警', value: pendingAlertsLoaded.value ? activeAlertCount.value : '—',
     note: alertSummary.value.note,
     tone: alertSummary.value.tone,
   },
@@ -327,15 +318,19 @@ const enabledSkillSummaries = computed(() => (
 ))
 
 const alertSummary = computed(() => {
-  if (alerts.value == null) return {
+  if (!pendingAlertsLoaded.value) return {
     note: alertError.value
       ? '告警状态未同步'
       : initialLoadComplete.value ? '暂无告警状态' : '正在读取当前风险',
     tone: alertError.value ? 'warning' : 'info',
   }
   const critical = alerts.value.filter(alert => alert.severity === 'critical').length
-  if (critical) return { note: `${critical} 条严重风险待处理`, tone: 'danger' }
-  if (alerts.value.length) return { note: `${alerts.value.length} 条风险需要关注`, tone: 'warning' }
+  const stale = alertError.value ? ' · 刷新未完成' : ''
+  if (critical) return { note: `${critical} 条严重风险待处理${stale}`, tone: 'danger' }
+  if (alerts.value.length) return {
+    note: `${alerts.value.length} 条风险需要关注${stale}`, tone: 'warning',
+  }
+  if (alertError.value) return { note: '显示最近一次结果 · 刷新未完成', tone: 'warning' }
   return { note: '当前没有待处理风险', tone: 'success' }
 })
 
@@ -372,7 +367,7 @@ const rawMetrics = computed(() => {
   const snapshot = status.value?.snapshot || {}
   return Object.entries(snapshot).map(([key, raw]) => ({
     key,
-    raw,
+    raw: key === 'memory' ? formatMemoryTable(raw) : raw,
     title: TITLES[key] || key,
     unavailable: isUnavailable(raw),
     unavailableLabel: isMetricUnsupported(raw) ? '当前平台不支持' : '采集失败',
@@ -483,20 +478,23 @@ function statusRows(raw = '', kind) {
   })
 }
 
-async function poll() {
+async function poll({ includeStatus = true, forceStatus = false } = {}) {
   if (refreshing.value) return
   refreshing.value = true
   const previouslyLoaded = {
     ...endpointLoaded,
+    alerts: endpointLoaded.alerts || pendingAlertsLoaded.value,
     extensions: endpointLoaded.extensions
       || Boolean(enabledMcpServers.value.length || extensionSkills.value.length),
   }
   endpointErrors.value = {}
   retainedErrorKeys.value = []
   const requests = await Promise.allSettled([
-    apiFetch('/api/status'),
+    includeStatus
+      ? refreshSystemStatus({ force: forceStatus })
+      : Promise.resolve(status.value),
     apiFetch('/api/stats'),
-    apiFetch('/api/alerts'),
+    refreshPendingAlerts(),
     loadExtensions(),
   ])
   const errors = {}
@@ -524,29 +522,23 @@ async function poll() {
   }
 
   try {
-    const statusBody = await readResponse(requests[0], 'status', '系统状态')
     const statsBody = await readResponse(requests[1], 'stats', '活动统计')
-    const alertsBody = await readResponse(requests[2], 'alerts', '告警')
+    if (requests[0].status === 'rejected') {
+      errors.status = sharedSystemStatusError.value || '系统状态连接失败'
+    } else {
+      endpointLoaded.status = true
+    }
+    if (requests[2].status === 'rejected') {
+      errors.alerts = pendingAlertsError.value || '告警连接失败'
+    } else {
+      endpointLoaded.alerts = true
+    }
     if (requests[3].status === 'rejected') errors.extensions = '扩展能力同步失败'
     else endpointLoaded.extensions = true
 
-    if (statusBody) {
-      status.value = statusBody
-      endpointLoaded.status = true
-      statusReceivedAt.value = Date.now()
-      clock.value = statusReceivedAt.value
-    }
     if (statsBody) {
       stats.value = statsBody
       endpointLoaded.stats = true
-    }
-    if (alertsBody) {
-      if (Array.isArray(alertsBody.alerts)) {
-        alerts.value = alertsBody.alerts
-        endpointLoaded.alerts = true
-      } else {
-        errors.alerts = '告警响应格式不正确'
-      }
     }
     endpointErrors.value = errors
     retainedErrorKeys.value = Object.keys(errors).filter(key => previouslyLoaded[key])
@@ -558,33 +550,25 @@ async function poll() {
 
 onMounted(() => {
   poll()
-  timer = setInterval(poll, 30000)
-  clockTimer = setInterval(() => { clock.value = Date.now() }, 1000)
+  timer = setInterval(() => poll({ includeStatus: false }), 30000)
 })
 
 onUnmounted(() => {
   clearInterval(timer)
-  clearInterval(clockTimer)
 })
 </script>
 
 <style scoped>
 .dashboard-inner { width: 100%; }
 
-.page-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--kg-space-6);
-}
-
-.page-description {
-  margin: 0;
-  color: var(--kg-text-tertiary);
-  font-size: 13px;
-}
+.dashboard-tabs-shell { position: relative; }
 
 .refresh-state {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  height: 38px;
   display: flex;
   align-items: center;
   gap: var(--kg-space-3);
@@ -592,7 +576,8 @@ onUnmounted(() => {
 
 .refresh-state :deep(.el-button) { gap: 7px; }
 
-.dashboard-tabs { margin-top: var(--kg-space-4); }
+.dashboard-tabs { margin-top: 0; }
+.dashboard-tabs :deep(.el-tabs__nav-wrap) { padding-right: 250px; }
 .dashboard-tabs :deep(.el-tabs__header) { margin-bottom: var(--kg-space-4); }
 .dashboard-tabs :deep(.el-tabs__content) { overflow: visible; }
 
@@ -641,7 +626,7 @@ onUnmounted(() => {
 
 .section-head {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
   gap: var(--kg-space-4);
 }
@@ -871,12 +856,6 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.event-total {
-  color: var(--kg-text-tertiary);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
 .session-total {
   display: flex;
   align-items: baseline;
@@ -986,6 +965,11 @@ onUnmounted(() => {
   white-space: pre-wrap;
 }
 
+.raw-output.is-memory-table {
+  overflow-wrap: normal;
+  white-space: pre;
+}
+
 .details-empty { min-height: 120px; }
 
 @media (max-width: 1080px) {
@@ -997,9 +981,8 @@ onUnmounted(() => {
 }
 
 @media (max-width: 720px) {
-  .page-head { align-items: center; gap: var(--kg-space-3); }
-  .refresh-state { margin-left: auto; }
   .refresh-state .kg-meta { display: none; }
+  .dashboard-tabs :deep(.el-tabs__nav-wrap) { padding-right: 82px; }
   .health-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-ring { width: 96px; height: 96px; }
   .capability-row { grid-template-columns: 1fr; gap: 5px; }

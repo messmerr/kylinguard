@@ -32,16 +32,20 @@ function reset() {
   fetchImpl = async (url) => { throw new Error(`unexpected fetch: ${url}`) }
 }
 
-test('新会话保留全局审批设置，但收回上一会话动作授权', () => {
+test('新任务继承基础模式但不继承上一任务完全访问', () => {
   reset()
+  permissions.permissionContext.baseMode = 'ask'
+  permissions.permissionContext.baseVersion = 4
   permissions.permissionContext.mode = 'full_access'
+  permissions.permissionContext.sessionId = 'previous-task'
   permissions.permissionContext.autoReviewRoots = ['/srv/global']
   permissions.recordLocalGrant({
     id: 'session-root', path: '/srv/session', actions: ['create'], lifetime: 'session',
   })
   permissions.beginNewPermissionSession()
 
-  assert.equal(permissions.permissionMode.value, 'full_access')
+  assert.equal(permissions.permissionMode.value, 'ask')
+  assert.equal(permissions.permissionContext.version, 4)
   assert.equal(permissions.permissionContext.sessionId, '')
   assert.equal(permissions.permissionContext.executorIdentitySource, 'unknown')
   assert.deepEqual(permissions.autoReviewRoots.value, ['/srv/global'])
@@ -51,7 +55,8 @@ test('新会话保留全局审批设置，但收回上一会话动作授权', ()
 test('完全访问文案明确完整能力且不把 Reviewer 描述成硬否决', () => {
   const fullAccess = permissions.PERMISSION_MODES.find((mode) => mode.value === 'full_access')
   assert.match(fullAccess.description, /shell.*文件.*网络.*进程/)
-  assert.match(fullAccess.description, /不再逐项确认/)
+  assert.match(fullAccess.description, /仅当前任务/)
+  assert.match(fullAccess.description, /其他任务/)
   assert.doesNotMatch(fullAccess.description, /Reviewer|独立安全复核|硬拒绝/)
   assert.doesNotMatch(fullAccess.description, /控制面隔离/)
 })
@@ -74,39 +79,28 @@ test('权限界面用不同 UID 表达账户分离并显著显示 root 警告', 
   assert.doesNotMatch(policyViewSource, /OS 账户隔离|ACL 控制面隔离/)
 })
 
-test('两个权限入口复用全局权限编排', () => {
+test('两个权限入口复用任务权限编排', () => {
   assert.match(permissionSelectorSource, /setChatPermissionMode\(mode/)
   assert.match(policyViewSource, /setChatPermissionMode\(mode/)
   assert.match(permissionSelectorSource, /visiblePermissionModes/)
-  assert.match(policyViewSource, /setFullAccessVisibility/)
-  assert.match(policyViewSource, /显示“完全访问”高风险模式/)
-  assert.doesNotMatch(permissionSelectorSource, /发送第一条消息后可开启/)
-  assert.doesNotMatch(policyViewSource, /发送第一条消息创建任务后/)
+  assert.doesNotMatch(policyViewSource, /显示“完全访问”高风险模式/)
+  assert.match(fullAccessWarningsSource, /开启完全访问？/)
+  assert.match(permissionSelectorSource, /发送第一条消息后可为当前任务开启/)
+  assert.match(policyViewSource, /请先在任务页发送一条消息/)
 })
 
-test('完全访问默认隐藏且显示与启用各有独立醒目二次确认', () => {
+test('完全访问始终可见且启用只需一次结构化确认', () => {
   reset()
   assert.equal(permissions.permissionContext.fullAccessVisible, false)
   assert.equal(
     permissions.visiblePermissionModes.value.some((mode) => mode.value === 'full_access'),
-    false,
-  )
-  permissions.applyPermissionEvent({
-    type: 'permission_context', mode: 'ask', version: 2,
-    full_access_visible: true,
-  })
-  assert.equal(
-    permissions.visiblePermissionModes.value.some((mode) => mode.value === 'full_access'),
     true,
   )
-  assert.match(fullAccessWarningsSource, /显示高风险权限入口 · 第 1\/2 步/)
-  assert.match(fullAccessWarningsSource, /显示高风险权限入口 · 第 2\/2 步/)
-  assert.match(fullAccessWarningsSource, /启用完全访问 · 第 1\/2 步/)
-  assert.match(fullAccessWarningsSource, /启用完全访问 · 第 2\/2 步/)
-  assert.match(fullAccessWarningsSource, /'显示完全访问'/)
-  assert.match(fullAccessWarningsSource, /'启用完全访问'/)
+  assert.match(fullAccessWarningsSource, /生效范围/)
+  assert.match(fullAccessWarningsSource, /执行身份/)
+  assert.match(fullAccessWarningsSource, /确认开启/)
+  assert.doesNotMatch(fullAccessWarningsSource, /第 1\/2 步|第 2\/2 步|inputValidator/)
   assert.match(fullAccessWarningsSource, /closeOnClickModal: false/)
-  assert.match(fullAccessWarningsSource, /closeOnPressEscape: false/)
 })
 
 test('新任务 composer 明确选择服务器工作目录且已有任务锁定', () => {
@@ -142,12 +136,14 @@ test('自动执行范围规范化去重并保存为全局设置', async () => {
 
 test('从全局权限接口读取模式，并按当前会话读取动作授权', async () => {
   reset()
+  permissions.applyPermissionCapabilities({ workspace_root: '/srv/default' })
   fetchImpl = async (url) => {
-    if (url === '/api/permissions') {
+    if (url === '/api/sessions/session-1/permissions') {
       return Response.json({
-        mode: 'auto_review', version: 3,
+        session_id: 'session-1', mode: 'auto_review', version: 3,
+        base_mode: 'auto_review', base_version: 3,
         execution_identity: 'backend-user', execution_identity_source: 'backend_process',
-        workspace_root: '/srv/default', command_shell: '/bin/bash',
+        workspace_root: '/srv/session-project', command_shell: '/bin/bash',
         command_max_timeout: 900, execution_account_separated: false,
         control_plane_isolated: true, grants_root: true,
         full_access_available: true,
@@ -221,18 +217,18 @@ test('权限加载错误与权限修改错误使用独立展示状态', async ()
   assert.equal(permissions.permissionLoadError.value, '权限服务不可用')
 })
 
-test('完全访问升级集中通过 permissions PUT 且不携带时限', async () => {
+test('完全访问升级只提交到当前任务端点且不携带时限', async () => {
   reset()
   permissions.bindPermissionSession('session-full')
   permissions.permissionContext.version = 1
-  permissions.permissionContext.fullAccessVisible = true
   let submitted
   fetchImpl = async (url, options = {}) => {
-    assert.equal(url, '/api/permissions')
+    assert.equal(url, '/api/sessions/session-full/full-access')
     assert.equal(options.method, 'PUT')
     submitted = JSON.parse(options.body)
     return Response.json({
-      mode: 'full_access', version: 1,
+      session_id: 'session-full', mode: 'full_access', version: 2,
+      base_mode: 'ask', base_version: 1,
       executor_identity: 'root', control_plane_isolated: true,
       grants_root: true,
     })
@@ -240,9 +236,7 @@ test('完全访问升级集中通过 permissions PUT 且不携带时限', async 
 
   await permissions.setPermissionMode('full_access')
 
-  assert.deepEqual(submitted, {
-    mode: 'full_access', version: 1, auto_review_roots: [],
-  })
+  assert.deepEqual(submitted, { enabled: true, version: 1 })
   assert.equal(permissions.fullAccessActive.value, true)
   assert.equal(permissions.permissionContext.executorIdentity, 'root')
   assert.equal(permissions.permissionContext.executorIdentitySource, 'legacy')
@@ -251,34 +245,19 @@ test('完全访问升级集中通过 permissions PUT 且不携带时限', async 
   assert.equal(permissions.permissionContext.grantsRoot, true)
 })
 
-test('隐藏状态禁止直接启用，入口揭示通过独立端点并更新版本', async () => {
+test('未创建任务时拒绝开启完全访问', async () => {
   reset()
   permissions.permissionContext.version = 1
   await assert.rejects(
     permissions.setPermissionMode('full_access'),
-    /隐藏状态/,
+    /请先发送一条消息创建任务/,
   )
-
-  let submitted
-  fetchImpl = async (url, options = {}) => {
-    assert.equal(url, '/api/permissions/full-access-visibility')
-    submitted = JSON.parse(options.body)
-    return Response.json({
-      mode: 'ask', version: 1, full_access_visible: true,
-      full_access_available: true,
-    })
-  }
-
-  await permissions.setFullAccessVisibility(true)
-
-  assert.deepEqual(submitted, { visible: true, version: 1 })
-  assert.equal(permissions.permissionContext.fullAccessVisible, true)
-  assert.equal(permissions.permissionContext.version, 1)
+  assert.equal(permissions.fullAccessActive.value, false)
 })
 
 test('完全访问警告明确持续生效及收回条件', () => {
   assert.match(fullAccessWarningsSource, /持续生效/)
-  assert.match(fullAccessWarningsSource, /手动收回.*隐藏入口.*服务端.*后端重启/)
+  assert.match(fullAccessWarningsSource, /手动收回.*服务端.*后端重启/)
   assert.doesNotMatch(fullAccessWarningsSource, /分钟后收回/)
 })
 
@@ -303,8 +282,10 @@ test('动作授权即使资源是路径也不会扩大自动执行范围', () =>
 
 test('完全访问不会由前端倒计时自动收回', () => {
   reset()
+  permissions.bindPermissionSession('session-full')
   permissions.applyPermissionEvent({
-    type: 'permission_context', mode: 'full_access', version: 2,
+    type: 'permission_context', session_id: 'session-full',
+    mode: 'full_access', version: 2,
   })
   assert.equal(permissions.permissionMode.value, 'full_access')
   assert.equal(permissions.fullAccessActive.value, true)

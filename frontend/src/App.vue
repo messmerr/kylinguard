@@ -46,8 +46,16 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import {
+  startPendingAlertPolling,
+  stopPendingAlertPolling,
+} from './composables/useAlerts.js'
+import {
+  startSystemStatusPolling,
+  stopSystemStatusPolling,
+} from './composables/useSystemStatus.js'
 import { activeId, refreshSessions, sessions } from './composables/useChat.js'
 import { loadExtensions } from './composables/useExtensions.js'
 import { loadModelConfig } from './composables/useModels.js'
@@ -94,7 +102,7 @@ const revokingAccess = ref(false)
 
 const fullAccessStatusText = computed(() => {
   const identity = permissionContext.executorIdentity || '未配置独立执行账号'
-  return `${identity} · 持续生效`
+  return `${identity} · 当前任务`
 })
 
 async function stopFullAccess() {
@@ -138,6 +146,10 @@ refreshSessions().catch(() => {})
 loadPermissionContext().catch(() => {})
 loadExtensions().catch(() => {})
 loadModelConfig().catch(() => {})
+onMounted(startPendingAlertPolling)
+onUnmounted(stopPendingAlertPolling)
+onMounted(startSystemStatusPolling)
+onUnmounted(stopSystemStatusPolling)
 </script>
 
 <style scoped>
@@ -229,12 +241,16 @@ loadModelConfig().catch(() => {})
   padding: 0 7px;
   border: 1px solid var(--kg-danger-border);
   border-radius: var(--kg-radius-xs);
-  background: #fff;
-  color: var(--kg-text-primary);
+  background: var(--kg-danger-soft);
+  color: var(--kg-danger);
   font-size: 11px;
   cursor: pointer;
 }
-.full-access-status button:hover:not(:disabled) { background: var(--kg-danger-soft); }
+.full-access-status button:hover:not(:disabled) {
+  border-color: var(--kg-danger);
+  background: color-mix(in srgb, var(--kg-danger) 12%, #fff);
+  color: var(--kg-danger-solid);
+}
 .full-access-status button:disabled { color: var(--kg-text-disabled); cursor: wait; }
 
 .status-trigger {

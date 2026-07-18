@@ -16,10 +16,16 @@
     <nav class="nav-section" aria-label="工作区">
       <button v-for="v in VIEWS" :key="v.key" class="nav-item"
               :class="{ active: view === v.key }" type="button"
-              :title="v.label" :aria-current="view === v.key ? 'page' : undefined"
+              :title="navTitle(v)" :aria-label="navTitle(v)"
+              :aria-current="view === v.key ? 'page' : undefined"
               @click="navigate(v.key)">
         <KgIcon :name="v.icon" :size="16" />
         <span class="nav-label">{{ v.label }}</span>
+        <span
+          v-if="v.key === 'alerts' && pendingAlertBadge"
+          class="nav-badge"
+          aria-hidden="true"
+        >{{ pendingAlertBadge }}</span>
       </button>
     </nav>
 
@@ -52,8 +58,10 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { pendingAlertCount } from '../composables/useAlerts.js'
 import { activeId, loadSession, newSession, sessions } from '../composables/useChat.js'
+import { alertBadgeText } from '../utils/alerts.js'
 import { formatRelativeTime } from '../utils/relativeTime.js'
 import KgIcon from './KgIcon.vue'
 import KgLogo from './KgLogo.vue'
@@ -64,6 +72,7 @@ const historyOpen = ref(false)
 const sidebar = ref(null)
 const relativeClock = ref(Date.now())
 let relativeClockTimer = null
+const pendingAlertBadge = computed(() => alertBadgeText(pendingAlertCount.value))
 
 const VIEWS = [
   { key: 'chat', icon: 'task', label: '任务' },
@@ -90,6 +99,11 @@ function openSession(id) {
 function navigate(next) {
   historyOpen.value = false
   emit('change-view', next)
+}
+
+function navTitle(item) {
+  if (item.key !== 'alerts' || !pendingAlertCount.value) return item.label
+  return `${item.label}，${pendingAlertCount.value} 条待处理告警`
 }
 
 function closeHistoryOnOutside(event) {
@@ -239,6 +253,28 @@ function timeText(ts) {
 
 .nav-item.active :deep(.kg-icon) { color: var(--kg-accent); }
 
+.nav-badge {
+  min-width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0 5px;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  border: 2px solid var(--kg-bg-sidebar);
+  border-radius: var(--kg-radius-pill);
+  background: var(--kg-danger-solid);
+  color: #fff;
+  font-family: var(--kg-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  box-sizing: border-box;
+}
+
+.nav-item.active .nav-badge { border-color: #fff; }
+
 .rail-history { display: none; }
 
 .sr-only {
@@ -361,6 +397,17 @@ function timeText(ts) {
 
   .nav-section { padding: 0 var(--kg-space-2); }
   .nav-item { justify-content: center; padding: 0; }
+  .nav-badge {
+    position: absolute;
+    top: 1px;
+    right: 4px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-width: 2px;
+    font-size: 9px;
+    line-height: 12px;
+  }
 
   .rail-history {
     width: 52px;

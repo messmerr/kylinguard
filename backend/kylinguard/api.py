@@ -379,6 +379,13 @@ class FullAccessVisibilityUpdateRequest(BaseModel):
     version: int = Field(ge=1)
 
 
+class SessionFullAccessUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    version: int = Field(ge=1)
+
+
 class PermissionResolveRequest(BaseModel):
     decision: PermissionDecision
     context_version: int = Field(ge=1)
@@ -535,8 +542,7 @@ def create_app(settings: Settings | None = None,
     settings.skills_dir = str(skills.user_dir)
     settings.skills_state_path = str(skills.state_path)
     current_execution_profile = execution_profile_fingerprint(settings)
-    # 全局 FULL_ACCESS 从不跨后端进程重启继承。sudoers、附加组、capabilities
-    # 或服务沙箱都可能在配置指纹未变化时扩大同一 UID 的权限。
+    # 兼容旧数据库中的全局 FULL_ACCESS；新版本只允许任务级完全访问。
     context = sessions.get_permission_settings()
     if context.mode == PermissionMode.FULL_ACCESS:
         revoke_reason = (
@@ -564,6 +570,36 @@ def create_app(settings: Settings | None = None,
                         "from_mode": PermissionMode.FULL_ACCESS.value,
                         "to_mode": changed.mode.value,
                         "reason": revoke_reason,
+                    },
+                    connection=connection,
+                    commit=False,
+                    lock_held=True,
+                )
+    # 任务级 FULL_ACCESS 同样不跨后端进程重启继承。执行身份或服务边界
+    # 可能已经变化，必须由操作者在具体任务中重新确认。
+    for session_id in sessions.full_access_session_ids():
+        with audit.serialized():
+            with sessions.transaction() as connection:
+                fresh = sessions.get_permissions(session_id)
+                if fresh is None or fresh.mode != PermissionMode.FULL_ACCESS:
+                    continue
+                changed = sessions.set_session_full_access(
+                    session_id,
+                    enabled=False,
+                    expected_version=fresh.version,
+                    updated_by="(server policy)",
+                    commit=False,
+                )
+                audit.append(
+                    session_id,
+                    "permission_changed",
+                    {
+                        "operator": "(server policy)",
+                        "source": "startup",
+                        "from_mode": PermissionMode.FULL_ACCESS.value,
+                        "to_mode": changed.mode.value,
+                        "reason": "service_restarted",
+                        "session_id": session_id,
                     },
                     connection=connection,
                     commit=False,
@@ -820,6 +856,7 @@ def create_app(settings: Settings | None = None,
             "full_access_capabilities": [
                 "shell", "files", "network", "processes",
             ],
+            "full_access_scope": "session",
             "execution_account_separated": execution_account_separated(),
             # 兼容旧前端；不同 UID 并不能证明 DrvFS/组权限/ACL 已隔离控制面。
             "control_plane_isolated": False,
@@ -2374,44 +2411,21 @@ def create_app(settings: Settings | None = None,
     ):
         previous = app.state.sessions.get_permission_settings()
         if req.mode == PermissionMode.FULL_ACCESS:
-            available, reason = full_access_status()
-            if not available:
-                raise HTTPException(
-                    403, detail={
-                        "code": "full_access_disabled", "message": reason,
-                    })
-            if not previous.full_access_visible:
-                raise HTTPException(
-                    403, detail={
-                        "code": "full_access_hidden",
-                        "message": (
-                            "完全访问入口尚未显示。请先在“权限与安全”中阅读"
-                            "独立警告并显式显示该高风险模式。"
-                        ),
-                    })
+            raise HTTPException(400, detail={
+                "code": "full_access_session_required",
+                "message": "完全访问只能为具体任务开启，不能设为全局权限。",
+            })
         try:
             roots = list(req.auto_review_roots)
             if req.mode == PermissionMode.AUTO_REVIEW and not roots:
                 roots = [settings.workspace_root]
             def mutate_permissions(_connection):
-                # 可见性本身不递增执行授权版本，因此必须在同一写事务内再
-                # 校验一次，封住“检查后并发隐藏、随后仍开启”的竞态。
-                if (req.mode == PermissionMode.FULL_ACCESS
-                        and not app.state.sessions.get_permission_settings(
-                        ).full_access_visible):
-                    raise SessionPermissionError(
-                        "full_access_hidden",
-                        "完全访问入口已被隐藏，请先重新显式显示。",
-                    )
                 context = app.state.sessions.set_permission_settings(
                     mode=req.mode,
                     auto_review_roots=roots,
                     expected_version=req.version,
                     updated_by=user,
-                    execution_profile=(
-                        current_execution_profile
-                        if req.mode == PermissionMode.FULL_ACCESS else ""
-                    ),
+                    execution_profile="",
                     commit=False,
                 )
                 return context, {
@@ -2432,6 +2446,74 @@ def create_app(settings: Settings | None = None,
             raise permission_http_error(exc) from exc
         app.state.permission_requests.revoke_all(operator=user)
         return permission_payload(context)
+
+    @app.get("/api/sessions/{session_id}/permissions")
+    async def get_session_permissions(
+        session_id: str,
+        _user: str = Depends(local_operator),
+    ):
+        context = app.state.sessions.get_permissions(session_id)
+        if context is None:
+            raise HTTPException(404, "会话不存在")
+        payload = permission_payload(context)
+        base = app.state.sessions.get_permission_settings()
+        payload["base_mode"] = base.mode.value
+        payload["base_version"] = base.version
+        return payload
+
+    @app.put("/api/sessions/{session_id}/full-access")
+    async def update_session_full_access(
+        session_id: str,
+        req: SessionFullAccessUpdateRequest,
+        user: str = Depends(local_operator),
+    ):
+        previous = app.state.sessions.get_permissions(session_id)
+        if previous is None:
+            raise HTTPException(404, "会话不存在")
+        if req.enabled:
+            available, reason = full_access_status()
+            if not available:
+                raise HTTPException(403, detail={
+                    "code": "full_access_disabled", "message": reason,
+                })
+        try:
+            def mutate_session_full_access(_connection):
+                fresh = app.state.sessions.get_permissions(session_id)
+                if fresh is None:
+                    raise SessionPermissionError(
+                        "session_not_found", "会话不存在。")
+                context = app.state.sessions.set_session_full_access(
+                    session_id,
+                    enabled=req.enabled,
+                    expected_version=req.version,
+                    updated_by=user,
+                    execution_profile=(
+                        current_execution_profile if req.enabled else ""
+                    ),
+                    commit=False,
+                )
+                return context, {
+                    "operator": user,
+                    "source": "session_full_access",
+                    "session_id": session_id,
+                    "from_mode": fresh.mode.value,
+                    "to_mode": context.mode.value,
+                    "previous_version": fresh.version,
+                    "version": context.version,
+                }
+
+            context = audited_permission_mutation(
+                session_id, "permission_changed", mutate_session_full_access)
+        except PermissionVersionConflict as exc:
+            raise permission_http_error(exc, 409) from exc
+        except SessionPermissionError as exc:
+            raise permission_http_error(exc) from exc
+        app.state.permission_requests.revoke_session(session_id, operator=user)
+        payload = permission_payload(context)
+        base = app.state.sessions.get_permission_settings()
+        payload["base_mode"] = base.mode.value
+        payload["base_version"] = base.version
+        return payload
 
     @app.put("/api/permissions/full-access-visibility")
     async def update_full_access_visibility(
@@ -2751,8 +2833,13 @@ def create_app(settings: Settings | None = None,
                 **app.state.audit.stats()}
 
     @app.get("/api/status")
-    async def status(_user: str = Depends(local_operator)):
+    async def status(
+        refresh: bool = False,
+        _user: str = Depends(local_operator),
+    ):
         import json as _j
+        if refresh:
+            await app.state.snapshot_cache.refresh()
         snapshot, age = await app.state.snapshot_cache.get()
         body = _j.dumps({"snapshot": snapshot,
                           "collected_ago_seconds": round(age, 1)},
@@ -2762,13 +2849,53 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/api/alerts")
     async def list_alerts(_user: str = Depends(local_operator)):
-        return {"alerts": app.state.snapshot_cache.alert_store.active()}
+        rule_alerts = [
+            {
+                "id": f"rule:{entry.id}",
+                "kind": f"rule:{entry.rule_id or entry.id}",
+                "source": "rule",
+                "title": entry.rule_name,
+                "message": entry.message,
+                "metric": entry.metric_value,
+                "severity": entry.severity,
+                "ts": entry.fired_at,
+                "acked": False,
+            }
+            for entry in app.state.alert_rule_store.list_pending()
+        ]
+        alerts = [
+            *app.state.snapshot_cache.alert_store.active(),
+            *rule_alerts,
+        ]
+        alerts.sort(key=lambda item: item["ts"], reverse=True)
+        return {"alerts": alerts}
 
     @app.post("/api/alerts/{alert_id}/ack")
     async def ack_alert(alert_id: str, _user: str = Depends(local_operator)):
-        if not app.state.snapshot_cache.alert_store.ack(alert_id):
+        if alert_id.startswith("rule:"):
+            history_id = alert_id.removeprefix("rule:")
+            acknowledged = history_id.isdigit() and int(history_id) > 0 \
+                and app.state.alert_rule_store.acknowledge_history(
+                    int(history_id))
+        else:
+            acknowledged = app.state.snapshot_cache.alert_store.ack(alert_id)
+        if not acknowledged:
             raise HTTPException(404, "告警不存在")
         return {"ok": True}
+
+    @app.post("/api/alerts/ack-all")
+    async def ack_all_alerts(_user: str = Depends(local_operator)):
+        history_ids = app.state.alert_rule_store.acknowledge_all_pending()
+        system_ids = app.state.snapshot_cache.alert_store.ack_all()
+        acknowledged_ids = [
+            *system_ids,
+            *(f"rule:{history_id}" for history_id in history_ids),
+        ]
+        return {
+            "ok": True,
+            "acknowledged_count": len(acknowledged_ids),
+            "acknowledged_ids": acknowledged_ids,
+        }
 
     # ---- 告警规则 ----
 
