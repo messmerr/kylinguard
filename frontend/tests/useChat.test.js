@@ -79,11 +79,13 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 function controlledSse(headers = {}) {
   let controller
+  let connectedSignal = null
   const stream = new ReadableStream({
     start(value) { controller = value },
   })
   return {
     connect(signal) {
+      connectedSignal = signal
       signal?.addEventListener('abort', () => {
         controller.error(new DOMException('aborted', 'AbortError'))
       }, { once: true })
@@ -98,6 +100,7 @@ function controlledSse(headers = {}) {
       ))
     },
     close() { controller.close() },
+    get signal() { return connectedSignal },
   }
 }
 
@@ -119,7 +122,7 @@ function deferredResponse() {
 
 function reset() {
   assert.equal(chat.running.value, false)
-  chat.newSession()
+  chat._resetChatStateForTests()
   chatRequestCount = 0
   chatBodies.length = 0
   sessionEventResponses.length = 0
@@ -256,6 +259,40 @@ test('确定性的 chat 4xx 保留服务端错误码且不建议重试', async (
   assert.equal(errorItem.error.httpStatus, 409)
 })
 
+test('工作目录占用响应不会生成失败回合并返回可提示结果', async () => {
+  reset()
+  chatResponses.push(httpResponse(409, {
+    detail: {
+      code: 'workspace_busy',
+      message: '该工作目录正在被另一个任务使用，当前对话仅可查看。',
+      retryable: true,
+    },
+  }))
+
+  const result = await chat.sendMessage('修改同一个文件')
+
+  assert.equal(result.accepted, false)
+  assert.equal(result.reason, 'workspace_busy')
+  assert.equal(result.message, '该工作目录正在被另一个任务使用，当前对话仅可查看。')
+  assert.equal(result.contextKey, chat.activeChatContextKey.value)
+  assert.equal(chat.items.value.length, 0)
+  assert.equal(chat.currentTurn.value, null)
+  assert.equal(chat.running.value, false)
+})
+
+test('未发送草稿按对话隔离，迟到响应只能恢复原对话', () => {
+  reset()
+  const firstKey = chat.activeChatContextKey.value
+  chat.setChatDraft([{ type: 'text', text: '对话 A 草稿' }])
+
+  chat.newSession()
+  assert.equal(chat.chatDraftNodes.value[0].text, '')
+  chat.setChatDraft([{ type: 'text', text: '对话 B 草稿' }])
+
+  chat.setChatDraft([{ type: 'text', text: '恢复后的 A 草稿' }], firstKey)
+  assert.equal(chat.chatDraftNodes.value[0].text, '对话 B 草稿')
+})
+
 test('显式 Skill 和 context_mentions 在断流重试时保持不变', async () => {
   reset()
   const broken = controlledSse()
@@ -376,6 +413,81 @@ test('业务终态到 done 之间仍禁止开启新回合', async () => {
   second.close()
   await secondRequest
   assert.equal(chat.currentTurn.value.status, 'succeeded')
+})
+
+test('不同会话可并行消费 SSE、切换查看且定向取消不会污染另一会话', async () => {
+  reset()
+  const first = controlledSse({ 'X-Session-Id': 'session-a' })
+  const second = controlledSse({ 'X-Session-Id': 'session-b' })
+  chatResponses.push(first, second)
+
+  const firstRequest = chat.sendMessage('TASK-A')
+  await tick()
+  assert.equal(chat.activeId.value, 'session-a')
+  assert.equal(chat.running.value, true)
+
+  chat.newSession()
+  assert.equal(first.signal.aborted, false)
+  assert.equal(chat.activeId.value, '')
+  const secondRequest = chat.sendMessage('TASK-B')
+  await tick()
+  assert.equal(chat.activeId.value, 'session-b')
+  assert.equal(chatRequestCount, 2)
+  assert.equal(chat.runningSessionIds.value.has('session-a'), true)
+  assert.equal(chat.runningSessionIds.value.has('session-b'), true)
+
+  first.event({ type: 'session_created', session_id: 'session-a' })
+  first.event({ type: 'assistant_delta', text: 'A 正在处理' })
+  first.event({ type: 'plan', thought: 'A 计划', final_answer: null, steps: [{
+    step_id: 'shared-step', tool: 'files.write_a', arguments: {},
+    purpose: '写入 A', risk: 'medium',
+  }] })
+  second.event({ type: 'assistant_delta', text: 'B 正在处理' })
+  second.event({ type: 'plan', thought: 'B 计划', final_answer: null, steps: [{
+    step_id: 'shared-step', tool: 'files.write_b', arguments: {},
+    purpose: '写入 B', risk: 'medium',
+  }] })
+  await tick()
+
+  assert.equal(chat.activeId.value, 'session-b')
+  assert.equal(chat.items.value.find((item) => item.kind === 'step').tool, 'files.write_b')
+  const requestCountBeforeBusyRetry = chatRequestCount
+  await chat.sendMessage('TASK-B-SECOND-TURN')
+  assert.equal(chatRequestCount, requestCountBeforeBusyRetry)
+
+  await chat.loadSession('session-a')
+  assert.equal(chat.activeId.value, 'session-a')
+  assert.equal(chat.running.value, true)
+  assert.equal(chat.items.value.find((item) => item.kind === 'step').tool, 'files.write_a')
+
+  first.event({
+    type: 'confirm_request', confirm_id: 'confirm-a', step_id: 'shared-step',
+    step: { tool: 'files.write_a', arguments: {}, purpose: '写入 A', risk: 'medium' },
+    decision: { action: 'confirm', risk: 'medium', reason: '需要确认' },
+  })
+  await tick()
+  assert.equal(chat.sessionNeedsAttention('session-a'), true)
+
+  await chat.loadSession('session-b')
+  assert.equal(chat.activeId.value, 'session-b')
+  assert.equal(chat.items.value.find((item) => item.kind === 'step').tool, 'files.write_b')
+  chat.cancelCurrentTurn('session-a')
+  await firstRequest
+  assert.equal(first.signal.aborted, true)
+  assert.equal(second.signal.aborted, false)
+  assert.equal(chat.isSessionRunning('session-a'), false)
+  assert.equal(chat.isSessionRunning('session-b'), true)
+  assert.equal(chat.sessionNeedsAttention('session-a'), false)
+
+  second.event({ type: 'final_answer', answer: 'B 完成', outcome: 'completed' })
+  second.event({ type: 'done' })
+  second.close()
+  await secondRequest
+  assert.equal(chat.isSessionRunning('session-b'), false)
+
+  await chat.loadSession('session-a')
+  assert.equal(chat.currentTurn.value.status, 'cancelled')
+  assert.equal(chat.items.value.find((item) => item.kind === 'step').tool, 'files.write_a')
 })
 
 test('已有 final_answer 时缺少 done 不会覆盖为断流失败', async () => {

@@ -11,8 +11,11 @@
 import asyncio
 import inspect
 import json
+import os
 import time
 import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
 
 from kylinguard.audit import AuditLog
 from kylinguard.authorization import (
@@ -60,6 +63,14 @@ from kylinguard.skills import (
     normalize_selected_skill_ids,
 )
 from kylinguard.snapshot import collect_snapshot, format_snapshot
+
+
+class WorkspaceBusyError(RuntimeError):
+    """另一个会话正在使用相同或重叠的工作目录。"""
+
+    def __init__(self, workspace_root: str):
+        super().__init__("该工作目录正在被另一个任务使用。")
+        self.workspace_root = workspace_root
 
 
 async def _fresh_snapshot() -> tuple[dict[str, str], float]:
@@ -477,11 +488,89 @@ class Pipeline:
         self._skills = skills
         self._conversations: dict[str, list[dict]] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._workspace_lock = asyncio.Lock()
+        # claim_token -> (session_id, normalized_workspace_root)
+        self._active_workspaces: dict[str, tuple[str, str]] = {}
 
     def session_busy(self, session_id: str) -> bool:
-        """供配置 API 拒绝在本轮运行中修改会话模型。"""
+        """供配置 API 拒绝在本会话运行或排队时修改模型。"""
         lock = self._session_locks.get(session_id)
         return bool(lock and lock.locked())
+
+    def _session_workspace(self, session_id: str) -> str:
+        getter = getattr(self._session_store, "get_workspace_root", None)
+        value = (
+            getter(session_id) if callable(getter)
+            else self._settings.workspace_root
+        ) or self._settings.workspace_root
+        return self._normalize_workspace(value)
+
+    @staticmethod
+    def _normalize_workspace(value: str) -> str:
+        try:
+            return os.path.normcase(str(Path(value).expanduser().resolve()))
+        except (OSError, RuntimeError):
+            return os.path.normcase(os.path.abspath(str(value)))
+
+    @staticmethod
+    def _workspaces_overlap(left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        try:
+            common = os.path.commonpath([left, right])
+        except ValueError:
+            return False
+        return common == left or common == right
+
+    def workspace_in_use(
+        self, workspace_root: str, *, exclude_session: str = "",
+    ) -> bool:
+        workspace = self._normalize_workspace(workspace_root)
+        return any(
+            owner_session != exclude_session
+            and self._workspaces_overlap(workspace, active)
+            for owner_session, active in self._active_workspaces.values()
+        )
+
+    async def claim_workspace(self, workspace_root: str, session_id: str) -> str:
+        """原子占用工作目录；冲突请求在创建任务前即可被拒绝。"""
+        workspace = self._normalize_workspace(workspace_root)
+        async with self._workspace_lock:
+            if any(
+                self._workspaces_overlap(workspace, active)
+                for _owner_session, active in self._active_workspaces.values()
+            ):
+                raise WorkspaceBusyError(workspace)
+            token = uuid.uuid4().hex
+            self._active_workspaces[token] = (session_id, workspace)
+            return token
+
+    async def release_workspace_claim(self, token: str) -> None:
+        """释放工作目录占用；重复释放是安全的。"""
+        if not token:
+            return
+        async with self._workspace_lock:
+            self._active_workspaces.pop(token, None)
+
+    @asynccontextmanager
+    async def _workspace_slot(self, session_id: str, claim_token: str = ""):
+        """共享或父子工作目录互斥；彼此独立的工作副本可并行。"""
+        workspace = self._session_workspace(session_id)
+        if not workspace:
+            yield
+            return
+        token = claim_token
+        if token:
+            async with self._workspace_lock:
+                claimed = self._active_workspaces.get(token)
+                if claimed != (session_id, workspace):
+                    raise RuntimeError("工作目录占用令牌无效或与会话不匹配。")
+        else:
+            token = await self.claim_workspace(workspace, session_id)
+        try:
+            yield
+        finally:
+            await self.release_workspace_claim(token)
 
     def _effective_permission_context(self, context):
         """服务端 kill switch 与执行边界变化永远优先于数据库中的完全访问状态。"""
@@ -564,8 +653,9 @@ class Pipeline:
         skill_mode: str = "auto",
         context_files: list[str] | None = None,
         context_mentions: list[dict] | None = None,
+        workspace_claim: str = "",
     ) -> None:
-        """同一会话串行处理；等待取消不会泄漏锁或污染共享上下文。"""
+        """同一会话串行；重叠工作目录互斥，独立目录可并行。"""
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         if lock.locked():
             await emit({
@@ -574,29 +664,30 @@ class Pipeline:
                 "stage": "queued",
                 "operation_id": "session_turn",
                 "state": "waiting",
-                "message": "该会话已有任务在执行，本轮将在其完成后开始。",
+                "message": "该任务已有一轮在执行，本轮将在其完成后开始。",
             })
         async with lock:
-            if self._llm_runtime is None:
-                await self._handle_serialized(
-                    session_id, user_query, emit,
-                    skill_id=skill_id, skill_ids=skill_ids,
-                    skill_mode=skill_mode,
-                    context_files=context_files,
-                    context_mentions=context_mentions,
-                )
-                return
-            # 一轮内固定同一份模型配置快照。配置页或其他会话随后发生的
-            # 修改只影响下一轮，且 ContextVar 路由不会在并发会话间串用。
-            async with self._llm_runtime.bind(session_id) as model_context:
-                await self._handle_serialized(
-                    session_id, user_query, emit,
-                    model_context=model_context.public_payload(),
-                    skill_id=skill_id, skill_ids=skill_ids,
-                    skill_mode=skill_mode,
-                    context_files=context_files,
-                    context_mentions=context_mentions,
-                )
+            async with self._workspace_slot(session_id, workspace_claim):
+                if self._llm_runtime is None:
+                    await self._handle_serialized(
+                        session_id, user_query, emit,
+                        skill_id=skill_id, skill_ids=skill_ids,
+                        skill_mode=skill_mode,
+                        context_files=context_files,
+                        context_mentions=context_mentions,
+                    )
+                    return
+                # 一轮内固定同一份模型配置快照。不同会话通过 ContextVar 独立
+                # 路由；配置页后续修改只影响下一轮。
+                async with self._llm_runtime.bind(session_id) as model_context:
+                    await self._handle_serialized(
+                        session_id, user_query, emit,
+                        model_context=model_context.public_payload(),
+                        skill_id=skill_id, skill_ids=skill_ids,
+                        skill_mode=skill_mode,
+                        context_files=context_files,
+                        context_mentions=context_mentions,
+                    )
 
     async def _handle_serialized(
         self, session_id: str, user_query: str, emit,

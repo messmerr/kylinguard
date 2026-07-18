@@ -8,8 +8,7 @@
       </span>
     </div>
 
-    <button class="new-btn" type="button" :disabled="running"
-            title="新建任务" @click="startTask">
+    <button class="new-btn" type="button" title="新建任务" @click="startTask">
       <KgIcon name="plus" :size="16" />
       <span class="new-label">新建任务</span>
     </button>
@@ -54,7 +53,7 @@
 
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
-import { activeId, loadSession, newSession, running, sessions } from '../composables/useChat.js'
+import { activeId, loadSession, newSession, sessions } from '../composables/useChat.js'
 import { formatRelativeTime } from '../utils/relativeTime.js'
 import KgIcon from './KgIcon.vue'
 import KgLogo from './KgLogo.vue'

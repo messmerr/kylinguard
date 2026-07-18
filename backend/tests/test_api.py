@@ -10,6 +10,7 @@ from starlette.requests import ClientDisconnect
 from kylinguard.api import ChatRequest, create_app
 from kylinguard.audit import AuditError
 from kylinguard.config import Settings
+from kylinguard.pipeline import Pipeline, WorkspaceBusyError
 
 @pytest.fixture()
 def app(tmp_path):
@@ -91,6 +92,58 @@ class BlockingConfirmPipeline(BlockingPipeline):
         })
         self.started.set()
         await asyncio.Event().wait()
+
+
+class BusyWorkspacePipeline:
+    def __init__(self, workspace_root):
+        self.workspace_root = str(workspace_root)
+        self.claim_calls = 0
+
+    def session_busy(self, session_id):
+        return session_id == "active"
+
+    def workspace_in_use(self, workspace_root, *, exclude_session=""):
+        return (str(workspace_root) == self.workspace_root
+                and exclude_session != "active")
+
+    async def claim_workspace(self, workspace_root, _session_id):
+        self.claim_calls += 1
+        if str(workspace_root) == self.workspace_root:
+            raise WorkspaceBusyError(str(workspace_root))
+        return "claim"
+
+    async def release_workspace_claim(self, _token):
+        pass
+
+    async def handle(self, _session_id, _user_query, _emit):
+        raise AssertionError("目录占用时不应启动流水线")
+
+
+class AtomicBlockingPipeline:
+    _normalize_workspace = staticmethod(Pipeline._normalize_workspace)
+    _workspaces_overlap = staticmethod(Pipeline._workspaces_overlap)
+    workspace_in_use = Pipeline.workspace_in_use
+    claim_workspace = Pipeline.claim_workspace
+    release_workspace_claim = Pipeline.release_workspace_claim
+
+    def __init__(self, workspace_root):
+        self.workspace_root = self._normalize_workspace(str(workspace_root))
+        self._workspace_lock = asyncio.Lock()
+        self._active_workspaces = {}
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def session_busy(self, _session_id):
+        return False
+
+    async def handle(
+        self, session_id, _user_query, _emit, *, workspace_claim="",
+    ):
+        assert self._active_workspaces[workspace_claim] == (
+            session_id, self.workspace_root,
+        )
+        self.started.set()
+        await self.release.wait()
 
 
 class AuditedEventPipeline(BlockingPipeline):
@@ -357,6 +410,7 @@ async def test_chat自动建会话并可续聊(app):
         sessions = r3.json()["sessions"]
         assert sessions[0]["id"] == sid
         assert sessions[0]["title"].startswith("第一条消息")
+        assert sessions[0]["busy"] is False
 
 
 async def test_未知session_id拒绝(app):
@@ -366,6 +420,72 @@ async def test_未知session_id拒绝(app):
                          json={"message": "x", "session_id": "不存在的"},
                          headers=h)
     assert r.status_code == 404
+
+
+async def test_workspace_busy_rejects_send_and_marks_observer_read_only(app, tmp_path):
+    workspace = tmp_path / "shared-project"
+    workspace.mkdir()
+    app.state.sessions.create("active", "正在修改", workspace_root=str(workspace))
+    app.state.sessions.create("observer", "仅查看", workspace_root=str(workspace))
+    app.state.pipeline = BusyWorkspacePipeline(workspace)
+
+    async with _client(app) as client:
+        headers = await _request_headers(client)
+        listed = await client.get("/api/sessions", headers=headers)
+        rejected = await client.post("/api/chat", headers=headers, json={
+            "message": "也修改这个项目",
+            "workspace_root": str(workspace),
+        })
+
+    by_id = {item["id"]: item for item in listed.json()["sessions"]}
+    assert by_id["active"]["busy"] is True
+    assert by_id["active"]["workspace_busy"] is False
+    assert by_id["observer"]["busy"] is False
+    assert by_id["observer"]["workspace_busy"] is True
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "workspace_busy"
+    assert "仅可查看" in rejected.json()["detail"]["message"]
+    assert app.state.pipeline.claim_calls == 1
+    assert len(app.state.sessions.list(include_drafts=False)) == 2
+
+
+async def test_concurrent_chat_claim_rejects_without_orphan_and_releases_on_cancel(
+    app, tmp_path,
+):
+    workspace = tmp_path / "concurrent-project"
+    workspace.mkdir()
+    pipeline = AtomicBlockingPipeline(workspace)
+    app.state.pipeline = pipeline
+
+    async with _client(app) as client:
+        headers = await _request_headers(client)
+        first = asyncio.create_task(client.post(
+            "/api/chat", headers=headers,
+            json={"message": "第一项", "workspace_root": str(workspace)},
+        ))
+        await asyncio.wait_for(pipeline.started.wait(), timeout=1)
+
+        rejected = await client.post(
+            "/api/chat", headers=headers,
+            json={"message": "第二项", "workspace_root": str(workspace)},
+        )
+        assert rejected.status_code == 409
+        assert rejected.json()["detail"]["code"] == "workspace_busy"
+        assert len(app.state.sessions.list(include_drafts=False)) == 1
+
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert pipeline.workspace_in_use(str(workspace)) is False
+
+        pipeline.release.set()
+        accepted = await client.post(
+            "/api/chat", headers=headers,
+            json={"message": "释放后重试", "workspace_root": str(workspace)},
+        )
+
+    assert accepted.status_code == 200
+    assert len(app.state.sessions.list(include_drafts=False)) == 2
 
 
 async def test_会话事件回放(app):

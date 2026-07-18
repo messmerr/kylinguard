@@ -32,12 +32,68 @@ import {
 } from './usePermissions.js'
 
 export const sessions = ref([])
-export const activeId = ref('')
-export const items = ref([])
-export const currentTurn = ref(null)
-export const sessionLoading = ref(false)
 const ACTIVE_TURN_STATES = new Set(['running', 'retry_wait', 'waiting_user', 'cancelling'])
-// busy 描述 SSE 生命周期；业务终态可能先于 done 到达，此时仍不能开启新回合。
+const SESSION_LOAD_TIMEOUT_MS = 20_000
+
+const contexts = reactive(new Map())
+const activeContextKey = ref('')
+
+function copyDraftNodes(value) {
+  const nodes = Array.isArray(value) ? value : []
+  return nodes.length
+    ? nodes.map((node) => ({ ...node }))
+    : [{ type: 'text', text: '' }]
+}
+
+function createContext({ sessionId = '', title = '', workspaceRoot = '', hydrated = true } = {}) {
+  const key = sessionId || `draft:${turnId()}`
+  return reactive({
+    key,
+    sessionId: String(sessionId || ''),
+    title: String(title || ''),
+    workspaceRoot: String(workspaceRoot || ''),
+    draftNodes: [{ type: 'text', text: '' }],
+    updatedAt: Date.now(),
+    hydrated,
+    items: [],
+    currentTurn: null,
+    sessionLoading: false,
+    stepsById: {},
+    confirmsById: {},
+    activitiesById: {},
+    streamingItem: null,
+    controller: null,
+    loadController: null,
+    loadRequest: 0,
+    loadPromise: null,
+    nextIsReport: false,
+    permissionVersion: 0,
+    modelContext: null,
+  })
+}
+
+function addContext(options = {}) {
+  const context = createContext(options)
+  contexts.set(context.key, context)
+  return context
+}
+
+const initialContext = addContext()
+activeContextKey.value = initialContext.key
+
+const activeContext = computed(() => contexts.get(activeContextKey.value) || null)
+export const activeChatContextKey = computed(() => activeContextKey.value)
+export const chatDraftNodes = computed({
+  get: () => activeContext.value?.draftNodes || [{ type: 'text', text: '' }],
+  set: (value) => {
+    if (activeContext.value) activeContext.value.draftNodes = copyDraftNodes(value)
+  },
+})
+export const activeId = computed(() => activeContext.value?.sessionId || '')
+export const items = computed(() => activeContext.value?.items || [])
+export const currentTurn = computed(() => activeContext.value?.currentTurn || null)
+export const sessionLoading = computed(() => activeContext.value?.sessionLoading === true)
+// busy 描述当前会话的 SSE 生命周期；业务终态可能先于 done 到达。
 export const running = computed(() => currentTurn.value?.busy === true)
 export const activities = computed(() => currentTurn.value?.activities || [])
 // 兼容仍依赖 phase 的外围代码；新的展示直接消费 currentTurn/activities。
@@ -45,15 +101,87 @@ export const phase = computed(() => currentTurn.value?.stage
   ? { name: currentTurn.value.stage }
   : null)
 
-let stepsById = {}
-let confirmsById = {}
-let activitiesById = {}
-let streamingItem = null // 当前正在流式累积的 assistant 文本项
-let activeController = null
-let sessionLoadController = null
-let _nextIsReport = false // 下一条 final_answer 标记为报告
-let _loadRequest = 0
-const SESSION_LOAD_TIMEOUT_MS = 20_000
+function contextIdentifier(value) {
+  if (value && typeof value === 'object') return String(value.id || value.sessionId || value.key || '')
+  return String(value || '')
+}
+
+function findContext(value) {
+  const id = contextIdentifier(value)
+  if (!id) return activeContext.value
+  if (contexts.has(id)) return contexts.get(id)
+  return [...contexts.values()].find((context) => context.sessionId === id) || null
+}
+
+export function setChatDraft(value, contextKey = '') {
+  const context = findContext(contextKey)
+  if (context) context.draftNodes = copyDraftNodes(value)
+}
+
+function contextRunning(context) {
+  return context?.currentTurn?.busy === true
+}
+
+function isActiveContext(context) {
+  return Boolean(context && context.key === activeContextKey.value)
+}
+
+function updateLocalSessionSummary(context) {
+  if (!context?.sessionId) return
+  const existing = sessions.value.find((session) => session.id === context.sessionId)
+  const summary = {
+    ...(existing || {}),
+    id: context.sessionId,
+    title: existing?.title || context.title || context.currentTurn?.prompt || '新任务',
+    updated_at: existing?.updated_at || context.updatedAt / 1000,
+    draft: false,
+  }
+  sessions.value = [summary, ...sessions.value.filter((session) => session.id !== context.sessionId)]
+}
+
+function registerContextSession(context, sessionId, modelContext = null) {
+  const id = String(sessionId || '').trim()
+  if (!id) return
+  context.sessionId = id
+  context.updatedAt = Date.now()
+  if (modelContext) {
+    context.modelContext = modelContext
+    if (context.currentTurn) context.currentTurn.model = modelSelectionSnapshot(modelContext)
+  }
+  updateLocalSessionSummary(context)
+  if (!isActiveContext(context)) return
+  bindPermissionSession(id)
+  bindModelSession(id, modelContext)
+}
+
+export const runningSessionIds = computed(() => new Set(
+  [...contexts.values()]
+    .filter(contextRunning)
+    .map((context) => context.sessionId || context.key),
+))
+
+export function isSessionRunning(sessionId) {
+  return contextRunning(findContext(sessionId))
+}
+
+export function sessionNeedsAttention(sessionId) {
+  const context = findContext(sessionId)
+  if (!context) return false
+  return context.currentTurn?.status === 'waiting_user'
+    || Object.values(context.confirmsById).some((card) => !card.hidden)
+}
+
+// 供 Node 测试清空模块级会话；不在产品 UI 中调用。
+export function _resetChatStateForTests() {
+  for (const context of contexts.values()) {
+    context.controller?.abort()
+    context.loadController?.abort()
+  }
+  contexts.clear()
+  const context = addContext()
+  activeContextKey.value = context.key
+  sessions.value = []
+}
 
 const PLANNING_ACTIVITIES = new Set([
   'constructing_tool_call',
@@ -77,38 +205,42 @@ export const stats = computed(() => {
   return s
 })
 
-function push(item) {
+function push(context, item) {
   const r = reactive(item)
-  items.value.push(r)
+  context.items.push(r)
   return r
 }
 
-function finishStreaming(role, text) {
-  const model = currentTurn.value?.model || modelSelectionSnapshot()
+function finishStreaming(context, role, text) {
+  const model = context.currentTurn?.model || modelSelectionSnapshot()
   // 定稿当前流式文本项；回放模式（无流）直接新建
-  if (streamingItem) {
-    streamingItem.role = role
-    if (text) streamingItem.text = text
-    streamingItem.model = model
-    streamingItem.streaming = false
-    streamingItem = null
+  if (context.streamingItem) {
+    context.streamingItem.role = role
+    if (text) context.streamingItem.text = text
+    context.streamingItem.model = model
+    context.streamingItem.streaming = false
+    context.streamingItem = null
   } else if (text) {
-    push({ kind: 'assistant', role, text, streaming: false, model })
+    push(context, { kind: 'assistant', role, text, streaming: false, model })
   }
 }
 
-export function handleEvent(ev) {
-  if (currentTurn.value) currentTurn.value.lastEventAt = Date.now()
+export function handleEvent(ev, targetContext = activeContext.value) {
+  const context = targetContext || activeContext.value
+  if (!context) return
+  if (context.currentTurn) context.currentTurn.lastEventAt = Date.now()
   switch (ev.type) {
     case 'session_created':
-      activeId.value = ev.session_id
-      bindPermissionSession(ev.session_id)
       {
         const createdModel = ev.model_context || ev.session_model || ev.model || null
-        bindModelSession(
-          ev.session_id,
-          createdModel,
-        )
+        registerContextSession(context, ev.session_id, createdModel)
+      }
+      if (!isActiveContext(context)) {
+        refreshSessions().catch(() => {})
+        break
+      }
+      {
+        const createdModel = ev.model_context || ev.session_model || ev.model || null
         if (!createdModel) loadSessionModel(ev.session_id).catch(() => {})
       }
       if (ev.permission || ev.permission_mode) {
@@ -122,7 +254,10 @@ export function handleEvent(ev) {
     case 'permission_grant_created':
     case 'permission_revoked':
     case 'permission_grants_revoked':
-      applyPermissionEvent(ev)
+      context.permissionVersion = Number(
+        ev.context_version ?? ev.version ?? ev.permission?.version ?? context.permissionVersion,
+      ) || context.permissionVersion
+      if (isActiveContext(context)) applyPermissionEvent(ev)
       break
     case 'model_context':
     case 'model_changed': {
@@ -130,18 +265,19 @@ export function handleEvent(ev) {
       const effectiveModel = agentModel ? {
         ...agentModel,
         version: ev.session_version ?? ev.version,
-        session_id: ev.session_id || activeId.value,
+        session_id: ev.session_id || context.sessionId,
       } : ev
-      applySessionModel(effectiveModel)
-      if (currentTurn.value) {
-        currentTurn.value.model = modelSelectionSnapshot(effectiveModel)
+      context.modelContext = effectiveModel
+      if (isActiveContext(context)) applySessionModel(effectiveModel)
+      if (context.currentTurn) {
+        context.currentTurn.model = modelSelectionSnapshot(effectiveModel)
       }
       break
     }
     case 'phase':
       // 兼容旧后端事件；新后端统一发送 progress。
       // operation_id 与新事件保持一致，避免同一阶段生成两条活动记录。
-      upsertActivity({ stage: ev.phase, state: 'connecting',
+      upsertActivity(context, { stage: ev.phase, state: 'connecting',
         operation_id: ev.phase === 'planning'
           ? `planning:${ev.round ?? 0}`
           : ev.phase === 'reviewing' && ev.step_id
@@ -149,13 +285,13 @@ export function handleEvent(ev) {
         step_id: ev.step_id })
       break
     case 'progress':
-      upsertActivity(ev)
+      upsertActivity(context, ev)
       break
     case 'snapshot': {
       const ageSeconds = Math.max(0, Number(ev.collected_ago_seconds) || 0)
       const eventTime = Date.parse(ev.event_timestamp || '')
       const referenceTime = Number.isFinite(eventTime) ? eventTime : Date.now()
-      push({
+      push(context, {
         kind: 'snapshot', snapshot: ev.snapshot,
         collectedAt: referenceTime - ageSeconds * 1000,
         expanded: false,
@@ -163,19 +299,19 @@ export function handleEvent(ev) {
       break
     }
     case 'assistant_delta':
-      if (currentTurn.value) currentTurn.value.transport = 'streaming'
-      if (!streamingItem) {
-        streamingItem = push({ kind: 'assistant', role: 'streaming',
-                               text: '', streaming: true,
-                               model: currentTurn.value?.model || modelSelectionSnapshot() })
+      if (context.currentTurn) context.currentTurn.transport = 'streaming'
+      if (!context.streamingItem) {
+        context.streamingItem = push(context, { kind: 'assistant', role: 'streaming',
+                                                text: '', streaming: true,
+                                                model: context.currentTurn?.model || modelSelectionSnapshot() })
       }
-      streamingItem.text += ev.text
+      context.streamingItem.text += ev.text
       break
     case 'plan':
       if (ev.steps.length) {
-        finishStreaming('thinking', ev.thought)
+        finishStreaming(context, 'thinking', ev.thought)
         for (const s of ev.steps) {
-          stepsById[s.step_id] = push({
+          context.stepsById[s.step_id] = push(context, {
             kind: 'step', tool: s.tool, args: s.arguments,
             purpose: s.purpose, risk: s.risk,
             status: 'queued', verification: null, output: null, error: null,
@@ -187,7 +323,7 @@ export function handleEvent(ev) {
       // steps 为空时不定稿：等 final_answer 统一处理（文本即答案）
       break
     case 'verification': {
-      const step = stepsById[ev.step_id]
+      const step = context.stepsById[ev.step_id]
       if (!step) break
       step.verification = {
         rule: ev.rule,
@@ -207,10 +343,10 @@ export function handleEvent(ev) {
       break
     }
     case 'intent_filter':
-      push({ kind: 'intent', decision: ev.decision, expanded: false })
+      push(context, { kind: 'intent', decision: ev.decision, expanded: false })
       break
     case 'capability_error': {
-      const step = stepsById[ev.step_id]
+      const step = context.stepsById[ev.step_id]
       if (!step) break
       const detail = ev.message || (ev.code === 'unknown_tool'
         ? '模型选择的工具当前不可用。'
@@ -230,15 +366,15 @@ export function handleEvent(ev) {
       break
     }
     case 'confirm_request':
-      confirmsById[ev.confirm_id] = push({
+      context.confirmsById[ev.confirm_id] = push(context, {
         kind: 'confirm', confirmId: ev.confirm_id, stepId: ev.step_id,
         step: ev.step, decision: ev.decision, operation: ev.operation || null,
         choices: ev.choices || null, hidden: false,
         timeoutSeconds: ev.timeout_seconds ?? null,
       })
-      if (currentTurn.value) {
-        currentTurn.value.status = 'waiting_user'
-        const activity = upsertActivity({ stage: 'confirmation', state: 'waiting',
+      if (context.currentTurn) {
+        context.currentTurn.status = 'waiting_user'
+        const activity = upsertActivity(context, { stage: 'confirmation', state: 'waiting',
           operation_id: `confirm:${ev.confirm_id}`, step_id: ev.step_id })
         if (activity && ev.timeout_seconds != null) {
           activity.deadlineAt = Date.now() + ev.timeout_seconds * 1000
@@ -259,10 +395,11 @@ export function handleEvent(ev) {
           : [],
         suggested_scope: request.suggested_path ? { path: request.suggested_path } : null,
       }
-      confirmsById[requestId] = push({
+      context.confirmsById[requestId] = push(context, {
         kind: 'confirm', confirmId: ev.confirm_id || '',
         permissionRequestId: requestId, stepId: ev.step_id,
-        contextVersion: request.context_version || ev.context_version || permissionContext.version,
+        contextVersion: request.context_version || ev.context_version
+          || context.permissionVersion || permissionContext.version,
         step: ev.step || {
           tool: operation.tool || '',
           arguments: operation.arguments || {},
@@ -277,9 +414,9 @@ export function handleEvent(ev) {
         hidden: false,
         timeoutSeconds: ev.timeout_seconds ?? null,
       })
-      if (currentTurn.value) {
-        currentTurn.value.status = 'waiting_user'
-        const activity = upsertActivity({
+      if (context.currentTurn) {
+        context.currentTurn.status = 'waiting_user'
+        const activity = upsertActivity(context, {
           stage: 'confirmation', state: 'waiting',
           operation_id: `permission:${requestId}`, step_id: ev.step_id,
         })
@@ -290,36 +427,39 @@ export function handleEvent(ev) {
       break
     }
     case 'permission_result': {
-      applyPermissionEvent(ev)
+      context.permissionVersion = Number(
+        ev.context_version ?? ev.version ?? ev.permission?.version ?? context.permissionVersion,
+      ) || context.permissionVersion
+      if (isActiveContext(context)) applyPermissionEvent(ev)
       const requestId = ev.request?.id || ev.resolution?.request_id
         || ev.permission_request_id || ev.request_id || ev.confirm_id
-      const card = confirmsById[requestId]
+      const card = context.confirmsById[requestId]
       if (card) card.hidden = true
-      const step = stepsById[ev.step_id]
+      const step = context.stepsById[ev.step_id]
       const permissionDecision = ev.decision || ev.resolution?.decision
       const allowed = ev.allowed ?? ev.approved
         ?? !['deny', 'denied'].includes(permissionDecision)
       const timedOut = ev.timed_out || ev.status === 'expired'
       if (step) step.status = allowed ? 'ready' : timedOut ? 'timed_out' : 'skipped'
-      if (currentTurn.value?.status === 'waiting_user') currentTurn.value.status = 'running'
-      const activity = activitiesById[`permission:${requestId}`]
+      if (context.currentTurn?.status === 'waiting_user') context.currentTurn.status = 'running'
+      const activity = context.activitiesById[`permission:${requestId}`]
       if (activity) {
         activity.state = allowed ? 'completed' : timedOut ? 'timed_out' : 'cancelled'
         activity.updatedAt = Date.now()
       }
-      if (currentTurn.value && activeId.value) {
-        loadPermissionContext(activeId.value).catch(() => {})
+      if (isActiveContext(context) && context.currentTurn && context.sessionId) {
+        loadPermissionContext(context.sessionId).catch(() => {})
       }
       break
     }
     case 'confirm_result': {
-      const card = confirmsById[ev.confirm_id]
+      const card = context.confirmsById[ev.confirm_id]
       if (card) card.hidden = true
-      const step = stepsById[ev.step_id]
+      const step = context.stepsById[ev.step_id]
       const timedOut = ev.timed_out || ev.operator === '(超时)'
       if (step) step.status = ev.approved ? 'ready' : timedOut ? 'timed_out' : 'skipped'
-      if (currentTurn.value?.status === 'waiting_user') currentTurn.value.status = 'running'
-      const activity = activitiesById[`confirm:${ev.confirm_id}`]
+      if (context.currentTurn?.status === 'waiting_user') context.currentTurn.status = 'running'
+      const activity = context.activitiesById[`confirm:${ev.confirm_id}`]
       if (activity) {
         activity.state = ev.approved ? 'completed' : timedOut ? 'timed_out' : 'cancelled'
         activity.updatedAt = Date.now()
@@ -327,7 +467,7 @@ export function handleEvent(ev) {
       break
     }
     case 'execution': {
-      const step = stepsById[ev.step_id]
+      const step = context.stepsById[ev.step_id]
       if (step) {
         const ok = ev.ok !== false && !ev.error
           && !['[工具调用失败]', '[执行失败]', '参数不合法']
@@ -339,8 +479,8 @@ export function handleEvent(ev) {
           : ok ? null : normalizeError(ev.output, '工具调用失败。', { stage: 'executing' })
         step.durationMs = ev.duration_ms ?? null
         if (!ok) step.expanded = true
-        const activity = activitiesById[ev.operation_id || ev.step_id]
-          || Object.values(activitiesById).find((entry) => (
+        const activity = context.activitiesById[ev.operation_id || ev.step_id]
+          || Object.values(context.activitiesById).find((entry) => (
             entry.stage === 'executing' && entry.stepId === ev.step_id
           ))
         if (activity) {
@@ -355,26 +495,27 @@ export function handleEvent(ev) {
     case 'final_answer':
       if (ev.model_context || ev.model || ev.provider_id) {
         const turnModel = ev.model_context || ev.model || ev
-        if (currentTurn.value) currentTurn.value.model = modelSelectionSnapshot(turnModel)
+        context.modelContext = turnModel
+        if (context.currentTurn) context.currentTurn.model = modelSelectionSnapshot(turnModel)
       }
-      if (currentTurn.value) currentTurn.value.terminalSeen = true
+      if (context.currentTurn) context.currentTurn.terminalSeen = true
       // task_error 后端会紧接一个可审计的失败结论；错误块已承载该信息，
       // 不再重复渲染一条几乎相同的 assistant 消息。
-      if (items.value[items.value.length - 1]?.kind === 'task_error') {
-        items.value[items.value.length - 1].answer = ev.answer
+      if (context.items[context.items.length - 1]?.kind === 'task_error') {
+        context.items[context.items.length - 1].answer = ev.answer
       } else {
-        finishStreaming('answer', ev.answer)
+        finishStreaming(context, 'answer', ev.answer)
       }
       if (ev.aborted) {
-        const last = items.value[items.value.length - 1]
+        const last = context.items[context.items.length - 1]
         if (last?.kind === 'assistant') last.aborted = true
       }
-      if (_nextIsReport) {
-        const last = items.value[items.value.length - 1]
+      if (context.nextIsReport) {
+        const last = context.items[context.items.length - 1]
         if (last?.kind === 'assistant') last.isReport = true
-        _nextIsReport = false
+        context.nextIsReport = false
       }
-      if (currentTurn.value) {
+      if (context.currentTurn) {
         const outcome = ev.outcome || (ev.aborted ? 'failed' : 'completed')
         const lowered = String(outcome).toLowerCase()
         const status = lowered.includes('cancel') || lowered.includes('stop')
@@ -383,16 +524,16 @@ export function handleEvent(ev) {
             ? 'blocked'
             : lowered.includes('fail') || lowered.includes('error') || ev.aborted
               ? 'failed' : 'succeeded'
-        finishTurn(status, { outcome, elapsedMs: ev.elapsed_ms })
+        finishTurn(context, status, { outcome, elapsedMs: ev.elapsed_ms })
       }
       break
     case 'fatal':
     case 'task_error':
-      if (currentTurn.value) currentTurn.value.terminalSeen = true
-      appendTaskError(ev, ev.type === 'fatal' ? '任务未能完成。' : '请求未能完成。')
+      if (context.currentTurn) context.currentTurn.terminalSeen = true
+      appendTaskError(context, ev, ev.type === 'fatal' ? '任务未能完成。' : '请求未能完成。')
       break
     case 'task_cancelled': {
-      const step = stepsById[ev.step_id]
+      const step = context.stepsById[ev.step_id]
       if (step && !['done', 'failed', 'denied', 'skipped'].includes(step.status)) {
         step.status = ev.stage === 'executing' ? 'result_unknown' : 'cancelled'
         if (step.status === 'result_unknown') {
@@ -403,15 +544,15 @@ export function handleEvent(ev) {
           step.expanded = true
         }
       }
-      for (const card of Object.values(confirmsById)) card.hidden = true
+      for (const card of Object.values(context.confirmsById)) card.hidden = true
       break
     }
     case 'skill_selected': {
       const skillId = String(ev.id || ev.skill_id || '')
       const skillName = String(ev.name || ev.skill_name || '')
-      const userItem = [...items.value].reverse().find((item) => item.kind === 'user')
+      const userItem = [...context.items].reverse().find((item) => item.kind === 'user')
       const selectedMode = ['auto', 'manual', 'none'].includes(ev.skill_mode)
-        ? ev.skill_mode : currentTurn.value?.skillMode || userItem?.skillMode || 'auto'
+        ? ev.skill_mode : context.currentTurn?.skillMode || userItem?.skillMode || 'auto'
       if (userItem) {
         userItem.skillId = skillId // 旧 UI/旧事件兼容
         userItem.skillName = skillName
@@ -433,32 +574,32 @@ export function handleEvent(ev) {
           }
         }
       }
-      if (currentTurn.value) {
-        currentTurn.value.skillId = skillId
-        currentTurn.value.skillMode = selectedMode
-        currentTurn.value.skillResolved = true
+      if (context.currentTurn) {
+        context.currentTurn.skillId = skillId
+        context.currentTurn.skillMode = selectedMode
+        context.currentTurn.skillResolved = true
         if (selectedMode === 'auto') {
-          currentTurn.value.routedSkillId = skillId
-          currentTurn.value.routedSkillName = skillName
-        } else if (!currentTurn.value.skillIds?.length) {
-          currentTurn.value.skillIds = normalizeSkillIds(ev.skill_ids, skillId)
+          context.currentTurn.routedSkillId = skillId
+          context.currentTurn.routedSkillName = skillName
+        } else if (!context.currentTurn.skillIds?.length) {
+          context.currentTurn.skillIds = normalizeSkillIds(ev.skill_ids, skillId)
         }
         if (selectedMode === 'manual' && skillName) {
-          currentTurn.value.skillNames ||= []
+          context.currentTurn.skillNames ||= []
           const position = Number(ev.position)
           if (Number.isInteger(position) && position > 0) {
-            currentTurn.value.skillNames[position - 1] = skillName
-          } else if (!currentTurn.value.skillNames.includes(skillName)) {
-            currentTurn.value.skillNames.push(skillName)
+            context.currentTurn.skillNames[position - 1] = skillName
+          } else if (!context.currentTurn.skillNames.includes(skillName)) {
+            context.currentTurn.skillNames.push(skillName)
           }
         }
       }
       break
     }
     case 'skill_not_selected': {
-      const userItem = [...items.value].reverse().find((item) => item.kind === 'user')
+      const userItem = [...context.items].reverse().find((item) => item.kind === 'user')
       const selectedMode = ['auto', 'none'].includes(ev.skill_mode)
-        ? ev.skill_mode : currentTurn.value?.skillMode || userItem?.skillMode || 'auto'
+        ? ev.skill_mode : context.currentTurn?.skillMode || userItem?.skillMode || 'auto'
       if (userItem) {
         userItem.skillId = ''
         userItem.skillName = ''
@@ -467,22 +608,22 @@ export function handleEvent(ev) {
         userItem.routedSkillId = ''
         userItem.routedSkillName = ''
       }
-      if (currentTurn.value) {
-        currentTurn.value.skillId = ''
-        currentTurn.value.skillMode = selectedMode
-        currentTurn.value.skillResolved = true
-        currentTurn.value.routedSkillId = ''
-        currentTurn.value.routedSkillName = ''
+      if (context.currentTurn) {
+        context.currentTurn.skillId = ''
+        context.currentTurn.skillMode = selectedMode
+        context.currentTurn.skillResolved = true
+        context.currentTurn.routedSkillId = ''
+        context.currentTurn.routedSkillName = ''
       }
       break
     }
     case 'done':
-      if (currentTurn.value) {
-        currentTurn.value.transport = 'closed'
-        if (ACTIVE_TURN_STATES.has(currentTurn.value.status)
-            && !currentTurn.value.terminalSeen) {
-          appendTaskError({
-            stage: currentTurn.value.stage,
+      if (context.currentTurn) {
+        context.currentTurn.transport = 'closed'
+        if (ACTIVE_TURN_STATES.has(context.currentTurn.status)
+            && !context.currentTurn.terminalSeen) {
+          appendTaskError(context, {
+            stage: context.currentTurn.stage,
             error: {
               code: 'terminal_event_missing',
               message: '任务连接已结束，但没有收到明确的完成状态。',
@@ -494,14 +635,14 @@ export function handleEvent(ev) {
       break
     case 'user_query':
       // 回放模式渲染历史用户消息；实时模式已在发送时本地插入
-      if (!running.value) {
+      if (!contextRunning(context)) {
         const skillMode = ['auto', 'manual', 'none'].includes(ev.skill_mode)
           ? ev.skill_mode : ''
         const skillIds = skillMode === 'manual'
           ? normalizeSkillIds(ev.requested_skill_ids ?? ev.skill_ids, ev.skill_id) : []
         const contextMentions = normalizeContextMentions(ev.context_mentions)
         const contextFiles = normalizeContextFiles(ev.context_files)
-        push({
+        push(context, {
           kind: 'user', text: String(ev.query || ''),
           contentNodes: nodesFromMessageAndMentions(ev.query, contextMentions),
           contextMentions,
@@ -524,7 +665,22 @@ export async function refreshSessions() {
   const r = await apiFetch('/api/sessions')
   if (!r.ok) throw new Error(`任务列表读取失败（HTTP ${r.status}）`)
   const body = await r.json()
-  sessions.value = (body.sessions || []).filter((session) => !session.draft)
+  const remote = (body.sessions || []).filter((session) => !session.draft)
+  const remoteIds = new Set(remote.map((session) => session.id))
+  const local = [...contexts.values()]
+    .filter((context) => (
+      context.sessionId && contextRunning(context) && !remoteIds.has(context.sessionId)
+    ))
+    .map((context) => ({
+      id: context.sessionId,
+      title: context.title || context.currentTurn?.prompt || '新任务',
+      created_at: context.updatedAt / 1000,
+      updated_at: context.updatedAt / 1000,
+      draft: false,
+      workspace_root: context.workspaceRoot || '',
+      model: context.modelContext,
+    }))
+  sessions.value = [...remote, ...local]
   applyPermissionCapabilities(body.permission_capabilities)
   return body
 }
@@ -534,9 +690,9 @@ export async function setChatPermissionMode(mode, options = {}) {
 }
 
 export function newSession() {
-  if (running.value) return
-  _loadRequest++
-  resetSessionState()
+  abortContextLoad(activeContext.value)
+  const context = addContext()
+  activeContextKey.value = context.key
   beginNewPermissionSession()
   beginNewModelSession()
 }
@@ -559,7 +715,7 @@ function normalizeSkillIds(values, fallback = '', limit = 4) {
   return result
 }
 
-function startTurn(prompt, {
+function startTurn(context, prompt, {
   skillIds = [], skillMode = 'auto', contextFiles = [], contextMentions = [], contentNodes = [],
 } = {}) {
   const now = Date.now()
@@ -572,13 +728,18 @@ function startTurn(prompt, {
     skillIds, skillId: skillIds[0] || '', skillMode, contextFiles, contextMentions, contentNodes,
     routedSkillId: '', routedSkillName: '', skillResolved: false,
   })
-  currentTurn.value = turn
-  activitiesById = {}
+  context.currentTurn = turn
+  context.activitiesById = {}
+  context.modelContext = turn.model
+  context.permissionVersion = permissionContext.version
+  context.workspaceRoot = permissionContext.workspaceRoot || context.workspaceRoot
+  context.title ||= prompt
+  context.updatedAt = now
   return turn
 }
 
-function finishTurn(status, { outcome = null, elapsedMs = null, error = null } = {}) {
-  const turn = currentTurn.value
+function finishTurn(context, status, { outcome = null, elapsedMs = null, error = null } = {}) {
+  const turn = context.currentTurn
   if (!turn) return
   const now = Date.now()
   turn.status = status
@@ -596,13 +757,13 @@ function redactSecrets(value) {
     .replace(/(api[_ -]?key\s*[:=]\s*)[^\s,"']+/ig, '$1[已隐藏]')
 }
 
-function normalizeError(raw, fallback = '请求未能完成。', extra = {}) {
+function normalizeError(raw, fallback = '请求未能完成。', extra = {}, context = activeContext.value) {
   const source = raw && typeof raw === 'object' ? raw : {}
   const message = typeof raw === 'string'
     ? raw
     : source.message || source.detail || fallback
   return {
-    stage: extra.stage || source.stage || currentTurn.value?.stage || 'request',
+    stage: extra.stage || source.stage || context?.currentTurn?.stage || 'request',
     code: source.code || source.category || extra.code || 'request_failed',
     message: redactSecrets(message),
     detail: redactSecrets(source.detail || source.message || message),
@@ -613,14 +774,14 @@ function normalizeError(raw, fallback = '请求未能完成。', extra = {}) {
   }
 }
 
-function finishStreamingInterrupted() {
-  if (streamingItem) {
-    streamingItem.streaming = false
-    streamingItem.interrupted = true
-    streamingItem = null
+function finishStreamingInterrupted(context) {
+  if (context.streamingItem) {
+    context.streamingItem.streaming = false
+    context.streamingItem.interrupted = true
+    context.streamingItem = null
     return
   }
-  const dangling = [...items.value].reverse().find((item) => item.streaming)
+  const dangling = [...context.items].reverse().find((item) => item.streaming)
   if (dangling) {
     dangling.streaming = false
     dangling.interrupted = true
@@ -641,11 +802,11 @@ function planningActivity(value) {
   return PLANNING_ACTIVITIES.has(value) ? value : ''
 }
 
-function upsertActivity(ev) {
-  const turn = currentTurn.value
+function upsertActivity(context, ev) {
+  const turn = context.currentTurn
   if (!turn) return null
   const id = activityId(ev)
-  let activity = activitiesById[id]
+  let activity = context.activitiesById[id]
   if (!activity) {
     activity = reactive({
       id, stage: ev.stage || 'request', state: ev.state || 'connecting',
@@ -657,7 +818,7 @@ function upsertActivity(ev) {
       generatedBytes: progressCount(ev.generated_bytes),
       error: null, startedAt: Date.now(), updatedAt: Date.now(), deadlineAt: null,
     })
-    activitiesById[id] = activity
+    context.activitiesById[id] = activity
     turn.activities.push(activity)
   }
   activity.stage = ev.stage || activity.stage
@@ -689,7 +850,9 @@ function upsertActivity(ev) {
     activity.generatedBytes = progressCount(ev.generated_bytes)
   }
   if (ev.error) {
-    activity.error = normalizeError(ev.error, '本次尝试失败。', { stage: activity.stage })
+    activity.error = normalizeError(
+      ev.error, '本次尝试失败。', { stage: activity.stage }, context,
+    )
   } else if ([
     'connecting', 'streaming', 'constructing_tool_call', 'generating_content', 'completed',
   ].includes(activity.state)) {
@@ -703,7 +866,7 @@ function upsertActivity(ev) {
   else if (turn.status === 'retry_wait') turn.status = 'running'
   turn.transport = activity.state === 'connecting' ? 'connecting' : 'streaming'
 
-  const step = stepsById[ev.operation_id] || stepsById[ev.step_id]
+  const step = context.stepsById[ev.operation_id] || context.stepsById[ev.step_id]
   if (step && activity.stage === 'reviewing') {
     step.status = activity.state === 'failed' ? 'failed' : 'reviewing'
     step.startedAt ||= Date.now() - (activity.elapsedMs || 0)
@@ -722,94 +885,138 @@ function upsertActivity(ev) {
   return activity
 }
 
-function appendTaskError(ev, fallback) {
-  const error = normalizeError(ev.error || ev, fallback, { stage: ev.stage })
-  finishStreamingInterrupted()
-  finishTurn('failed', { outcome: ev.outcome || 'failed', elapsedMs: ev.elapsed_ms, error })
-  const lastUser = [...items.value].reverse().find((item) => item.kind === 'user')
-  const prompt = currentTurn.value?.prompt || lastUser?.text || ''
-  const skillId = currentTurn.value?.skillId || lastUser?.skillId || ''
-  const skillIds = currentTurn.value?.skillIds || lastUser?.skillIds || []
-  const skillMode = currentTurn.value?.skillMode || lastUser?.skillMode || 'auto'
-  const contextFiles = currentTurn.value?.contextFiles || lastUser?.contextFiles || []
-  const contextMentions = currentTurn.value?.contextMentions || lastUser?.contextMentions || []
-  const contentNodes = currentTurn.value?.contentNodes || lastUser?.contentNodes || []
-  const previous = items.value[items.value.length - 1]
-  if (previous?.kind === 'task_error' && previous.turnId === currentTurn.value?.id) {
+function appendTaskError(context, ev, fallback) {
+  const error = normalizeError(ev.error || ev, fallback, { stage: ev.stage }, context)
+  finishStreamingInterrupted(context)
+  finishTurn(context, 'failed', {
+    outcome: ev.outcome || 'failed', elapsedMs: ev.elapsed_ms, error,
+  })
+  const lastUser = [...context.items].reverse().find((item) => item.kind === 'user')
+  const prompt = context.currentTurn?.prompt || lastUser?.text || ''
+  const skillId = context.currentTurn?.skillId || lastUser?.skillId || ''
+  const skillIds = context.currentTurn?.skillIds || lastUser?.skillIds || []
+  const skillMode = context.currentTurn?.skillMode || lastUser?.skillMode || 'auto'
+  const contextFiles = context.currentTurn?.contextFiles || lastUser?.contextFiles || []
+  const contextMentions = context.currentTurn?.contextMentions || lastUser?.contextMentions || []
+  const contentNodes = context.currentTurn?.contentNodes || lastUser?.contentNodes || []
+  const previous = context.items[context.items.length - 1]
+  if (previous?.kind === 'task_error' && previous.turnId === context.currentTurn?.id) {
     previous.error = error
     return
   }
-  push({ kind: 'task_error', error, prompt, skillId, skillIds, skillMode,
-         contextFiles, contextMentions, contentNodes,
-         turnId: currentTurn.value?.id || '',
-         elapsedMs: ev.elapsed_ms ?? currentTurn.value?.elapsedMs ?? null })
+  push(context, { kind: 'task_error', error, prompt, skillId, skillIds, skillMode,
+                  contextFiles, contextMentions, contentNodes,
+                  turnId: context.currentTurn?.id || '',
+                  elapsedMs: ev.elapsed_ms ?? context.currentTurn?.elapsedMs ?? null })
 }
 
-function resetSessionState() {
-  activeController?.abort()
-  activeController = null
-  sessionLoadController?.abort()
-  sessionLoadController = null
-  activeId.value = ''
-  items.value = []
-  currentTurn.value = null
-  sessionLoading.value = false
-  stepsById = {}
-  confirmsById = {}
-  activitiesById = {}
-  streamingItem = null
+function abortContextLoad(context) {
+  if (!context) return
+  context.loadRequest++
+  context.loadController?.abort()
+  context.loadController = null
+  context.sessionLoading = false
+}
+
+function sessionSummaryModel(summary) {
+  return summary?.model_context || summary?.session_model
+    || (summary?.model && typeof summary.model === 'object' ? summary.model : null)
+    || (summary?.provider_id && summary?.model_id ? summary : null)
+}
+
+function hasModelSelection(raw) {
+  const source = raw?.agent || raw?.model_context?.agent || raw
+  return Boolean(
+    (source?.provider_id || source?.providerId)
+    && (source?.model_id || source?.modelId),
+  )
+}
+
+function activateSessionContext(context, summary = null) {
+  const previous = activeContext.value
+  if (previous && previous !== context) abortContextLoad(previous)
+  activeContextKey.value = context.key
+  if (!context.sessionId) {
+    beginNewPermissionSession()
+    beginNewModelSession()
+    return
+  }
+  context.workspaceRoot ||= summary?.workspace_root || ''
+  context.modelContext ||= sessionSummaryModel(summary)
+  bindPermissionSession(context.sessionId, { workspaceRoot: context.workspaceRoot })
+  bindModelSession(
+    context.sessionId,
+    hasModelSelection(context.modelContext) ? context.modelContext : null,
+  )
 }
 
 export async function loadSession(id) {
-  if (running.value) return
-  const requestId = ++_loadRequest
-  resetSessionState()
-  beginNewPermissionSession()
-  beginNewModelSession()
-  activeId.value = id
-  sessionLoading.value = true
-  const summary = sessions.value.find((session) => session.id === id)
-  bindPermissionSession(id, { workspaceRoot: summary?.workspace_root || '' })
-  const summaryModel = summary?.model_context || summary?.session_model
-    || (summary?.model && typeof summary.model === 'object' ? summary.model : null)
-    || (summary?.provider_id && summary?.model_id ? summary : null)
-  bindModelSession(id, summaryModel)
-  const controller = new AbortController()
-  sessionLoadController = controller
-  const timeout = setTimeout(() => controller.abort(), SESSION_LOAD_TIMEOUT_MS)
-  try {
-    const r = await apiFetch(`/api/sessions/${id}/events`, {
-      signal: controller.signal,
+  const sessionId = String(id || '').trim()
+  if (!sessionId) return
+  const summary = sessions.value.find((session) => session.id === sessionId)
+  let context = findContext(sessionId)
+  if (!context) {
+    context = addContext({
+      sessionId,
+      title: summary?.title || '',
+      workspaceRoot: summary?.workspace_root || '',
+      hydrated: false,
     })
-    if (!r.ok) throw new Error(`HTTP ${r.status}`)
-    const body = await r.json()
-    if (requestId !== _loadRequest || activeId.value !== id) return
-    for (const ev of body.events || []) {
-      handleEvent({ type: ev.event_type, event_timestamp: ev.ts, ...ev.payload })
-    }
-    // 历史 permission_changed 事件只用于回放；最后以服务器当前上下文校准，
-    // 避免过期的 full_access 被历史事件重新点亮。
-    await loadPermissionContext(id, { signal: controller.signal }).catch(() => {})
-    if (requestId !== _loadRequest || activeId.value !== id) return
-    if (controller.signal.aborted) throw new Error('任务上下文加载超时')
-    await loadSessionModel(id, { signal: controller.signal }).catch(() => {})
-    if (controller.signal.aborted) throw new Error('任务上下文加载超时')
-  } catch (error) {
-    if (requestId === _loadRequest && activeId.value === id) {
-      push({
-        kind: 'fatal',
-        error: controller.signal.aborted
-          ? '任务上下文加载超时，请重新打开该任务。'
-          : `任务记录读取失败：${error.message}`,
-      })
-    }
-  } finally {
-    clearTimeout(timeout)
-    if (sessionLoadController === controller) sessionLoadController = null
-    if (requestId === _loadRequest && activeId.value === id) {
-      sessionLoading.value = false
-    }
+    context.modelContext = sessionSummaryModel(summary)
   }
+  activateSessionContext(context, summary)
+
+  if (context.hydrated || contextRunning(context)) {
+    loadPermissionContext(sessionId).catch(() => {})
+    if (!hasModelSelection(context.modelContext)) loadSessionModel(sessionId).catch(() => {})
+    return
+  }
+  if (context.sessionLoading) return context.loadPromise
+
+  const requestId = ++context.loadRequest
+  context.sessionLoading = true
+  const controller = new AbortController()
+  context.loadController = controller
+  const timeout = setTimeout(() => controller.abort(), SESSION_LOAD_TIMEOUT_MS)
+  const loading = (async () => {
+    try {
+      const r = await apiFetch(`/api/sessions/${sessionId}/events`, {
+        signal: controller.signal,
+      })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const body = await r.json()
+      if (requestId !== context.loadRequest) return
+      for (const ev of body.events || []) {
+        handleEvent({ type: ev.event_type, event_timestamp: ev.ts, ...ev.payload }, context)
+      }
+      context.hydrated = true
+      // 历史 permission_changed 事件只用于回放；当前可见时再以服务端状态校准。
+      if (!isActiveContext(context)) return
+      await loadPermissionContext(sessionId, { signal: controller.signal }).catch(() => {})
+      if (requestId !== context.loadRequest || !isActiveContext(context)) return
+      if (controller.signal.aborted) throw new Error('任务上下文加载超时')
+      await loadSessionModel(sessionId, { signal: controller.signal }).catch(() => {})
+      if (controller.signal.aborted) throw new Error('任务上下文加载超时')
+    } catch (error) {
+      if (requestId === context.loadRequest) {
+        push(context, {
+          kind: 'fatal',
+          error: controller.signal.aborted
+            ? '任务上下文加载超时，请重新打开该任务。'
+            : `任务记录读取失败：${error.message}`,
+        })
+      }
+    } finally {
+      clearTimeout(timeout)
+      if (context.loadController === controller) context.loadController = null
+      if (requestId === context.loadRequest) {
+        context.sessionLoading = false
+        context.loadPromise = null
+      }
+    }
+  })()
+  context.loadPromise = loading
+  return loading
 }
 
 export async function sendMessage(text, {
@@ -821,13 +1028,13 @@ export async function sendMessage(text, {
   contextMentions = [],
   contentNodes = [],
 } = {}) {
-  if (running.value || sessionLoading.value) return
+  const context = activeContext.value
+  if (!context || contextRunning(context) || context.sessionLoading) return
   const hasContentNodes = Array.isArray(contentNodes) && contentNodes.length > 0
   const snapshot = hasContentNodes ? serializeEditorSnapshot(contentNodes) : null
   const prompt = snapshot?.message ?? String(text || '').trim()
   // 标签本身不是任务正文；只有引用而没有文字时不能发送。
   if (!(snapshot ? snapshot.plainText : prompt).trim()) return
-  _loadRequest++
   const legacySkillIds = normalizeSkillIds(skillIds, skillId)
   const inlineSkillIds = snapshot?.skillIds || []
   const requestedSkillIds = inlineSkillIds.length ? inlineSkillIds : legacySkillIds
@@ -849,7 +1056,8 @@ export async function sendMessage(text, {
     ? snapshot.contextMentions : normalizeContextMentions(contextMentions)
   const turnContentNodes = snapshot?.contentNodes
     || nodesFromMessageAndMentions(prompt, turnContextMentions)
-  const turn = startTurn(prompt, {
+  const previousTurn = context.currentTurn
+  const turn = startTurn(context, prompt, {
     skillIds: turnSkillIds,
     skillMode: turnSkillMode,
     contextFiles: turnContextFiles,
@@ -857,11 +1065,11 @@ export async function sendMessage(text, {
     contentNodes: turnContentNodes,
   })
   const controller = new AbortController()
-  activeController = controller
-  stepsById = {}
-  confirmsById = {}
-  streamingItem = null
-  push({
+  context.controller = controller
+  context.stepsById = {}
+  context.confirmsById = {}
+  context.streamingItem = null
+  push(context, {
     kind: 'user', text: prompt, contentNodes: turnContentNodes,
     skillIds: turnSkillIds, skillId: turnSkillId, skillMode: turnSkillMode,
     contextFiles: turnContextFiles, contextMentions: turnContextMentions,
@@ -869,18 +1077,18 @@ export async function sendMessage(text, {
   })
   let sawDone = false
   try {
-    const includeDraftModel = !activeId.value
+    const includeDraftModel = !context.sessionId
     const resp = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: prompt, session_id: activeId.value,
+      body: JSON.stringify({ message: prompt, session_id: context.sessionId,
                              request_id: turn.id,
                              skill_id: turnSkillId || '',
                              skill_ids: turnSkillIds,
                              skill_mode: turnSkillMode,
                              context_files: contextFilePaths(turnContextFiles),
                              context_mentions: requestContextMentions(turnContextMentions),
-                             ...(!activeId.value ? permissionRequestPayload() : {}),
+                             ...(!context.sessionId ? permissionRequestPayload() : {}),
                              ...(includeDraftModel ? modelRequestPayload() : {}) }),
       signal: controller.signal,
     })
@@ -902,11 +1110,10 @@ export async function sendMessage(text, {
     // 新会话 ID 同时由响应头提前返回。这样即使首个 session_created SSE
     // 到达前断流或用户停止，本地仍能在下一轮复用服务端已经创建的会话。
     const responseSessionId = String(resp.headers.get('X-Session-Id') || '').trim()
-    if (responseSessionId && !activeId.value) {
-      activeId.value = responseSessionId
-      bindPermissionSession(responseSessionId)
-      bindModelSession(responseSessionId)
+    if (responseSessionId && !context.sessionId) {
+      registerContextSession(context, responseSessionId)
     }
+    refreshSessions().catch(() => {})
     turn.transport = 'streaming'
     if (!resp.body) throw new Error('服务未返回事件流。')
     const reader = resp.body.getReader()
@@ -926,13 +1133,13 @@ export async function sendMessage(text, {
         if (!data) continue
         const event = JSON.parse(data)
         if (event.type === 'done') sawDone = true
-        handleEvent(event)
+        handleEvent(event, context)
       }
-      onUpdate?.()
+      if (isActiveContext(context)) onUpdate?.()
     }
     if (turn.stopRequested) {
-      finishStreamingInterrupted()
-      finishTurn('cancelled', { outcome: 'cancelled' })
+      finishStreamingInterrupted(context)
+      finishTurn(context, 'cancelled', { outcome: 'cancelled' })
       turn.transport = 'closed'
       return
     }
@@ -942,13 +1149,23 @@ export async function sendMessage(text, {
       throw error
     }
   } catch (e) {
+    if (['workspace_busy', 'session_busy'].includes(e.code)) {
+      context.items = context.items.filter((item) => item.turnId !== turn.id)
+      context.currentTurn = previousTurn
+      return {
+        accepted: false,
+        reason: e.code,
+        message: e.message,
+        contextKey: context.key,
+      }
+    }
     if (e.name === 'AbortError' || turn.stopRequested) {
-      finishStreamingInterrupted()
-      finishTurn('cancelled', { outcome: 'cancelled' })
+      finishStreamingInterrupted(context)
+      finishTurn(context, 'cancelled', { outcome: 'cancelled' })
       turn.transport = 'closed'
     } else if (!turn.terminalSeen) {
       turn.transport = 'broken'
-      appendTaskError({
+      appendTaskError(context, {
         error: { code: e.code || 'connection_interrupted', message: e.message,
           detail: e.detail || e.message,
           retryable: e.retryable ?? (e.httpStatus == null || e.httpStatus >= 500),
@@ -959,20 +1176,23 @@ export async function sendMessage(text, {
   } finally {
     turn.busy = false
     if (turn.transport !== 'broken') turn.transport = 'closed'
-    if (activeController === controller) activeController = null
+    if (context.controller === controller) context.controller = null
+    context.updatedAt = Date.now()
+    updateLocalSessionSummary(context)
     refreshSessions().catch(() => {})
   }
 }
 
-export function cancelCurrentTurn() {
-  const turn = currentTurn.value
-  if (!turn || !running.value) return
+export function cancelCurrentTurn(sessionId = '') {
+  const context = findContext(sessionId)
+  const turn = context?.currentTurn
+  if (!context || !turn || !contextRunning(context)) return
   turn.stopRequested = true
   turn.status = 'cancelling'
-  finishStreamingInterrupted()
+  finishStreamingInterrupted(context)
 
-  for (const card of Object.values(confirmsById)) card.hidden = true
-  for (const step of Object.values(stepsById)) {
+  for (const card of Object.values(context.confirmsById)) card.hidden = true
+  for (const step of Object.values(context.stepsById)) {
     if (['queued', 'verifying', 'reviewing', 'waiting', 'ready'].includes(step.status)) {
       step.status = 'cancelled'
     } else if (step.status === 'running') {
@@ -986,17 +1206,18 @@ export function cancelCurrentTurn() {
   }
   for (const activity of turn.activities) {
     if (['completed', 'failed', 'cancelled', 'timed_out', 'result_unknown'].includes(activity.state)) continue
-    const step = stepsById[activity.stepId]
+    const step = context.stepsById[activity.stepId]
     activity.state = step?.status === 'result_unknown' ? 'result_unknown' : 'cancelled'
     activity.retryInMs = 0
     activity.deadlineAt = null
     activity.updatedAt = Date.now()
   }
-  activeController?.abort()
+  context.controller?.abort()
 }
 
 export async function retryMessage(text, options = {}) {
-  if (running.value || !text?.trim()) return
+  const context = activeContext.value
+  if (!context || contextRunning(context) || !text?.trim()) return
   return sendMessage(text, options)
 }
 
@@ -1040,7 +1261,10 @@ ${intentLines.length ? `\n**策略拦截**（${intentLines.length} 次）：\n${
 }
 
 export async function generateReport({ onUpdate } = {}) {
-  if (running.value || sessionLoading.value || !items.value.length) return
-  _nextIsReport = true
-  await sendMessage(_buildReportPrompt(), { onUpdate })
+  const context = activeContext.value
+  if (!context || contextRunning(context) || context.sessionLoading || !context.items.length) return
+  context.nextIsReport = true
+  const result = await sendMessage(_buildReportPrompt(), { onUpdate })
+  if (result?.accepted === false) context.nextIsReport = false
+  return result
 }

@@ -7,7 +7,12 @@ from kylinguard.audit import AuditError, AuditLog
 from kylinguard.config import Settings
 from kylinguard.llm import LLMError, public_error
 from kylinguard.models import PlannerOutput, ReviewVerdict, RiskLevel
-from kylinguard.pipeline import Confirmations, Pipeline, _compact_tool_output
+from kylinguard.pipeline import (
+    Confirmations,
+    Pipeline,
+    WorkspaceBusyError,
+    _compact_tool_output,
+)
 
 FINAL = PlannerOutput(thought="完成", steps=[], final_answer="磁盘使用正常。")
 
@@ -224,7 +229,7 @@ async def _fake_snapshot():
 
 
 def _pipeline(tmp_path, planner_outputs, reviewer=None, tools=None,
-              settings=None, planner=None):
+              settings=None, planner=None, session_store=None):
     audit = AuditLog(str(tmp_path / "a.db"))
     tools = tools or FakeTools()
     p = Pipeline(
@@ -235,6 +240,7 @@ def _pipeline(tmp_path, planner_outputs, reviewer=None, tools=None,
         reviewer=reviewer or FakeReviewer(),
         confirmations=Confirmations(),
         snapshot_fn=_fake_snapshot,
+        session_store=session_store,
     )
     return p, audit, tools
 
@@ -728,7 +734,175 @@ async def test_同一会话并发请求严格串行且不丢上下文(tmp_path):
     assert "第 1 轮完成" in shared
 
 
-async def test_等待会话锁时取消不会泄漏锁(tmp_path):
+async def test_不同会话并行且忙状态互相独立(tmp_path):
+    roots = {"s1": tmp_path / "worktree-a", "s2": tmp_path / "worktree-b"}
+    for root in roots.values():
+        root.mkdir()
+
+    class WorkspaceSessions:
+        def get_workspace_root(self, session_id):
+            return str(roots[session_id])
+
+        def get_permission_context(self, _session_id):
+            return None
+
+    planner = SerialPlanner()
+    p, _, _ = _pipeline(
+        tmp_path, [], planner=planner, session_store=WorkspaceSessions(),
+    )
+    first_events, second_events = [], []
+
+    async def emit_first(event):
+        first_events.append(event)
+
+    async def emit_second(event):
+        second_events.append(event)
+
+    first = asyncio.create_task(
+        p.handle("s1", "第一项任务", emit_first))
+    await planner.first_entered.wait()
+    second = asyncio.create_task(
+        p.handle("s2", "第二项任务", emit_second))
+    await asyncio.sleep(0)
+
+    assert planner.calls == 2
+    assert not any(event.get("stage") == "queued" for event in second_events)
+    assert p.session_busy("s1") is True
+    assert p.session_busy("s2") is False
+    assert p.session_busy("s3") is False
+    assert planner.max_active == 2
+
+    planner.release_first.set()
+    await asyncio.gather(first, second)
+
+    assert planner.calls == 2
+    assert p.session_busy("s1") is False
+    assert p.session_busy("s2") is False
+
+
+@pytest.mark.parametrize("nested", [False, True])
+async def test_overlapping_workspaces_reject_cross_session_turn(tmp_path, nested):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    child = workspace / "backend"
+    child.mkdir()
+
+    class WorkspaceSessions:
+        def get_workspace_root(self, session_id):
+            return str(child if nested and session_id == "s2" else workspace)
+
+        def get_permission_context(self, _session_id):
+            return None
+
+    planner = SerialPlanner()
+    p, _, _ = _pipeline(
+        tmp_path, [], planner=planner, session_store=WorkspaceSessions(),
+    )
+    first_events = []
+
+    async def emit_first(event):
+        first_events.append(event)
+
+    first = asyncio.create_task(
+        p.handle("s1", "第一项任务", emit_first))
+    await planner.first_entered.wait()
+
+    with pytest.raises(WorkspaceBusyError):
+        await p.handle("s2", "第二项任务", emit_first)
+    assert planner.calls == 1
+    assert p.session_busy("s2") is False
+
+    planner.release_first.set()
+    await first
+    await p.handle("s2", "目录释放后的任务", emit_first)
+    assert planner.calls == 2
+    assert planner.max_active == 1
+
+
+async def test_distinct_workspaces_run_concurrently(tmp_path):
+    roots = {"s1": tmp_path / "worktree-a", "s2": tmp_path / "worktree-b"}
+    for root in roots.values():
+        root.mkdir()
+
+    class WorkspaceSessions:
+        def get_workspace_root(self, session_id):
+            return str(roots[session_id])
+
+        def get_permission_context(self, _session_id):
+            return None
+
+    planner = SerialPlanner()
+    p, _, _ = _pipeline(
+        tmp_path, [], planner=planner, session_store=WorkspaceSessions(),
+    )
+
+    async def emit(_event):
+        pass
+
+    first = asyncio.create_task(p.handle("s1", "任务 A", emit))
+    await planner.first_entered.wait()
+    second = asyncio.create_task(p.handle("s2", "任务 B", emit))
+    await asyncio.sleep(0)
+
+    assert planner.calls == 2
+    assert planner.max_active == 2
+
+    planner.release_first.set()
+    await asyncio.gather(first, second)
+
+
+async def test_workspace_claim_is_atomic_and_handoff_releases_slot(tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    class WorkspaceSessions:
+        def get_workspace_root(self, _session_id):
+            return str(workspace)
+
+        def get_permission_context(self, _session_id):
+            return None
+
+    p, _, _ = _pipeline(
+        tmp_path, [FINAL], session_store=WorkspaceSessions(),
+    )
+    token = await p.claim_workspace(str(workspace), "s1")
+
+    assert p.workspace_in_use(str(workspace)) is True
+    with pytest.raises(WorkspaceBusyError):
+        await p.claim_workspace(str(workspace), "s2")
+
+    async def emit(_event):
+        pass
+
+    await p.handle("s1", "已占位任务", emit, workspace_claim=token)
+    assert p.workspace_in_use(str(workspace)) is False
+    await p.release_workspace_claim(token)
+
+
+async def test_pipeline_without_session_store_uses_default_workspace(tmp_path):
+    workspace = tmp_path / "default-project"
+    workspace.mkdir()
+    settings = Settings(
+        _env_file=None,
+        confirm_timeout=2,
+        workspace_root=str(workspace),
+    )
+    planner = SerialPlanner()
+    p, _, _ = _pipeline(tmp_path, [], planner=planner, settings=settings)
+
+    async def emit(_event):
+        pass
+
+    first = asyncio.create_task(p.handle("s1", "第一项任务", emit))
+    await planner.first_entered.wait()
+    with pytest.raises(WorkspaceBusyError):
+        await p.handle("s2", "同一默认目录", emit)
+
+    planner.release_first.set()
+    await first
+
+
+async def test_等待同一会话锁时取消不会泄漏忙状态(tmp_path):
     planner = SerialPlanner()
     p, _, _ = _pipeline(tmp_path, [], planner=planner)
 
@@ -740,14 +914,17 @@ async def test_等待会话锁时取消不会泄漏锁(tmp_path):
     waiting = asyncio.create_task(
         p.handle("s1", "取消的等待者", emit))
     await asyncio.sleep(0)
+    assert p.session_busy("s1") is True
     waiting.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiting
+    assert p.session_busy("s1") is True
 
     planner.release_first.set()
     await first
     await p.handle("s1", "后续有效请求", emit)
     assert planner.calls == 2
+    assert p.session_busy("s1") is False
 
 
 async def test_取消回合保留意图和显式中断状态且重启语义一致(tmp_path):

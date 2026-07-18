@@ -82,7 +82,7 @@ from kylinguard.permissions import (
     expires_after,
     normalize_auto_review_root,
 )
-from kylinguard.pipeline import Confirmations, Pipeline
+from kylinguard.pipeline import Confirmations, Pipeline, WorkspaceBusyError
 from kylinguard.planner import Planner
 from kylinguard.policy import KINDS, PolicyStore
 from kylinguard.reviewer import Reviewer
@@ -848,6 +848,41 @@ def create_app(settings: Settings | None = None,
                 "workspace_root_unavailable", f"工作目录不是目录：{raw}"
             )
         return str(resolved)
+
+    def workspace_in_use(value: str, *, exclude_session: str = "") -> bool:
+        checker = getattr(app.state.pipeline, "workspace_in_use", None)
+        return bool(
+            callable(checker)
+            and checker(value, exclude_session=exclude_session)
+        )
+
+    def workspace_busy_error(value: str) -> HTTPException:
+        return HTTPException(409, detail={
+            "code": "workspace_busy",
+            "message": "该工作目录正在被另一个任务使用，当前对话仅可查看。",
+            "workspace_root": value,
+            "retryable": True,
+        })
+
+    async def claim_workspace(value: str, session_id: str) -> str:
+        """优先使用 Pipeline 的原子占位；兼容测试或外部注入的旧实现。"""
+        claimer = getattr(app.state.pipeline, "claim_workspace", None)
+        if not callable(claimer):
+            if workspace_in_use(value):
+                raise workspace_busy_error(value)
+            return ""
+        try:
+            token = await claimer(value, session_id)
+        except WorkspaceBusyError as exc:
+            raise workspace_busy_error(value) from exc
+        return str(token or "")
+
+    async def release_workspace_claim(token: str) -> None:
+        if not token:
+            return
+        releaser = getattr(app.state.pipeline, "release_workspace_claim", None)
+        if callable(releaser):
+            await releaser(token)
 
     def permission_payload(context) -> dict:
         payload = {
@@ -1883,6 +1918,7 @@ def create_app(settings: Settings | None = None,
                 raise llm_http_error(exc) from exc
         resolved_context_files: list[dict] = []
         resolved_context_mentions: list[dict] = []
+        workspace_claim = ""
         if created:
             session_id = uuid.uuid4().hex
             try:
@@ -1893,18 +1929,26 @@ def create_app(settings: Settings | None = None,
                 resolved_context_mentions = resolved_mentions(
                     resolved_context_files,
                 )
+                workspace_claim = await claim_workspace(
+                    workspace_root, session_id,
+                )
                 # 会话只保存工作目录和模型；审批模式及自动执行范围来自全局设置。
-                with app.state.sessions.transaction() as connection:
-                    app.state.sessions.create(
-                        session_id, req.message, workspace_root=workspace_root,
-                        commit=False,
-                    )
-                    session_model = (
-                        app.state.llm_config.create_session_with_connection(
-                            connection, session_id, requested_model,
-                            updated_by=user,
+                try:
+                    with app.state.sessions.transaction() as connection:
+                        app.state.sessions.create(
+                            session_id, req.message,
+                            workspace_root=workspace_root, commit=False,
                         )
-                    )
+                        session_model = (
+                            app.state.llm_config.create_session_with_connection(
+                                connection, session_id, requested_model,
+                                updated_by=user,
+                            )
+                        )
+                except BaseException:
+                    await release_workspace_claim(workspace_claim)
+                    workspace_claim = ""
+                    raise
             except SessionPermissionError as exc:
                 raise permission_http_error(exc) from exc
             except ContextMentionError as exc:
@@ -1923,6 +1967,15 @@ def create_app(settings: Settings | None = None,
             session_id = req.session_id
             if not app.state.sessions.exists(session_id):
                 raise HTTPException(404, "会话不存在")
+            is_busy = getattr(
+                app.state.pipeline, "session_busy", lambda _id: False,
+            )
+            if is_busy(session_id):
+                raise HTTPException(409, detail={
+                    "code": "session_busy",
+                    "message": "当前对话已有任务正在运行，请等待完成后再发送。",
+                    "retryable": True,
+                })
             if (req.workspace_root or req.provider_id or req.model_id
                     or req.reasoning_effort != "auto"):
                 raise HTTPException(
@@ -1958,7 +2011,13 @@ def create_app(settings: Settings | None = None,
                     "code": "context_files_invalid",
                     "message": str(exc),
                 }) from exc
-            app.state.sessions.touch(session_id, first_message=req.message)
+            workspace_claim = await claim_workspace(workspace_root, session_id)
+            try:
+                app.state.sessions.touch(session_id, first_message=req.message)
+            except BaseException:
+                await release_workspace_claim(workspace_claim)
+                workspace_claim = ""
+                raise
         queue: asyncio.Queue = asyncio.Queue()
         last_progress: dict = {}
         pending_confirm: dict | None = None
@@ -2059,6 +2118,8 @@ def create_app(settings: Settings | None = None,
                     ]
                 if resolved_context_mentions:
                     kwargs["context_mentions"] = resolved_context_mentions
+                if workspace_claim:
+                    kwargs["workspace_claim"] = workspace_claim
                 await app.state.pipeline.handle(
                     session_id, req.message, emit, **kwargs,
                 )
@@ -2073,7 +2134,13 @@ def create_app(settings: Settings | None = None,
                                  "error": "审计写入失败，任务已中止。",
                                  "request_id": req.request_id})
             except Exception as exc:  # 未知错误也必须形成可回放的安全终态
-                if isinstance(exc, LLMError):
+                if isinstance(exc, WorkspaceBusyError):
+                    error = public_error(
+                        "workspace_busy",
+                        "该工作目录正在被另一个任务使用，当前对话仅可查看。",
+                        retryable=True,
+                    )
+                elif isinstance(exc, LLMError):
                     error = exc.error
                 elif isinstance(exc, LLMConfigError):
                     error = public_error(
@@ -2127,12 +2194,17 @@ def create_app(settings: Settings | None = None,
                         "request_id": req.request_id,
                     })
             finally:
+                await release_workspace_claim(workspace_claim)
                 await queue.put(None)
 
         # worker 必须在 Response 返回前启动，并至少产出一个事件。否则
         # StreamingResponse 已发出 X-Session-Id、但尚未开始迭代正文时若断流，
         # 本轮原始指令不会进入审计，下一次“继续”仍然无从恢复目标。
-        task = asyncio.create_task(run())
+        try:
+            task = asyncio.create_task(run())
+        except BaseException:
+            await release_workspace_claim(workspace_claim)
+            raise
         reached_end = False
         cleanup_finished = False
 
@@ -2220,7 +2292,16 @@ def create_app(settings: Settings | None = None,
     @app.get("/api/sessions")
     async def list_sessions(_user: str = Depends(local_operator)):
         summaries = app.state.sessions.list(include_drafts=False)
+        is_busy = getattr(app.state.pipeline, "session_busy", lambda _id: False)
+        workspace_busy = getattr(
+            app.state.pipeline, "workspace_in_use", lambda _root, **_kwargs: False,
+        )
         for summary in summaries:
+            summary["busy"] = bool(is_busy(summary["id"]))
+            summary["workspace_busy"] = bool(workspace_busy(
+                summary.get("workspace_root") or settings.workspace_root,
+                exclude_session=summary["id"],
+            ))
             try:
                 summary["model"] = app.state.llm_config.get_session(
                     summary["id"], ensure=True)

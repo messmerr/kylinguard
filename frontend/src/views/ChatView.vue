@@ -277,7 +277,7 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import ConfirmCard from '../components/ConfirmCard.vue'
 import InlineMentionEditor from '../components/InlineMentionEditor.vue'
 import KgIcon from '../components/KgIcon.vue'
@@ -288,8 +288,9 @@ import PermissionSelector from '../components/PermissionSelector.vue'
 import TaskError from '../components/TaskError.vue'
 import TraceStep from '../components/TraceStep.vue'
 import {
-  activeId, cancelCurrentTurn, currentTurn, generateReport, items,
-  retryMessage, running, sendMessage, sessionLoading,
+  activeChatContextKey, activeId, cancelCurrentTurn, chatDraftNodes, currentTurn,
+  generateReport, items, retryMessage, running, sendMessage, sessionLoading,
+  setChatDraft,
 } from '../composables/useChat.js'
 import {
   permissionContext,
@@ -312,7 +313,7 @@ const WELCOME_HINTS = [
 
 const emit = defineEmits(['open-model-settings', 'open-extensions'])
 
-const editorNodes = ref([{ type: 'text', text: '' }])
+const editorNodes = chatDraftNodes
 const composerEditorRef = ref(null)
 const mentionMenuRef = ref(null)
 const chatRef = ref(null)
@@ -485,10 +486,20 @@ function onMentionKeydown(payload) {
   handleMentionKeydown(payload)
 }
 
+function showBusyMessage(result) {
+  if (!['workspace_busy', 'session_busy'].includes(result?.reason)) return
+  if (result.contextKey !== activeChatContextKey.value) return
+  ElMessage.warning(result.message || '该工作目录正在被其他任务使用，当前仅可查看')
+}
+
 async function submit() {
   if (composerDisabled.value || !canSubmit.value) return
   const snapshot = takeDraftContext()
-  await sendMessage(snapshot.message, { onUpdate: scrollToBottom, ...snapshot })
+  const result = await sendMessage(snapshot.message, { onUpdate: scrollToBottom, ...snapshot })
+  if (result?.reason === 'workspace_busy' || result?.reason === 'session_busy') {
+    setChatDraft(snapshot.contentNodes, result.contextKey)
+  }
+  showBusyMessage(result)
 }
 
 async function chooseWorkspaceRoot() {
@@ -520,7 +531,7 @@ function stopTurn() {
 }
 
 async function retryTask(item) {
-  await retryMessage(item.prompt, {
+  const result = await retryMessage(item.prompt, {
     onUpdate: scrollToBottom,
     skillId: item.skillId || '',
     skillIds: item.skillIds || [],
@@ -529,15 +540,18 @@ async function retryTask(item) {
     contextMentions: item.contextMentions || [],
     contentNodes: item.contentNodes || [],
   })
+  showBusyMessage(result)
 }
 
 async function sendHint(text) {
   if (running.value) return
-  await sendMessage(text, { onUpdate: scrollToBottom })
+  const result = await sendMessage(text, { onUpdate: scrollToBottom })
+  showBusyMessage(result)
 }
 
 async function genReport() {
-  await generateReport({ onUpdate: scrollToBottom })
+  const result = await generateReport({ onUpdate: scrollToBottom })
+  showBusyMessage(result)
 }
 
 function downloadReport(text) {
