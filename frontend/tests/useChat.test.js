@@ -13,6 +13,7 @@ const chatBodies = []
 const sessionEventResponses = []
 const sessionEventSignals = []
 const permissionResponses = []
+const permissionUpdateBodies = []
 const modelResponses = []
 let chatRequestCount = 0
 let sessionEventsFixture = null
@@ -21,8 +22,6 @@ let sessionListFixture = []
 let permissionCapabilitiesFixture
 let modelConfigFixture = null
 let sessionModelFixture = null
-let draftSessionStatus = 201
-const draftSessionBodies = []
 
 globalThis.fetch = async (url, options = {}) => {
   if (url === '/api/llm/config') {
@@ -35,40 +34,6 @@ globalThis.fetch = async (url, options = {}) => {
       : Response.json({}, { status: 404 })
   }
   if (url === '/api/sessions') {
-    if (options.method === 'POST') {
-      const body = JSON.parse(options.body)
-      draftSessionBodies.push(body)
-      if (draftSessionStatus !== 201) {
-        return Response.json({ detail: '旧后端不支持草稿会话' }, {
-          status: draftSessionStatus,
-        })
-      }
-      sessionListFixture = [{
-        id: body.session_id, title: '新任务', draft: true,
-        updated_at: Math.floor(Date.now() / 1000),
-      }]
-      return Response.json({
-        session_id: body.session_id,
-        draft: true,
-        ...(body.provider_id ? {
-          model_context: {
-            session_id: body.session_id,
-            provider_id: body.provider_id,
-            model_id: body.model_id,
-            reasoning_effort: body.reasoning_effort,
-            version: 1,
-          },
-        } : {}),
-        permission: {
-          mode: 'full_access', version: 1,
-          expires_at: Math.floor(Date.now() / 1000) + body.ttl_seconds,
-          execution_identity: 'backend-user',
-          execution_identity_source: 'backend_process',
-          full_access_available: true,
-          grants_root: false,
-        },
-      }, { status: 201 })
-    }
     return Response.json({
       sessions: sessionListFixture,
       ...(permissionCapabilitiesFixture
@@ -83,9 +48,17 @@ globalThis.fetch = async (url, options = {}) => {
     if (sessionEventResponses.length) return sessionEventResponses.shift()
     if (sessionEventsFixture) return Response.json(sessionEventsFixture)
   }
-  if (url.endsWith('/permissions')) {
+  if (url === '/api/permissions') {
     if (permissionResponses.length) return permissionResponses.shift()
+    if (options.method === 'PUT') {
+      const body = JSON.parse(options.body)
+      permissionUpdateBodies.push(body)
+      return Response.json({
+        ...(permissionFixture || {}), ...body, version: body.version + 1,
+      })
+    }
     if (permissionFixture) return Response.json(permissionFixture)
+    return Response.json({ mode: 'ask', version: 1, auto_review_roots: [] })
   }
   if (url.endsWith('/grants') && permissionFixture) {
     return Response.json({ grants: [] })
@@ -152,6 +125,7 @@ function reset() {
   sessionEventResponses.length = 0
   sessionEventSignals.length = 0
   permissionResponses.length = 0
+  permissionUpdateBodies.length = 0
   modelResponses.length = 0
   sessionEventsFixture = null
   permissionFixture = null
@@ -159,8 +133,6 @@ function reset() {
   permissionCapabilitiesFixture = undefined
   modelConfigFixture = null
   sessionModelFixture = null
-  draftSessionStatus = 201
-  draftSessionBodies.length = 0
   localStorageWrites.length = 0
   chatResponses.length = 0
   chat.sessions.value = []
@@ -199,7 +171,8 @@ test('多 Skill 与行内服务器文件按有序 context_mentions 发送且不�
     { type: 'skill', offset: 11, skill_id: 'log-review' },
     { type: 'file', offset: 20, path: 'logs/system.log' },
   ])
-  assert.equal(chatBodies[0].permission_mode, 'ask')
+  assert.equal('permission_mode' in chatBodies[0], false)
+  assert.equal('auto_review_roots' in chatBodies[0], false)
 
   sse.event({ type: 'final_answer', answer: '完成', aborted: false,
     outcome: 'completed', elapsed_ms: 5 })
@@ -778,9 +751,8 @@ test('切换到新任务后忽略旧会话迟到的权限与模型响应', async
   chat.newSession()
 
   permissionResponse.resolve(Response.json({
-    mode: 'trusted_workspace', version: 7,
-    workspace_root: '/srv/session-a', trusted_roots: ['/srv/session-a'],
-    expires_at: Math.floor(Date.now() / 1000) + 600,
+    mode: 'auto_review', version: 7,
+    workspace_root: '/srv/session-a', auto_review_roots: ['/srv/session-a'],
   }))
   modelResponse.resolve(Response.json({
     session_id: 'session-a', provider_id: 'provider-a', model_id: 'model-a',
@@ -794,7 +766,7 @@ test('切换到新任务后忽略旧会话迟到的权限与模型响应', async
   assert.equal(modelResult.reason, 'stale')
   assert.equal(permissions.permissionContext.sessionId, '')
   assert.equal(permissions.permissionContext.mode, 'ask')
-  assert.deepEqual(permissions.permissionContext.trustedRoots, [])
+  assert.deepEqual(permissions.permissionContext.autoReviewRoots, [])
   assert.equal(permissions.permissionContext.workspaceRoot, '')
   assert.equal(permissions.permissionLoading.value, false)
   assert.equal(models.sessionModel.sessionId, '')
@@ -816,15 +788,15 @@ test('切换任务后忽略仍在读取正文的旧权限响应', async () => {
   await tick()
   chat.newSession()
   body.resolve({
-    mode: 'trusted_workspace', version: 7,
-    workspace_root: '/srv/session-a', trusted_roots: ['/srv/session-a'],
+    mode: 'auto_review', version: 7,
+    workspace_root: '/srv/session-a', auto_review_roots: ['/srv/session-a'],
   })
   const result = await permissionLoad
 
   assert.equal(result.reason, 'stale')
   assert.equal(permissions.permissionContext.sessionId, '')
   assert.equal(permissions.permissionContext.mode, 'ask')
-  assert.deepEqual(permissions.permissionContext.trustedRoots, [])
+  assert.deepEqual(permissions.permissionContext.autoReviewRoots, [])
   assert.equal(permissions.permissionContext.workspaceRoot, '')
 })
 
@@ -845,7 +817,7 @@ test('切换任务会主动取消仍在等待的历史加载请求', async () =>
   assert.equal(chat.sessionLoading.value, false)
 })
 
-test('切换到新任务后忽略旧会话迟到的权限与模型修改结果', async () => {
+test('切换任务后全局权限修改仍生效，但旧会话模型修改被忽略', async () => {
   reset()
   modelConfigFixture = {
     providers: [{
@@ -880,8 +852,8 @@ test('切换到新任务后忽略旧会话迟到的权限与模型修改结果',
   permissionResponses.push(permissionResponse.promise)
   modelResponses.push(modelResponse.promise)
 
-  const permissionChange = permissions.setPermissionMode('trusted_workspace', {
-    trustedRoots: ['/srv/session-a'], ttlSeconds: 600,
+  const permissionChange = permissions.setPermissionMode('auto_review', {
+    autoReviewRoots: ['/srv/session-a'],
   })
   const modelChange = models.setActiveModel({
     providerId: 'provider-b', modelId: 'model-b', reasoningEffort: 'high',
@@ -889,8 +861,8 @@ test('切换到新任务后忽略旧会话迟到的权限与模型修改结果',
   await tick()
   chat.newSession()
   permissionResponse.resolve(Response.json({
-    mode: 'trusted_workspace', version: 2,
-    trusted_roots: ['/srv/session-a'],
+    mode: 'auto_review', version: 2,
+    auto_review_roots: ['/srv/session-a'],
   }))
   modelResponse.resolve(Response.json({
     session_id: 'session-a', provider_id: 'provider-b', model_id: 'model-b',
@@ -898,10 +870,10 @@ test('切换到新任务后忽略旧会话迟到的权限与模型修改结果',
   }))
   const [permissionResult] = await Promise.all([permissionChange, modelChange])
 
-  assert.equal(permissionResult.reason, 'stale')
+  assert.equal(permissionResult.supported, true)
   assert.equal(permissions.permissionContext.sessionId, '')
-  assert.equal(permissions.permissionContext.mode, 'ask')
-  assert.deepEqual(permissions.permissionContext.trustedRoots, [])
+  assert.equal(permissions.permissionContext.mode, 'auto_review')
+  assert.deepEqual(permissions.permissionContext.autoReviewRoots, ['/srv/session-a'])
   assert.equal(models.sessionModel.sessionId, '')
   assert.equal(models.sessionModel.providerId, 'provider-a')
   assert.equal(models.sessionModel.modelId, 'model-a')
@@ -919,8 +891,8 @@ test('历史权限同步期间切换新任务不会再启动旧会话模型读�
   assert.equal(permissions.permissionLoading.value, true)
   chat.newSession()
   permissionResponse.resolve(Response.json({
-    mode: 'trusted_workspace', version: 2,
-    workspace_root: '/srv/session-a', trusted_roots: ['/srv/session-a'],
+    mode: 'auto_review', version: 2,
+    workspace_root: '/srv/session-a', auto_review_roots: ['/srv/session-a'],
   }))
   await loading
 
@@ -987,7 +959,7 @@ test('历史任务加载完成前阻止发送，完成后复用 ID 且不附带�
   await followUp
 })
 
-test('权限与服务器工作目录只随首轮 chat 创建会话，后续消息不重复更新', async () => {
+test('全局权限不随 chat 提交，服务器工作目录只随首轮创建会话', async () => {
   reset()
   permissionCapabilitiesFixture = { workspace_root: '/srv/default' }
   modelConfigFixture = {
@@ -1012,8 +984,8 @@ test('权限与服务器工作目录只随首轮 chat 创建会话，后续消�
   chatResponses.push(first)
   const firstRequest = chat.sendMessage('CREATE-SESSION')
   await tick()
-  assert.equal(chatBodies[0].permission_mode, 'ask')
-  assert.deepEqual(chatBodies[0].trusted_roots, [])
+  assert.equal('permission_mode' in chatBodies[0], false)
+  assert.equal('auto_review_roots' in chatBodies[0], false)
   assert.equal(chatBodies[0].workspace_root, '/srv/work')
   assert.equal(chatBodies[0].provider_id, 'provider-a')
   assert.equal(chatBodies[0].model_id, 'model-a')
@@ -1040,7 +1012,7 @@ test('权限与服务器工作目录只随首轮 chat 创建会话，后续消�
   await tick()
   assert.equal(chatBodies[1].session_id, 'session-permission')
   assert.equal('permission_mode' in chatBodies[1], false)
-  assert.equal('trusted_roots' in chatBodies[1], false)
+  assert.equal('auto_review_roots' in chatBodies[1], false)
   assert.equal('workspace_root' in chatBodies[1], false)
   assert.equal('provider_id' in chatBodies[1], false)
   assert.equal('model_id' in chatBodies[1], false)
@@ -1056,7 +1028,6 @@ test('任务列表能力元数据可在首条消息前控制完全访问入口',
   permissionCapabilitiesFixture = {
     full_access_available: false,
     full_access_unavailable_reason: '部署方已关闭',
-    full_access_max_ttl: 600,
     execution_identity: 'ops',
     execution_identity_source: 'configured_exec_user',
     execution_account_separated: true,
@@ -1068,19 +1039,17 @@ test('任务列表能力元数据可在首条消息前控制完全访问入口',
 
   assert.equal(permissions.permissionContext.fullAccessAvailable, false)
   assert.equal(permissions.permissionContext.fullAccessUnavailableReason, '部署方已关闭')
-  assert.equal(permissions.permissionContext.fullAccessMaxTtl, 600)
   assert.equal(permissions.permissionContext.executorIdentity, 'ops')
   assert.equal(permissions.permissionContext.executionAccountSeparated, true)
   assert.equal(permissions.permissionContext.defaultWorkspaceRoot, '/srv/default-project')
   assert.equal(permissions.permissionContext.workspaceRoot, '/srv/default-project')
 })
 
-test('首条消息前原子创建完全访问草稿并复用同一会话', async () => {
+test('首条消息前开启全局完全访问不会预创建会话', async () => {
   reset()
   permissionCapabilitiesFixture = {
     full_access_available: true,
-    full_access_max_ttl: 900,
-    permission_default_ttl: 300,
+    full_access_visible: true,
     execution_identity: 'backend-user',
     execution_identity_source: 'backend_process',
     workspace_root: '/srv/default-project',
@@ -1102,54 +1071,41 @@ test('首条消息前原子创建完全访问草稿并复用同一会话', async
   }
   await chat.refreshSessions()
   await models.loadModelConfig()
+  permissionFixture = {
+    mode: 'ask', version: 1, auto_review_roots: [],
+    full_access_available: true, full_access_visible: true,
+  }
   permissions.setDraftWorkspaceRoot('/srv/custom/../project')
-  const result = await chat.setChatPermissionMode('full_access', {
-    durationMinutes: 30,
-  })
+  const result = await chat.setChatPermissionMode('full_access')
 
   assert.equal(result.supported, true)
-  assert.match(chat.activeId.value, /^[a-f0-9]{32}$/)
-  assert.equal(permissions.permissionContext.sessionId, chat.activeId.value)
+  assert.equal(chat.activeId.value, '')
+  assert.equal(permissions.permissionContext.sessionId, '')
   assert.equal(permissions.permissionMode.value, 'full_access')
   assert.equal(permissions.permissionContext.synced, true)
   assert.equal(permissions.permissionContext.workspaceRoot, '/srv/project')
   assert.equal(chat.sessions.value.length, 0)
-  assert.deepEqual(draftSessionBodies[0], {
-    session_id: chat.activeId.value,
+  assert.deepEqual(permissionUpdateBodies[0], {
     mode: 'full_access',
-    ttl_seconds: 900,
-    workspace_root: '/srv/project',
-    provider_id: 'provider-full',
-    model_id: 'model-full',
-    reasoning_effort: 'high',
+    version: 1,
+    auto_review_roots: [],
   })
-  assert.equal('password' in draftSessionBodies[0], false)
 
   const sse = controlledSse()
   chatResponses.push(sse)
-  const request = chat.sendMessage('USE-DRAFT-SESSION')
+  const request = chat.sendMessage('CREATE-FULL-ACCESS-SESSION')
   await tick()
-  assert.equal(chatBodies[0].session_id, chat.activeId.value)
+  assert.equal(chatBodies[0].session_id, '')
+  assert.equal(chatBodies[0].workspace_root, '/srv/project')
   assert.equal('password' in chatBodies[0], false)
   assert.equal('permission_mode' in chatBodies[0], false)
-  assert.equal('provider_id' in chatBodies[0], false)
+  assert.equal(chatBodies[0].provider_id, 'provider-full')
+  sse.event({ type: 'session_created', session_id: 'global-full-session' })
   sse.event({ type: 'final_answer', answer: '完成', outcome: 'completed' })
   sse.event({ type: 'done' })
   sse.close()
   await request
-})
-
-test('旧后端不支持草稿会话时给出明确降级提示且不绑定本地状态', async () => {
-  reset()
-  draftSessionStatus = 405
-  await assert.rejects(
-    chat.setChatPermissionMode('full_access', { durationMinutes: 5 }),
-    /不支持在首条消息前开启完全访问.*先发送第一条消息/,
-  )
-
-  assert.equal(chat.activeId.value, '')
-  assert.equal(permissions.permissionContext.sessionId, '')
-  assert.equal(permissions.permissionMode.value, 'ask')
+  assert.equal(chat.activeId.value, 'global-full-session')
 })
 
 test('已有任务采用会话工作目录并锁定，新任务恢复服务器默认目录', async () => {
@@ -1176,24 +1132,22 @@ test('已有任务采用会话工作目录并锁定，新任务恢复服务器�
   assert.equal(permissions.permissionContext.sessionId, '')
 })
 
-test('历史回放结束后以服务器当前权限覆盖过期的历史事件', async () => {
+test('历史回放结束后以服务器当前持久权限覆盖历史事件', async () => {
   reset()
   sessionEventsFixture = { events: [{
     event_type: 'permission_changed',
     payload: {
       to_mode: 'full_access', version: 2,
-      expires_at: Date.now() - 60_000,
     },
   }] }
   permissionFixture = {
-    mode: 'full_access', version: 2, expired: true,
-    expires_at: Date.now() - 60_000, trusted_roots: ['/srv/expired'],
+    mode: 'full_access', version: 2, auto_review_roots: ['/srv/persistent'],
   }
 
   await chat.loadSession('history-permission')
 
-  assert.equal(permissions.permissionMode.value, 'ask')
-  assert.deepEqual(permissions.trustedRoots.value, [])
+  assert.equal(permissions.permissionMode.value, 'full_access')
+  assert.deepEqual(permissions.autoReviewRoots.value, ['/srv/persistent'])
 })
 
 test('后端 permission_request/result 契约可生成并收起授权卡', () => {

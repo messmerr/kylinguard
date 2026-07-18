@@ -219,6 +219,7 @@ const TYPE_LABELS = {
   confirm_request: '请求确认',
   confirm_result: '确认结果',
   permission_changed: '权限模式变更',
+  full_access_visibility_changed: '完全访问入口变更',
   permission_request: '权限请求',
   permission_result: '授权结果',
   permission_resolved: '授权已处理',
@@ -333,7 +334,8 @@ function eventIcon(type) {
     user_query: 'task', intent_filter: 'shield', intent_signal: 'warning',
     snapshot: 'server', plan: 'task', verification: 'shield',
     confirm_request: 'warning', confirm_result: 'check', execution: 'terminal',
-    permission_changed: 'shield', permission_request: 'lock', permission_result: 'check',
+    permission_changed: 'shield', full_access_visibility_changed: 'warning',
+    permission_request: 'lock', permission_result: 'check',
     permission_resolved: 'check', permission_grants_revoked: 'lock',
     permission_request_stale: 'warning',
     step_rewrite: 'terminal', capability_error: 'warning',
@@ -363,6 +365,8 @@ function eventTone(ev) {
   }
   if (ev.event_type === 'confirm_request' || ev.event_type === 'permission_request'
       || ev.event_type === 'intent_signal'
+      || (ev.event_type === 'full_access_visibility_changed'
+        && ev.payload?.to_visible)
       || ev.event_type === 'task_cancelled'
       || action === 'confirm' || action === 'double_confirm') {
     return 'is-warning'
@@ -371,6 +375,8 @@ function eventTone(ev) {
   if (ev.event_type === 'final_answer' || ev.event_type === 'confirm_result'
       || ev.event_type === 'permission_result'
       || ev.event_type === 'permission_resolved'
+      || (ev.event_type === 'full_access_visibility_changed'
+        && !ev.payload?.to_visible)
       || ev.event_type === 'execution_authorized') return 'is-success'
   return ''
 }
@@ -390,6 +396,7 @@ function brief(ev) {
     case 'confirm_request': return `${p.step?.purpose || p.step?.tool || '操作'} · ${riskLabel(p.decision?.risk)}`
     case 'confirm_result': return `${p.approved ? '已批准' : '已拒绝'} · 操作人 ${p.operator || '—'}`
     case 'permission_changed': return `${p.from_mode || '新任务'} → ${p.to_mode || '—'} · 操作人 ${p.operator || '—'}`
+    case 'full_access_visibility_changed': return `${p.to_visible ? '已显示高风险入口' : '已隐藏高风险入口'} · 操作人 ${p.operator || '—'}`
     case 'permission_request': return `${p.step?.purpose || p.capability || '操作'} · ${riskLabel(p.decision?.risk)}`
     case 'permission_result': return `${p.approved ? '已授权' : '已拒绝'} · ${p.decision || '—'} · ${p.operator || '—'}`
     case 'permission_resolved': return `${p.decision || '—'} · ${p.capability || '—'} · ${p.operator || '—'}`
@@ -466,7 +473,14 @@ function detailRows(ev) {
       return [
         { label: '模式', value: `${p.from_mode || '新任务'} → ${p.to_mode || '—'}` },
         { label: '操作人', value: p.operator || '—' },
-        { label: '可信目录', value: (p.trusted_roots || []).join('、') || '无', mono: true },
+        { label: '自动执行范围', value: (p.auto_review_roots || []).join('、') || '无', mono: true },
+        { label: '权限版本', value: String(p.version ?? '—'), mono: true },
+      ]
+    case 'full_access_visibility_changed':
+      return [
+        { label: '入口状态', value: p.to_visible ? '已显示' : '已隐藏' },
+        { label: '权限模式', value: `${p.from_mode || '—'} → ${p.to_mode || '—'}` },
+        { label: '操作人', value: p.operator || '—' },
         { label: '权限版本', value: String(p.version ?? '—'), mono: true },
       ]
     case 'permission_request':
@@ -482,7 +496,7 @@ function detailRows(ev) {
         { label: '结果', value: p.decision || (p.approved ? '已授权' : '已拒绝') },
         { label: '操作人', value: p.operator || '—' },
         { label: '能力', value: p.capability || '—', mono: true },
-        { label: '范围', value: p.resource || p.trusted_path || '—', mono: true },
+        { label: '范围', value: p.resource || p.authorized_path || '—', mono: true },
         { label: '授权编号', value: p.grant_id || '无', mono: true },
       ]
     case 'permission_grants_revoked':

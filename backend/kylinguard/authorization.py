@@ -1,4 +1,4 @@
-"""把工具调用转换为稳定能力描述，并应用会话权限模式。"""
+"""把工具调用转换为稳定能力描述，并应用全局审批模式与会话动作授权。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from kylinguard.models import (
     RiskLevel,
     RuleDecision,
     RuleVerdict,
-    SessionPermissionContext,
+    PermissionContext,
     ToolMeta,
 )
 from kylinguard.mcp_config import default_mcp_secrets_directory
@@ -388,33 +388,40 @@ def _within_root(path: str, root: str) -> bool:
         return False
 
 
-def trusted_workspace_allows(
-    context: SessionPermissionContext,
+def auto_review_scope_allows(
+    context: PermissionContext,
     action: ActionDescriptor,
 ) -> bool:
-    if action.destructive or action.capability != "files.write" or not action.paths:
+    """自动审核只越过可逆动作的确认，显式路径必须落在授权范围内。"""
+    if (action.destructive or action.policy_protected
+            or action.control_path_signal):
+        return False
+    if not action.paths:
+        return True
+    if not context.auto_review_roots:
         return False
     return all(
-        any(_within_root(path, root) for root in context.trusted_roots)
+        any(_within_root(path, root) for root in context.auto_review_roots)
         for path in action.paths
     )
 
 
 def apply_permission_mode(
-    context: SessionPermissionContext,
+    context: PermissionContext,
     action: ActionDescriptor,
     base: GateDecision,
     *,
     has_grant: bool = False,
     grant_scope: PermissionGrantScope | None = None,
+    review_approved: bool = True,
 ) -> GateDecision:
-    """在风险裁决上应用会话权限。
+    """在风险裁决上应用全局审批模式与当前会话动作授权。
 
     FULL_ACCESS 是用户显式开启的绝对产品权限：它可以覆盖精确路径等产品层
     限制，避免结构化文件工具与 shell 出现路线依赖。协议/参数无效等规则层
     hard deny 仍由 ``base.action == DENY`` 保持不可执行。
     """
-    mode = PermissionMode.ASK if context.expired else context.mode
+    mode = context.mode
     if action.hard_block_reason and mode != PermissionMode.FULL_ACCESS:
         return GateDecision(
             action=GateAction.DENY,
@@ -440,7 +447,7 @@ def apply_permission_mode(
             action=GateAction.AUTO,
             risk=base.risk,
             reason=(
-                "当前会话已由管理员启用完全访问；产品层不再限制该动作，"
+                "管理员已在全局权限中启用完全访问；产品层不再限制该动作，"
                 "仍受执行账户 OS 权限约束。"
             ),
         )
@@ -450,7 +457,7 @@ def apply_permission_mode(
         return GateDecision(
             action=GateAction.DENY,
             risk=base.risk,
-            reason="当前会话处于只读模式，修改操作不会执行。",
+            reason="当前全局权限处于只读模式，修改操作不会执行。",
         )
     if has_grant and (
         not action.destructive or grant_scope == PermissionGrantScope.ONCE
@@ -460,12 +467,16 @@ def apply_permission_mode(
             risk=base.risk,
             reason="该标准化动作已获得当前会话授权。",
         )
-    if (mode == PermissionMode.TRUSTED_WORKSPACE
-            and trusted_workspace_allows(context, action)):
+    if (mode == PermissionMode.AUTO_REVIEW
+            and review_approved
+            and base.risk != RiskLevel.HIGH
+            and auto_review_scope_allows(context, action)):
         return GateDecision(
             action=GateAction.AUTO,
             risk=base.risk,
-            reason="目标位于本会话可信目录，允许自动创建或修改。",
+            reason=(
+                "静态规则与独立 Reviewer 均已通过，动作可逆且位于自动执行范围内。"
+            ),
         )
     return base
 
@@ -475,5 +486,5 @@ __all__ = [
     "apply_permission_mode",
     "describe_action",
     "execution_profile_fingerprint",
-    "trusted_workspace_allows",
+    "auto_review_scope_allows",
 ]

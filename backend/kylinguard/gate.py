@@ -44,6 +44,12 @@ def decide(meta: ToolMeta, rule: RuleVerdict, review: ReviewVerdict,
                   f"审查员 {review.risk.value} / 规划自评 {planner_risk.value}）")
 
     concerns = []
+    if not review.available:
+        reason = (
+            f"独立 Reviewer 不可用，低风险只读动作仍按静态规则执行；{reason}"
+            if risk == RiskLevel.LOW else
+            f"独立 Reviewer 不可用，自动审核已降级为人工确认；{reason}"
+        )
     if not review.safe:
         concerns.append("安全性存疑")
     if not review.matches_intent:

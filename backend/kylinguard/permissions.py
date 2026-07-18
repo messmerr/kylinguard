@@ -1,4 +1,4 @@
-"""会话权限内核：权限模式、可信目录规范化与待决授权请求。
+"""权限内核：全局审批设置与待决会话动作授权请求。
 
 持久化由 :mod:`kylinguard.sessions` 负责；本模块刻意不依赖执行器，因而
 ``full_access`` 的含义始终是“跳过产品内逐项询问”，而不是获取 root。
@@ -18,10 +18,10 @@ from kylinguard.models import (
     PermissionMode,
     PermissionRequest,
     PermissionResolution,
-    SessionPermissionContext,
+    PermissionContext,
 )
 
-_MAX_TRUSTED_ROOTS = 32
+_MAX_AUTO_REVIEW_ROOTS = 32
 _MAX_PATH_LENGTH = 4096
 
 
@@ -38,51 +38,52 @@ class PermissionVersionConflict(PermissionError):
     def __init__(self):
         super().__init__(
             "permission_version_conflict",
-            "会话权限已被更新，请刷新当前权限状态后重试。",
+            "全局权限已被更新，请刷新当前权限状态后重试。",
         )
 
 
-def normalize_trusted_root(value: str) -> str:
-    """把服务端目录规范化为绝对路径，并拒绝含糊或全盘范围。
+def normalize_auto_review_root(value: str) -> str:
+    """把自动审核目录规范化为绝对路径，并拒绝含糊或全盘范围。
 
     这里只定义授权边界。执行文件操作时仍须重新解析目标路径并防御符号
     链接与 TOCTOU，不能把本函数当成文件系统沙箱。
     """
     if not isinstance(value, str):
-        raise PermissionError("invalid_trusted_root", "可信目录必须是路径字符串。")
+        raise PermissionError("invalid_auto_review_root", "自动执行范围必须是路径字符串。")
     raw = value.strip()
     if not raw or "\x00" in raw or len(raw) > _MAX_PATH_LENGTH:
-        raise PermissionError("invalid_trusted_root", "可信目录路径为空或格式无效。")
+        raise PermissionError("invalid_auto_review_root", "自动执行范围为空或格式无效。")
     if raw.startswith("~"):
         raise PermissionError(
-            "invalid_trusted_root", "可信目录不能使用 ~，请填写服务端绝对路径。"
+            "invalid_auto_review_root", "自动执行范围不能使用 ~，请填写服务端绝对路径。"
         )
     path = Path(raw)
     if not path.is_absolute():
         raise PermissionError(
-            "invalid_trusted_root", "可信目录必须是服务端绝对路径。"
+            "invalid_auto_review_root", "自动执行范围必须是服务端绝对路径。"
         )
     try:
         resolved = path.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
-        raise PermissionError("invalid_trusted_root", "可信目录路径无法解析。") from exc
-    # 信任文件系统根目录等价于放开全部文件写入，应使用 full_access。
+        raise PermissionError("invalid_auto_review_root", "自动执行范围无法解析。") from exc
+    # 文件系统根目录等价于允许全盘自动修改，应使用 full_access。
     if resolved.parent == resolved:
         raise PermissionError(
-            "trusted_root_too_broad", "不能把文件系统根目录设为可信目录。"
+            "auto_review_root_too_broad", "不能把文件系统根目录设为自动执行范围。"
         )
     return str(resolved)
 
 
-def normalize_trusted_roots(values: list[str] | tuple[str, ...]) -> list[str]:
-    if len(values) > _MAX_TRUSTED_ROOTS:
+def normalize_auto_review_roots(values: list[str] | tuple[str, ...]) -> list[str]:
+    if len(values) > _MAX_AUTO_REVIEW_ROOTS:
         raise PermissionError(
-            "too_many_trusted_roots", f"单个会话最多信任 {_MAX_TRUSTED_ROOTS} 个目录。"
+            "too_many_auto_review_roots",
+            f"单个会话最多设置 {_MAX_AUTO_REVIEW_ROOTS} 个自动执行目录。",
         )
     result: list[str] = []
     seen: set[str] = set()
     for value in values:
-        root = normalize_trusted_root(value)
+        root = normalize_auto_review_root(value)
         key = os.path.normcase(root)
         if key not in seen:
             seen.add(key)
@@ -177,6 +178,15 @@ class PermissionRequests:
         ]
         return sum(self.cancel(request_id, operator) for request_id in request_ids)
 
+    def revoke_all(
+        self, operator: str, *, exclude_request_id: str = "",
+    ) -> int:
+        request_ids = [
+            request_id for request_id in self._pending
+            if request_id != exclude_request_id
+        ]
+        return sum(self.cancel(request_id, operator) for request_id in request_ids)
+
 
 __all__ = [
     "PermissionDecision",
@@ -188,8 +198,8 @@ __all__ = [
     "PermissionRequests",
     "PermissionResolution",
     "PermissionVersionConflict",
-    "SessionPermissionContext",
+    "PermissionContext",
     "expires_after",
-    "normalize_trusted_root",
-    "normalize_trusted_roots",
+    "normalize_auto_review_root",
+    "normalize_auto_review_roots",
 ]

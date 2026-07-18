@@ -43,7 +43,7 @@ test('高风险确认卡不展示会话或目录级授权', async () => {
   const { helpers } = await confirmCard
   const choices = helpers.confirmationChoicesForCard({
     decision: { action: 'double_confirm', risk: 'high' },
-    choices: ['deny', 'allow_once', 'allow_session', 'trust_path'],
+    choices: ['deny', 'allow_once', 'allow_session', 'authorize_path'],
   }, true)
 
   assert.deepEqual(choices.map((choice) => choice.id), ['deny', 'allow_once'])

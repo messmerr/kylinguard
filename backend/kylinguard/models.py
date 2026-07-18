@@ -11,7 +11,7 @@ class RiskLevel(str, Enum):
 
 
 class PermissionMode(str, Enum):
-    """会话级权限模式。
+    """全局审批模式。
 
     模式只决定 KylinGuard 是否自动批准一类操作，不会提升运行服务的
     Linux/Windows 账户权限；即使 ``full_access`` 也仍受操作系统约束。
@@ -19,7 +19,7 @@ class PermissionMode(str, Enum):
 
     READ_ONLY = "read_only"
     ASK = "ask"
-    TRUSTED_WORKSPACE = "trusted_workspace"
+    AUTO_REVIEW = "auto_review"
     FULL_ACCESS = "full_access"
 
 
@@ -32,18 +32,21 @@ class PermissionDecision(str, Enum):
     DENY = "deny"
     ALLOW_ONCE = "allow_once"
     ALLOW_SESSION = "allow_session"
-    TRUST_PATH = "trust_path"
+    AUTHORIZE_PATH = "authorize_path"
 
 
-class SessionPermissionContext(BaseModel):
-    session_id: str
+class PermissionContext(BaseModel):
+    # 审批模式与自动执行范围是全局设置；流水线读取时会附上当前会话 ID，
+    # 全局设置接口返回空字符串。
+    session_id: str = ""
     mode: PermissionMode = PermissionMode.ASK
-    trusted_roots: list[str] = Field(default_factory=list)
-    expires_at: float | None = None
+    auto_review_roots: list[str] = Field(default_factory=list)
+    # 完全访问入口默认隐藏；只有管理员在“权限与安全”中单独揭示后，
+    # 全局权限接口才接受切换到 full_access。
+    full_access_visible: bool = False
     version: int = Field(default=1, ge=1)
     updated_at: float
     updated_by: str = ""
-    expired: bool = False
     execution_profile: str = ""
 
 
@@ -81,7 +84,7 @@ class PermissionResolution(BaseModel):
     operator: str
     context_version: int = Field(ge=1)
     grant_id: str | None = None
-    trusted_path: str | None = None
+    authorized_path: str | None = None
 
 
 _RISK_ORDER = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2}
@@ -144,6 +147,7 @@ class ReviewVerdict(BaseModel):
     matches_intent: bool
     risk: RiskLevel
     reason: str
+    available: bool = True
 
 
 class GateAction(str, Enum):

@@ -11,11 +11,11 @@
       class="permission-trigger"
       :class="[`is-${permissionModeMeta.tone}`, { active: fullAccessActive }]"
       :disabled="disabled || changing"
-      :aria-label="changing ? '正在更新权限' : `当前权限：${permissionModeMeta.label}`"
+      :aria-label="changing ? '正在更新全局权限' : `全局权限：${permissionModeMeta.label}`"
     >
       <span v-if="changing" class="kg-spinner" aria-hidden="true"></span>
       <KgIcon v-else :name="fullAccessActive ? 'warning' : 'shield'" :size="13" />
-      <span>{{ changing ? '正在更新权限…' : `权限：${permissionModeMeta.label}` }}</span>
+      <span>{{ changing ? '正在更新权限…' : `全局权限：${permissionModeMeta.label}` }}</span>
       <span v-if="fullAccessActive && permissionContext.grantsRoot" class="root-badge">ROOT</span>
       <KgIcon name="chevron" :size="11" class="select-chevron" />
     </button>
@@ -23,7 +23,7 @@
     <template #dropdown>
       <el-dropdown-menu class="permission-menu">
         <el-dropdown-item
-          v-for="mode in PERMISSION_MODES"
+          v-for="mode in visiblePermissionModes"
           :key="mode.value"
           :command="mode.value"
           :disabled="mode.value === 'full_access'
@@ -40,8 +40,8 @@
                 ? (permissionContext.fullAccessUnavailableReason || '服务端未开放')
                 : mode.value === 'full_access' && permissionContext.grantsRoot
                 ? '完整能力 · 将获得 root 权限'
-                : mode.value === 'trusted_workspace' && trustedRoots.length
-                ? `已信任 ${trustedRoots.length} 个目录`
+                : mode.value === 'auto_review' && autoReviewRoots.length
+                ? `自动范围 ${autoReviewRoots.length} 个目录`
                 : mode.short }}
             </small>
           </span>
@@ -53,63 +53,42 @@
 
 <script setup>
 import { ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import KgIcon from './KgIcon.vue'
 import { setChatPermissionMode } from '../composables/useChat.js'
+import { confirmFullAccessEnable } from '../utils/fullAccessWarnings.js'
 import {
-  PERMISSION_MODES,
-  addTrustedRoot,
+  autoReviewRoots,
   fullAccessActive,
-  fullAccessDurationMinutes,
   permissionContext,
   permissionMode,
   permissionModeMeta,
-  trustedRoots,
+  visiblePermissionModes,
 } from '../composables/usePermissions.js'
 
 defineProps({ disabled: { type: Boolean, default: false } })
 const changing = ref(false)
-
-async function requestTrustedRoot() {
-  const { value } = await ElMessageBox.prompt(
-    '输入结构化文件工具可以直接创建和修改内容的服务器目录。删除与终端命令仍会询问。',
-    '添加可信目录',
-    {
-      inputPlaceholder: '例如 /srv/project/docs',
-      confirmButtonText: '添加目录',
-      cancelButtonText: '取消',
-      inputValidator: (value) => (
-        String(value || '').trim().startsWith('/') || '请输入以 / 开头的服务器绝对路径'
-      ),
-    },
-  )
-  return String(value || '').trim()
-}
 
 async function chooseMode(mode) {
   if (changing.value || mode === permissionMode.value) return
   changing.value = true
   try {
     let result = null
-    if (mode === 'trusted_workspace' && !trustedRoots.value.length) {
-      const path = await requestTrustedRoot()
-      result = await addTrustedRoot(path)
-      if (!result.supported && permissionContext.sessionId) {
-        ElMessage.warning('当前后端未保存可信目录，任务权限未更改')
-        return
-      }
-    }
     if (permissionMode.value !== mode) {
-      result = await setChatPermissionMode(mode, {
-        durationMinutes: fullAccessDurationMinutes.value,
-      })
+      if (mode === 'full_access') {
+        await confirmFullAccessEnable({
+          executorIdentity: permissionContext.executorIdentity,
+          grantsRoot: permissionContext.grantsRoot,
+        })
+      }
+      result = await setChatPermissionMode(mode)
     }
-    if (!result.supported && permissionContext.sessionId) {
-      ElMessage.warning('当前后端未保存此设置，任务权限未更改')
+    if (!result.supported) {
+      ElMessage.warning('当前后端未保存全局权限设置')
     } else {
       ElMessage.success(mode === 'full_access'
-        ? `完整执行能力已开启，将在 ${fullAccessDurationMinutes.value} 分钟后收回`
-        : '权限已更新')
+        ? '完整执行能力已开启，将持续生效直至手动收回'
+        : '全局权限已更新')
     }
   } catch (error) {
     // Element Plus 取消弹窗使用字符串/对象拒绝，不应显示成错误。

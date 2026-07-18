@@ -22,7 +22,6 @@ def test_环境变量覆盖(monkeypatch):
     monkeypatch.setenv("KG_WORKSPACE_ROOT", "/srv/agent-workspace")
     monkeypatch.setenv("KG_LLM_TIMEOUT", "25")
     monkeypatch.setenv("KG_ALLOW_FULL_ACCESS", "false")
-    monkeypatch.setenv("KG_FULL_ACCESS_MAX_TTL", "600")
     s = Settings(_env_file=None)
     assert s.command_timeout == 10
     assert s.command_max_timeout == 1200
@@ -30,7 +29,6 @@ def test_环境变量覆盖(monkeypatch):
     assert s.workspace_root == "/srv/agent-workspace"
     assert s.llm_timeout == 25.0
     assert s.allow_full_access is False
-    assert s.full_access_max_ttl == 600
 
 
 def test_执行子进程配置不读取当前目录dotenv(tmp_path, monkeypatch):

@@ -126,7 +126,7 @@ export function confirmationChoicesForCard(card = {}, hasTarget = false) {
     : [
       { id: 'allow_once', label: '仅允许这一步' },
       { id: 'allow_session', label: '本次会话允许同类操作' },
-      ...(hasTarget ? [{ id: 'trust_path', label: '信任这个目录' }] : []),
+      ...(hasTarget ? [{ id: 'authorize_path', label: '全局自动允许此目录' }] : []),
     ]
   const normalized = raw.map((choice) => {
     if (typeof choice === 'string') return { id: choice, label: '', description: '' }
@@ -222,15 +222,15 @@ const moreChoices = computed(() => normalizedChoices()
   .filter((choice) => !['deny', 'allow_once'].includes(choice.id))
   .map((choice) => ({
     ...choice,
-    label: choice.label || (choice.id === 'trust_path' ? '信任这个目录' : '本次会话允许同类操作'),
-    description: choice.description || (choice.id === 'trust_path'
-      ? '当前授权期内，在此目录创建和修改文件时不再询问'
+    label: choice.label || (choice.id === 'authorize_path' ? '全局自动允许此目录' : '本次会话允许同类操作'),
+    description: choice.description || (choice.id === 'authorize_path'
+      ? '加入全局自动执行范围，对所有任务生效；仍需通过 Reviewer 且不会放行高风险操作'
       : '关闭本次会话或授权到期后自动收回'),
   })))
 
 function suggestedDirectory() {
   const proposed = props.card.operation?.suggested_scope?.path
-    || props.card.operation?.trust_root
+    || props.card.operation?.auto_review_root
   if (proposed) return proposed
   const path = targetPath.value
   if (!path) return ''
@@ -244,7 +244,7 @@ function suggestedDirectory() {
 function decisionScope(decision) {
   if (decision === 'allow_once' || decision === 'deny') return null
   const path = suggestedDirectory()
-  if (decision === 'trust_path' && !path) return null
+  if (decision === 'authorize_path' && !path) return null
   return {
     kind: path ? 'path' : 'operation',
     ...(path ? { path } : {}),
@@ -269,7 +269,7 @@ async function confirmHighRisk() {
 
 async function act(decision) {
   if (resolving.value) return
-  if (decision === 'trust_path' && !suggestedDirectory()) {
+  if (decision === 'authorize_path' && !suggestedDirectory()) {
     ElMessage.warning('这一步没有可授权的服务器目录')
     return
   }

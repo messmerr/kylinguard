@@ -27,7 +27,7 @@
         <div class="section-head permission-heading">
           <div>
             <h2 class="kg-section-title">Agent 权限</h2>
-            <p>降低权限会立即阻止尚未通过执行前检查的操作；已经开始的系统调用无法回滚。</p>
+            <p>这是全局设置，对当前任务和以后创建的所有任务生效；已经开始的系统调用无法回滚。</p>
           </div>
           <span
             class="sync-state"
@@ -40,22 +40,22 @@
         </div>
 
         <div
-          v-if="activeId && permissionLoading"
+          v-if="permissionLoading"
           class="policy-state"
           role="status"
           aria-live="polite"
         >
           <span class="kg-spinner" aria-hidden="true"></span>
-          <div><strong>正在同步当前任务权限</strong><span>同步完成前不会把本地草稿显示为已生效。</span></div>
+          <div><strong>正在同步全局权限</strong><span>同步完成前不会把本地状态显示为已生效。</span></div>
         </div>
 
         <div
-          v-else-if="activeId && permissionLoadError"
+          v-else-if="permissionLoadError"
           class="policy-state is-error"
           role="alert"
         >
           <KgIcon name="warning" :size="17" />
-          <div><strong>当前任务权限同步失败</strong><span>{{ permissionLoadError }}</span></div>
+          <div><strong>全局权限同步失败</strong><span>{{ permissionLoadError }}</span></div>
           <el-button size="small" :loading="permissionLoading" @click="retryPermissionContext">重新同步</el-button>
         </div>
 
@@ -64,10 +64,10 @@
           class="mode-grid"
           role="radiogroup"
           aria-label="Agent 权限模式"
-          :aria-busy="permissionChanging"
+          :aria-busy="permissionChanging || fullAccessVisibilityChanging"
         >
           <button
-            v-for="mode in PERMISSION_MODES"
+            v-for="mode in visiblePermissionModes"
             :key="mode.value"
             :ref="element => setPermissionModeButtonRef(mode.value, element)"
             type="button"
@@ -77,7 +77,7 @@
             :aria-checked="permissionMode === mode.value"
             :aria-label="`${mode.label}：${mode.short}`"
             :tabindex="permissionModeTabIndex(mode.value)"
-            :disabled="permissionChanging || permissionModeUnavailable(mode.value)"
+            :disabled="permissionChanging || fullAccessVisibilityChanging || permissionModeUnavailable(mode.value)"
             @keydown="handlePermissionModeKeydown($event, mode.value)"
             @click="choosePermissionMode(mode.value)"
           >
@@ -90,6 +90,39 @@
               ? (permissionContext.fullAccessUnavailableReason || '服务端未开放')
               : mode.short }}</span>
           </button>
+        </div>
+
+        <div
+          class="full-access-visibility"
+          :class="{ exposed: permissionContext.fullAccessVisible }"
+          role="group"
+          aria-label="完全访问入口可见性"
+        >
+          <span class="full-access-visibility-icon"><KgIcon name="warning" :size="18" /></span>
+          <div class="full-access-visibility-copy">
+            <strong>显示“完全访问”高风险模式</strong>
+            <p v-if="permissionContext.fullAccessVisible">
+              入口已经显示在全局权限菜单中；真正启用时仍需经过另一组独立的警告和二次确认。
+            </p>
+            <p v-else>
+              默认隐藏。只有在这里显式揭示后，其他页面才能看到并尝试启用完全访问。
+            </p>
+            <small v-if="!permissionContext.fullAccessAvailable">
+              {{ permissionContext.fullAccessUnavailableReason || '服务端未开放完全访问' }}
+            </small>
+          </div>
+          <div class="full-access-visibility-control">
+            <span :class="{ active: permissionContext.fullAccessVisible }">
+              {{ permissionContext.fullAccessVisible ? '已显示' : '已隐藏' }}
+            </span>
+            <el-switch
+              :model-value="permissionContext.fullAccessVisible"
+              :loading="fullAccessVisibilityChanging"
+              :disabled="permissionChanging || (!permissionContext.fullAccessAvailable && !permissionContext.fullAccessVisible)"
+              aria-label="显示完全访问模式"
+              @change="changeFullAccessVisibility"
+            />
+          </div>
         </div>
 
         <div class="effective-access" :class="{ danger: fullAccessActive }">
@@ -136,25 +169,25 @@
           <template #label>
             <span class="tab-label">
               <KgIcon name="lock" :size="14" />授权管理
-              <span>{{ trustedRoots.length + activePermissionGrants.length }}</span>
+              <span>{{ autoReviewRoots.length + activePermissionGrants.length }}</span>
             </span>
           </template>
 
           <section class="policy-section grants-section">
         <div class="section-head">
           <div>
-            <h2 class="kg-section-title">可信目录与有效授权</h2>
-            <p>这里填写服务器路径。结构化文件工具可直接创建和修改；删除与终端命令仍会询问。</p>
+            <h2 class="kg-section-title">全局自动执行范围与会话授权</h2>
+            <p>这些服务器目录对所有任务生效；自动审核只放行审核通过的可逆操作，高风险和破坏性动作仍会询问。</p>
           </div>
-          <span class="section-count">{{ trustedRoots.length }} 个目录 · {{ activePermissionGrants.length }} 条授权</span>
+          <span class="section-count">{{ autoReviewRoots.length }} 个目录 · {{ activePermissionGrants.length }} 条授权</span>
         </div>
 
-        <div v-if="activeId && permissionLoading" class="policy-state" role="status">
+        <div v-if="permissionLoading" class="policy-state" role="status">
           <span class="kg-spinner" aria-hidden="true"></span>
-          <div><strong>正在同步授权范围</strong><span>可信目录与操作授权同步完成后再显示。</span></div>
+          <div><strong>正在同步授权范围</strong><span>自动执行范围与操作授权同步完成后再显示。</span></div>
         </div>
 
-        <div v-else-if="activeId && permissionLoadError" class="policy-state is-error" role="alert">
+        <div v-else-if="permissionLoadError" class="policy-state is-error" role="alert">
           <KgIcon name="warning" :size="17" />
           <div><strong>授权范围同步失败</strong><span>{{ permissionLoadError }}</span></div>
           <el-button size="small" :loading="permissionLoading" @click="retryPermissionContext">重新同步</el-button>
@@ -163,34 +196,31 @@
         <template v-else>
         <div class="root-entry">
           <el-input
-            v-model="trustedRootInput"
+            v-model="autoReviewRootInput"
             placeholder="服务器绝对路径，例如 /srv/project/docs"
             :disabled="grantSaving"
             @keyup.enter="addRoot"
           />
-          <el-select v-model="trustedRootLifetime" :disabled="grantSaving" aria-label="授权有效期">
-            <el-option value="session" label="30 分钟" />
-            <el-option value="extended" label="12 小时" />
-          </el-select>
-          <el-button :loading="grantSaving" @click="addRoot">添加可信目录</el-button>
+          <el-button :loading="grantSaving" @click="addRoot">添加范围</el-button>
         </div>
         <p class="server-path-note">
           <KgIcon name="server" :size="13" />
           浏览器本地文件夹不会出现在这里；请输入 Agent 所在服务器上的路径。
         </p>
 
-        <div v-if="trustedRoots.length" class="trusted-root-list">
-          <article v-for="path in trustedRoots" :key="path" class="grant-row trusted-root-row">
+        <div v-if="autoReviewRoots.length" class="auto-review-root-list">
+          <article v-for="path in autoReviewRoots" :key="path" class="grant-row auto-review-root-row">
             <span class="grant-icon"><KgIcon name="disk" :size="15" /></span>
             <div class="grant-copy">
               <code>{{ path }}</code>
-              <span>可创建和修改文件 · 包含子目录</span>
+              <span>{{ permissionMode === 'auto_review' ? '全局自动审核已启用' : '切换到自动审核后生效' }} · 包含子目录</span>
             </div>
-            <span class="grant-lifetime">{{ trustedRootExpiryText }}</span>
+            <span class="grant-lifetime">全局</span>
             <el-button
               text
               type="danger"
               :loading="removingRootPath === path"
+              :disabled="permissionMode === 'auto_review' && path === permissionContext.defaultWorkspaceRoot"
               @click="removeRoot(path)"
             >移除目录</el-button>
           </article>
@@ -198,7 +228,7 @@
 
         <div class="grant-subhead">
           <strong>操作授权</strong>
-          <span>“允许一次”与“本次会话允许”产生的授权，不会成为可信目录。</span>
+          <span>“允许一次”与“本次会话允许”只绑定具体动作，不会扩大自动执行范围。</span>
         </div>
 
         <div v-if="activePermissionGrants.length" class="grant-list">
@@ -430,10 +460,13 @@ import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useApi.js'
 import { activeId, setChatPermissionMode } from '../composables/useChat.js'
 import {
-  PERMISSION_MODES,
-  addTrustedRoot,
+  confirmFullAccessEnable,
+  confirmFullAccessExposure,
+} from '../utils/fullAccessWarnings.js'
+import {
+  addAutoReviewRoot,
+  autoReviewRoots,
   fullAccessActive,
-  fullAccessDurationMinutes,
   executionIdentitySourceLabel,
   loadPermissionContext,
   permissionContext,
@@ -443,8 +476,9 @@ import {
   permissionMode,
   permissionModeMeta,
   revokePermissionGrant,
-  revokeTrustedRoot,
-  trustedRoots,
+  revokeAutoReviewRoot,
+  setFullAccessVisibility,
+  visiblePermissionModes,
 } from '../composables/usePermissions.js'
 
 const custom = ref([])
@@ -457,39 +491,25 @@ const saving = ref(false)
 const removingId = ref(null)
 const form = reactive({ kind: 'blacklist', pattern: '', note: '' })
 const permissionChanging = ref(false)
+const fullAccessVisibilityChanging = ref(false)
 const grantSaving = ref(false)
 const removingGrantId = ref('')
 const removingRootPath = ref('')
-const trustedRootInput = ref('')
-const trustedRootLifetime = ref('session')
+const autoReviewRootInput = ref('')
 const policyTab = ref('access')
 const permissionModeButtonRefs = new Map()
 let policyRequest = 0
 
 const permissionSyncText = computed(() => {
-  if (permissionLoading.value) return '正在同步当前任务权限…'
+  if (permissionLoading.value) return '正在同步全局权限…'
   if (permissionLoadError.value) return '权限同步失败'
   if (permissionContext.synced) return '已与服务器同步'
-  if (activeId.value) return '当前任务权限尚未同步'
-  return '新任务设置将在创建时应用'
+  return '全局权限尚未同步'
 })
 
 const activePermissionGrants = computed(() => permissionGrants.value.filter(
   (grant) => !grant.revoked,
 ))
-const trustedRootExpiryText = computed(() => {
-  if (permissionContext.expiresAt) {
-    return `有效至 ${new Date(permissionContext.expiresAt).toLocaleTimeString('zh-CN', {
-      hour: '2-digit', minute: '2-digit',
-    })}`
-  }
-  if (permissionContext.draftTtlSeconds) {
-    return permissionContext.draftTtlSeconds >= 3600
-      ? `${Math.round(permissionContext.draftTtlSeconds / 3600)} 小时`
-      : `${Math.round(permissionContext.draftTtlSeconds / 60)} 分钟`
-  }
-  return '当前会话'
-})
 
 const kindLabel = (kind) => ({
   blacklist: '命令风险', readonly: '可信命令', protected: '保护路径',
@@ -528,7 +548,7 @@ function permissionModeUnavailable(mode) {
 }
 
 function navigablePermissionModes() {
-  return PERMISSION_MODES.filter(mode => !permissionModeUnavailable(mode.value))
+  return visiblePermissionModes.value.filter(mode => !permissionModeUnavailable(mode.value))
 }
 
 function permissionModeTabIndex(mode) {
@@ -587,24 +607,21 @@ async function choosePermissionMode(mode) {
     ElMessage.info(permissionContext.fullAccessUnavailableReason || '服务端未开放完全访问')
     return
   }
-  if (mode === 'trusted_workspace' && !trustedRoots.value.length) {
-    ElMessage.info('请先在下方添加一个可信目录')
-    return
-  }
   permissionChanging.value = true
   try {
-    const result = await setChatPermissionMode(mode, mode === 'full_access'
-      ? { durationMinutes: fullAccessDurationMinutes.value }
-      : mode === 'trusted_workspace'
-        ? {
-          trustedRoots: trustedRoots.value,
-          ttlSeconds: permissionContext.draftTtlSeconds || 30 * 60,
-        }
+    if (mode === 'full_access') {
+      await confirmFullAccessEnable({
+        executorIdentity: permissionContext.executorIdentity,
+        grantsRoot: permissionContext.grantsRoot,
+      })
+    }
+    const result = await setChatPermissionMode(mode, mode === 'auto_review'
+        ? { autoReviewRoots: autoReviewRoots.value }
         : {})
-    if (!result.supported && activeId.value) {
-      ElMessage.warning('当前后端未保存此设置，任务权限未更改')
+    if (!result.supported) {
+      ElMessage.warning('当前后端未保存全局权限设置')
     } else {
-      ElMessage.success(mode === 'full_access' ? '完整执行能力已开启' : '权限已更新')
+      ElMessage.success(mode === 'full_access' ? '全局完整执行能力已开启' : '全局权限已更新')
     }
   } catch (reason) {
     if (reason === 'cancel' || reason === 'close' || reason?.action === 'cancel') return
@@ -614,8 +631,38 @@ async function choosePermissionMode(mode) {
   }
 }
 
+async function changeFullAccessVisibility(visible) {
+  if (fullAccessVisibilityChanging.value) return
+  fullAccessVisibilityChanging.value = true
+  try {
+    if (visible) {
+      await confirmFullAccessExposure({ grantsRoot: permissionContext.grantsRoot })
+    } else if (fullAccessActive.value) {
+      await ElMessageBox.confirm(
+        '隐藏入口会立即收回当前全局完全访问并恢复为“确认后执行”。已经开始的系统调用无法回滚。',
+        '隐藏并收回完全访问',
+        {
+          type: 'warning',
+          confirmButtonText: '隐藏并立即收回',
+          cancelButtonText: '取消',
+          distinguishCancelAndClose: true,
+        },
+      )
+    }
+    await setFullAccessVisibility(visible)
+    ElMessage.success(visible
+      ? '完全访问入口已显示，当前并未启用'
+      : '完全访问入口已隐藏')
+  } catch (reason) {
+    if (reason === 'cancel' || reason === 'close' || reason?.action === 'cancel') return
+    ElMessage.error(reason.message || '完全访问入口更新失败')
+  } finally {
+    fullAccessVisibilityChanging.value = false
+  }
+}
+
 async function retryPermissionContext() {
-  if (!activeId.value || permissionLoading.value) return
+  if (permissionLoading.value) return
   try {
     await loadPermissionContext(activeId.value)
   } catch {
@@ -625,25 +672,22 @@ async function retryPermissionContext() {
 
 async function addRoot() {
   if (grantSaving.value) return
-  const path = trustedRootInput.value.trim()
+  const path = autoReviewRootInput.value.trim()
   if (!path) {
     ElMessage.warning('请输入服务器目录')
     return
   }
   grantSaving.value = true
   try {
-    const result = await addTrustedRoot(path, { lifetime: trustedRootLifetime.value })
+    const result = await addAutoReviewRoot(path)
     if (result.supported) {
-      trustedRootInput.value = ''
-      ElMessage.success('可信目录已添加')
-    } else if (result.reason === 'draft') {
-      trustedRootInput.value = ''
-      ElMessage.success('已加入新任务草稿，将随首条消息提交')
+      autoReviewRootInput.value = ''
+      ElMessage.success('自动执行范围已添加')
     } else {
-      ElMessage.warning('当前后端未保存可信目录，任务权限未更改')
+      ElMessage.warning('当前后端未保存全局自动执行范围')
     }
   } catch (reason) {
-    ElMessage.error(reason.message || '可信目录添加失败')
+    ElMessage.error(reason.message || '自动执行范围添加失败')
   } finally {
     grantSaving.value = false
   }
@@ -666,10 +710,10 @@ async function removeRoot(path) {
   if (removingRootPath.value) return
   removingRootPath.value = path
   try {
-    await revokeTrustedRoot(path)
-    ElMessage.success('可信目录已移除')
+    await revokeAutoReviewRoot(path)
+    ElMessage.success('自动执行范围已移除')
   } catch (reason) {
-    ElMessage.error(reason.message || '可信目录移除失败')
+    ElMessage.error(reason.message || '自动执行范围移除失败')
   } finally {
     removingRootPath.value = ''
   }
@@ -757,7 +801,7 @@ async function remove(id) {
 
 onMounted(() => {
   refresh()
-  if (activeId.value) loadPermissionContext(activeId.value).catch(() => {})
+  loadPermissionContext(activeId.value).catch(() => {})
 })
 </script>
 
@@ -825,7 +869,7 @@ onMounted(() => {
 
 .mode-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: var(--kg-space-2);
 }
 
@@ -859,6 +903,57 @@ onMounted(() => {
 .mode-selected { margin-left: auto; color: var(--kg-accent); }
 .mode-card.is-danger .mode-card-head :deep(.kg-icon) { color: var(--kg-danger); }
 
+.full-access-visibility {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--kg-space-3);
+  margin-top: var(--kg-space-3);
+  padding: 12px;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-bg-surface-2);
+}
+.full-access-visibility.exposed {
+  border-color: var(--kg-danger-border);
+  background: var(--kg-danger-soft);
+}
+.full-access-visibility-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--kg-danger-soft);
+  color: var(--kg-danger);
+}
+.full-access-visibility-copy { display: grid; gap: 3px; }
+.full-access-visibility strong { color: var(--kg-text-primary); font-size: 12px; }
+.full-access-visibility p,
+.full-access-visibility small {
+  margin: 0;
+  color: var(--kg-text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.full-access-visibility small { color: var(--kg-danger); }
+.full-access-visibility-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.full-access-visibility-control > span {
+  min-width: 36px;
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+  text-align: right;
+}
+.full-access-visibility-control > span.active {
+  color: var(--kg-danger);
+  font-weight: 600;
+}
+
 .effective-access {
   min-height: 52px;
   display: flex;
@@ -891,7 +986,7 @@ onMounted(() => {
 .root-access-warning strong { font-size: 12px; font-weight: 650; }
 .root-access-warning span { color: var(--kg-text-secondary); font-size: 11px; line-height: 1.5; }
 
-.root-entry { display: grid; grid-template-columns: minmax(0, 1fr) 118px auto; gap: var(--kg-space-2); }
+.root-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--kg-space-2); }
 .server-path-note {
   display: flex;
   align-items: center;
@@ -902,8 +997,8 @@ onMounted(() => {
 }
 
 .grant-list { display: grid; gap: 1px; margin-top: var(--kg-space-3); }
-.trusted-root-list { display: grid; gap: 1px; margin-top: var(--kg-space-3); }
-.trusted-root-row { border-color: var(--kg-success-border); }
+.auto-review-root-list { display: grid; gap: 1px; margin-top: var(--kg-space-3); }
+.auto-review-root-row { border-color: var(--kg-success-border); }
 .grant-subhead {
   display: flex;
   align-items: baseline;
@@ -1102,7 +1197,7 @@ onMounted(() => {
   .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .effective-access { align-items: flex-start; flex-wrap: wrap; }
   .execution-facts { width: 100%; flex-wrap: wrap; }
-  .root-entry { grid-template-columns: minmax(0, 1fr) 118px; }
+  .root-entry { grid-template-columns: minmax(0, 1fr) auto; }
   .root-entry > :deep(.el-button) { grid-column: 1 / -1; justify-self: end; }
   .rule-row { grid-template-columns: minmax(150px, .9fr) minmax(190px, 1.2fr); }
 }
