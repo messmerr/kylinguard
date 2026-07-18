@@ -16,12 +16,12 @@ from kylinguard.models import (
     PermissionGrant,
     PermissionGrantScope,
     PermissionMode,
-    SessionPermissionContext,
+    PermissionContext,
 )
 from kylinguard.permissions import (
     PermissionError,
     PermissionVersionConflict,
-    normalize_trusted_roots,
+    normalize_auto_review_roots,
 )
 
 _SCHEMA = """
@@ -33,17 +33,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     draft INTEGER NOT NULL DEFAULT 0,
     workspace_root TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS session_permissions (
-    session_id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS permission_settings (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     mode TEXT NOT NULL DEFAULT 'ask',
-    trusted_roots TEXT NOT NULL DEFAULT '[]',
-    expires_at REAL,
-    expiry_observed_at REAL,
+    auto_review_roots TEXT NOT NULL DEFAULT '[]',
+    full_access_visible INTEGER NOT NULL DEFAULT 0,
     version INTEGER NOT NULL DEFAULT 1,
     updated_at REAL NOT NULL,
     updated_by TEXT NOT NULL DEFAULT '',
-    execution_profile TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    execution_profile TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS permission_grants (
     id TEXT PRIMARY KEY,
@@ -80,10 +78,9 @@ def _migrate_permission_schema(connection: sqlite3.Connection) -> None:
             "draft": "INTEGER NOT NULL DEFAULT 0",
             "workspace_root": "TEXT NOT NULL DEFAULT ''",
         },
-        "session_permissions": {
-            "trusted_roots": "TEXT NOT NULL DEFAULT '[]'",
-            "expires_at": "REAL",
-            "expiry_observed_at": "REAL",
+        "permission_settings": {
+            "auto_review_roots": "TEXT NOT NULL DEFAULT '[]'",
+            "full_access_visible": "INTEGER NOT NULL DEFAULT 0",
             "version": "INTEGER NOT NULL DEFAULT 1",
             "updated_at": "REAL NOT NULL DEFAULT 0",
             "updated_by": "TEXT NOT NULL DEFAULT ''",
@@ -124,6 +121,14 @@ class SessionStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
         _migrate_permission_schema(self._conn)
+        self._conn.execute(
+            "INSERT OR IGNORE INTO permission_settings"
+            "(singleton, mode, auto_review_roots, full_access_visible, "
+            "version, updated_at, updated_by, execution_profile) "
+            "VALUES (1,'ask','[]',0,1,?,'','')",
+            (time.time(),),
+        )
+        self._conn.commit()
         self._conn.executescript(_INDEXES)
         self._lock = threading.RLock()
 
@@ -144,19 +149,12 @@ class SessionStore:
         session_id: str,
         title: str,
         *,
-        permission_mode: PermissionMode = PermissionMode.ASK,
-        trusted_roots: list[str] | None = None,
-        permission_expires_at: float | None = None,
-        permission_execution_profile: str = "",
-        updated_by: str = "",
         draft: bool = False,
         workspace_root: str = "",
         strict: bool = False,
         commit: bool = True,
     ) -> None:
         now = time.time()
-        roots = self._validate_permission_values(
-            permission_mode, trusted_roots or [], permission_expires_at, now)
         with self._lock:
             insert_session = (
                 "INSERT INTO sessions(id, title, created_at, updated_at, draft, "
@@ -184,16 +182,6 @@ class SessionStore:
                         "session_already_exists", "会话标识已存在。"
                     ) from exc
                 raise
-            self._conn.execute(
-                "INSERT OR IGNORE INTO session_permissions"
-                "(session_id, mode, trusted_roots, expires_at, version, "
-                "updated_at, updated_by, execution_profile) "
-                "VALUES (?,?,?,?,1,?,?,?)",
-                (session_id, permission_mode.value,
-                 json.dumps(roots, ensure_ascii=False),
-                 permission_expires_at, now, updated_by,
-                 permission_execution_profile),
-            )
             if commit:
                 self._conn.commit()
 
@@ -241,172 +229,149 @@ class SessionStore:
             rows = self._conn.execute(query).fetchall()
             result = []
             for row in rows:
-                permission = self._get_permissions_locked(row[0], time.time())
                 result.append({
                     "id": row[0], "title": row[1],
                     "created_at": row[2], "updated_at": row[3],
                     "draft": bool(row[4]),
                     "workspace_root": row[5],
-                    "permission_mode": permission.mode.value,
-                    "permission_version": permission.version,
-                    "permission_expires_at": permission.expires_at,
                 })
             return result
 
     @staticmethod
     def _validate_permission_values(
         mode: PermissionMode,
-        trusted_roots: list[str],
-        expires_at: float | None,
-        now: float,
+        auto_review_roots: list[str],
     ) -> list[str]:
         try:
             mode = PermissionMode(mode)
         except ValueError as exc:
             raise PermissionError("invalid_permission_mode", "未知的权限模式。") from exc
-        roots = normalize_trusted_roots(trusted_roots)
-        if mode == PermissionMode.TRUSTED_WORKSPACE:
-            if not roots:
-                raise PermissionError(
-                    "trusted_roots_required", "信任目录模式至少需要一个可信目录。"
-                )
-            if expires_at is None or expires_at <= now:
-                raise PermissionError(
-                    "permission_ttl_required", "信任目录模式必须设置尚未到期的有效期。"
-                )
-        elif mode == PermissionMode.FULL_ACCESS:
-            if roots:
-                raise PermissionError(
-                    "trusted_roots_not_applicable", "完全访问模式不能同时设置可信目录。"
-                )
-            if expires_at is None or expires_at <= now:
-                raise PermissionError(
-                    "permission_ttl_required", "完全访问模式必须设置尚未到期的有效期。"
-                )
-        else:
-            if roots:
-                raise PermissionError(
-                    "trusted_roots_not_applicable", "当前权限模式不能设置可信目录。"
-                )
-            if expires_at is not None:
-                raise PermissionError(
-                    "permission_ttl_not_applicable", "当前权限模式不需要有效期。"
-                )
-        return roots
+        return normalize_auto_review_roots(auto_review_roots)
 
-    def _ensure_permission_locked(self, session_id: str) -> tuple | None:
+    def _get_permission_settings_locked(self) -> PermissionContext:
+        row = self._conn.execute(
+            "SELECT mode, auto_review_roots, full_access_visible, version, "
+            "updated_at, updated_by, execution_profile "
+            "FROM permission_settings WHERE singleton=1",
+        ).fetchone()
+        assert row is not None
+        return PermissionContext(
+            mode=PermissionMode(row[0]),
+            auto_review_roots=json.loads(row[1]),
+            full_access_visible=bool(row[2]),
+            version=row[3],
+            updated_at=row[4],
+            updated_by=row[5],
+            execution_profile=row[6],
+        )
+
+    def get_permission_settings(self) -> PermissionContext:
+        with self._lock:
+            return self._get_permission_settings_locked()
+
+    def _get_permissions_locked(self, session_id: str) -> PermissionContext | None:
         if self._conn.execute(
             "SELECT 1 FROM sessions WHERE id=?", (session_id,)
         ).fetchone() is None:
             return None
-        row = self._conn.execute(
-            "SELECT mode, trusted_roots, expires_at, version, updated_at, "
-            "updated_by, expiry_observed_at, execution_profile "
-            "FROM session_permissions "
-            "WHERE session_id=?",
-            (session_id,),
-        ).fetchone()
-        if row is None:  # 兼容引入权限表前创建的会话
-            now = time.time()
-            owned_transaction = not self._conn.in_transaction
-            self._conn.execute(
-                "INSERT INTO session_permissions"
-                "(session_id, mode, trusted_roots, expires_at, version, "
-                "updated_at, updated_by, execution_profile) "
-                "VALUES (?,'ask','[]',NULL,1,?,'','')",
-                (session_id, now),
-            )
-            if owned_transaction:
-                self._conn.commit()
-            row = ("ask", "[]", None, 1, now, "", None, "")
-        return row
+        return self._get_permission_settings_locked().model_copy(
+            update={"session_id": session_id})
 
-    def _get_permissions_locked(
-        self, session_id: str, now: float
-    ) -> SessionPermissionContext | None:
-        row = self._ensure_permission_locked(session_id)
-        if row is None:
-            return None
-        mode = PermissionMode(row[0])
-        roots = json.loads(row[1])
-        expired = row[6] is not None or (row[2] is not None and now >= row[2])
-        if expired and row[6] is None:
-            owned_transaction = not self._conn.in_transaction
-            self._conn.execute(
-                "UPDATE session_permissions SET expiry_observed_at=? "
-                "WHERE session_id=? AND expiry_observed_at IS NULL",
-                (now, session_id),
-            )
-            if owned_transaction:
-                self._conn.commit()
-        if expired:
-            mode = PermissionMode.ASK
-            roots = []
-        return SessionPermissionContext(
-            session_id=session_id,
-            mode=mode,
-            trusted_roots=roots,
-            expires_at=row[2],
-            version=row[3],
-            updated_at=row[4],
-            updated_by=row[5],
-            expired=expired,
-            execution_profile=row[7],
-        )
-
-    def get_permissions(
-        self, session_id: str, *, now: float | None = None
-    ) -> SessionPermissionContext | None:
+    def get_permissions(self, session_id: str) -> PermissionContext | None:
         with self._lock:
-            return self._get_permissions_locked(
-                session_id, time.time() if now is None else now)
+            return self._get_permissions_locked(session_id)
 
     # 供流水线使用的语义化别名。
     get_permission_context = get_permissions
 
-    def set_permissions(
+    def set_permission_settings(
         self,
-        session_id: str,
         *,
         mode: PermissionMode,
-        trusted_roots: list[str] | None,
-        expires_at: float | None,
+        auto_review_roots: list[str] | None,
         expected_version: int,
         updated_by: str,
         execution_profile: str = "",
         commit: bool = True,
-    ) -> SessionPermissionContext:
+    ) -> PermissionContext:
         now = time.time()
         mode = PermissionMode(mode)
-        roots = self._validate_permission_values(
-            mode, trusted_roots or [], expires_at, now)
+        roots = self._validate_permission_values(mode, auto_review_roots or [])
         with self._lock:
-            row = self._ensure_permission_locked(session_id)
-            if row is None:
-                raise PermissionError("session_not_found", "会话不存在。")
-            if row[3] != expected_version:
+            row = self._conn.execute(
+                "SELECT version FROM permission_settings WHERE singleton=1"
+            ).fetchone()
+            assert row is not None
+            if row[0] != expected_version:
                 raise PermissionVersionConflict()
             next_version = expected_version + 1
             self._conn.execute(
-                "UPDATE session_permissions SET mode=?, trusted_roots=?, "
-                "expires_at=?, expiry_observed_at=NULL, version=?, "
-                "updated_at=?, updated_by=?, execution_profile=? "
-                "WHERE session_id=? AND version=?",
-                (mode.value, json.dumps(roots, ensure_ascii=False), expires_at,
-                 next_version, now, updated_by, execution_profile,
-                 session_id, expected_version),
+                "UPDATE permission_settings SET mode=?, auto_review_roots=?, "
+                "version=?, updated_at=?, updated_by=?, execution_profile=? "
+                "WHERE singleton=1 AND version=?",
+                (mode.value, json.dumps(roots, ensure_ascii=False), next_version,
+                 now, updated_by, execution_profile,
+                 expected_version),
             )
-            # 权限上下文改变后，旧上下文版本签发的授权全部失效。
+            # 全局权限上下文改变后，所有会话中旧版本签发的授权全部失效。
             self._conn.execute(
-                "UPDATE permission_grants SET revoked_at=? WHERE session_id=? "
-                "AND revoked_at IS NULL AND consumed_at IS NULL",
-                (now, session_id),
+                "UPDATE permission_grants SET revoked_at=? "
+                "WHERE revoked_at IS NULL AND consumed_at IS NULL",
+                (now,),
             )
             if commit:
                 self._conn.commit()
-            context = self._get_permissions_locked(session_id, now)
-            assert context is not None
-            return context
+            return self._get_permission_settings_locked()
+
+    def set_full_access_visibility(
+        self,
+        *,
+        visible: bool,
+        expected_version: int,
+        updated_by: str,
+        commit: bool = True,
+    ) -> PermissionContext:
+        """单独揭示或隐藏完全访问入口。
+
+        隐藏入口时若完全访问正在生效，会在同一事务中立即回落到 ASK。普通
+        揭示/隐藏不改变执行授权版本，也不会使既有会话动作授权失效；只有
+        隐藏正在生效的完全访问时才递增权限版本并收回授权。
+        """
+        now = time.time()
+        visible = bool(visible)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT mode, version FROM permission_settings WHERE singleton=1"
+            ).fetchone()
+            assert row is not None
+            if row[1] != expected_version:
+                raise PermissionVersionConflict()
+            revoke_full_access = not visible and row[0] == PermissionMode.FULL_ACCESS.value
+            if revoke_full_access:
+                next_version = expected_version + 1
+                self._conn.execute(
+                    "UPDATE permission_settings SET full_access_visible=0, "
+                    "mode='ask', execution_profile='', version=?, "
+                    "updated_at=?, updated_by=? "
+                    "WHERE singleton=1 AND version=?",
+                    (next_version, now, updated_by, expected_version),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE permission_settings SET full_access_visible=?, "
+                    "updated_at=?, updated_by=? "
+                    "WHERE singleton=1 AND version=?",
+                    (int(visible), now, updated_by, expected_version),
+                )
+            if revoke_full_access:
+                self._conn.execute(
+                    "UPDATE permission_grants SET revoked_at=? "
+                    "WHERE revoked_at IS NULL AND consumed_at IS NULL",
+                    (now,),
+                )
+            if commit:
+                self._conn.commit()
+            return self._get_permission_settings_locked()
 
     def add_grant(
         self,
@@ -430,7 +395,7 @@ class SessionStore:
             raise PermissionError("invalid_permission_ttl", "授权有效期已经结束。")
         scope = PermissionGrantScope(scope)
         with self._lock:
-            context = self._get_permissions_locked(session_id, now)
+            context = self._get_permissions_locked(session_id)
             if context is None:
                 raise PermissionError("session_not_found", "会话不存在。")
             if context.version != context_version:
@@ -497,8 +462,8 @@ class SessionStore:
         grants = [self._grant_from_row(row) for row in rows]
         if not active_only:
             return grants
-        context = self.get_permissions(session_id, now=at)
-        if context is None or context.expired:
+        context = self.get_permissions(session_id)
+        if context is None:
             return []
         return [
             grant for grant in grants

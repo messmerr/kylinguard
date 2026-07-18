@@ -4,8 +4,8 @@ import pytest
 
 from kylinguard.authorization import (
     apply_permission_mode,
+    auto_review_scope_allows,
     describe_action,
-    trusted_workspace_allows,
 )
 from kylinguard.mcp_config import default_mcp_secrets_directory
 from kylinguard.config import Settings
@@ -18,16 +18,15 @@ from kylinguard.models import (
     RiskLevel,
     RuleDecision,
     RuleVerdict,
-    SessionPermissionContext,
+    PermissionContext,
     ToolMeta,
 )
 
 
-def _context(mode, roots=None, *, expired=False):
-    return SessionPermissionContext(
-        session_id="s", mode=mode, trusted_roots=roots or [],
-        expires_at=time.time() + 300, version=1, updated_at=time.time(),
-        expired=expired,
+def _context(mode, roots=None):
+    return PermissionContext(
+        session_id="s", mode=mode, auto_review_roots=roots or [],
+        version=1, updated_at=time.time(),
     )
 
 
@@ -55,23 +54,38 @@ def test_只读模式拒绝普通文件写入(tmp_path):
     assert decision.action == GateAction.DENY
 
 
-def test_可信目录自动允许创建和修改但不允许删除(tmp_path):
+def test_自动审核在授权范围内允许可逆修改但不允许删除(tmp_path):
     root = tmp_path / "docs"
     action = _file_action(tmp_path, path=str(root / "note.md"))
-    context = _context(PermissionMode.TRUSTED_WORKSPACE, [str(root)])
-    assert trusted_workspace_allows(context, action)
+    context = _context(PermissionMode.AUTO_REVIEW, [str(root)])
+    assert auto_review_scope_allows(context, action)
     assert apply_permission_mode(context, action, _base()).action == GateAction.AUTO
 
     delete = _file_action(tmp_path, tool="delete", path=str(root / "note.md"))
-    assert not trusted_workspace_allows(context, delete)
+    assert not auto_review_scope_allows(context, delete)
     assert apply_permission_mode(context, delete, _base(
         GateAction.DOUBLE_CONFIRM, RiskLevel.HIGH)).action == GateAction.DOUBLE_CONFIRM
 
 
-def test_过期可信目录回退到逐项确认(tmp_path):
+def test_自动审核在reviewer不可用时回退到逐项确认(tmp_path):
     action = _file_action(tmp_path)
-    context = _context(PermissionMode.TRUSTED_WORKSPACE, [str(tmp_path)], expired=True)
-    assert apply_permission_mode(context, action, _base()).action == GateAction.CONFIRM
+    context = _context(PermissionMode.AUTO_REVIEW, [str(tmp_path)])
+    assert apply_permission_mode(
+        context, action, _base(), review_approved=False,
+    ).action == GateAction.CONFIRM
+
+
+def test_自动审核不会越过授权范围(tmp_path):
+    allowed = tmp_path / "allowed"
+    action = _file_action(
+        tmp_path, path=str(tmp_path / "outside" / "note.md"),
+    )
+    context = _context(PermissionMode.AUTO_REVIEW, [str(allowed)])
+
+    assert not auto_review_scope_allows(context, action)
+    assert apply_permission_mode(
+        context, action, _base(),
+    ).action == GateAction.CONFIRM
 
 
 def test_完全访问覆盖产品路径限制但仍受OS身份约束(tmp_path):

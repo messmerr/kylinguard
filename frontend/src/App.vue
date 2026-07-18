@@ -46,15 +46,14 @@
 </template>
 
 <script setup>
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { activeId, refreshSessions, sessions } from './composables/useChat.js'
 import { loadExtensions } from './composables/useExtensions.js'
 import { loadModelConfig } from './composables/useModels.js'
 import {
   fullAccessActive,
-  fullAccessRemainingMs,
-  expirePermissionContext,
+  loadPermissionContext,
   permissionContext,
   revokeFullAccess,
 } from './composables/usePermissions.js'
@@ -91,35 +90,11 @@ const currentContext = computed(() => {
   return sessions.value.find((item) => item.id === activeId.value)?.title || ''
 })
 
-const permissionNow = ref(Date.now())
 const revokingAccess = ref(false)
-let permissionTimer = null
-
-watch(() => [permissionContext.mode, permissionContext.expiresAt], ([mode, expiresAt]) => {
-  if (permissionTimer) clearInterval(permissionTimer)
-  permissionTimer = null
-  if (['full_access', 'trusted_workspace'].includes(mode) && expiresAt) {
-    permissionNow.value = Date.now()
-    permissionTimer = setInterval(() => {
-      permissionNow.value = Date.now()
-      const expiringMode = permissionContext.mode
-      if (expirePermissionContext(permissionNow.value)) {
-        ElMessage.info(expiringMode === 'full_access'
-          ? '完全访问已到期，权限已恢复为“确认后执行”'
-          : '可信目录授权已到期，后续修改会再次询问')
-      }
-    }, 1000)
-  }
-}, { immediate: true })
-onUnmounted(() => permissionTimer && clearInterval(permissionTimer))
 
 const fullAccessStatusText = computed(() => {
   const identity = permissionContext.executorIdentity || '未配置独立执行账号'
-  const remaining = fullAccessRemainingMs(permissionNow.value)
-  if (remaining == null) return `${identity} · 本次会话`
-  if (remaining <= 0) return `${identity} · 即将到期`
-  if (remaining >= 60_000) return `${identity} · 还剩 ${Math.ceil(remaining / 60_000)} 分钟`
-  return `${identity} · 还剩 ${Math.ceil(remaining / 1000)} 秒`
+  return `${identity} · 持续生效`
 })
 
 async function stopFullAccess() {
@@ -160,6 +135,7 @@ function restoreStatusFocus() {
 }
 
 refreshSessions().catch(() => {})
+loadPermissionContext().catch(() => {})
 loadExtensions().catch(() => {})
 loadModelConfig().catch(() => {})
 </script>

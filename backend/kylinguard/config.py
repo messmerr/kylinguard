@@ -41,12 +41,11 @@ class Settings(BaseSettings):
     exec_user: str = ""  # 生产环境设为 kylinguard-exec；空 = 当前用户（开发）
     privileged_helper: str = ""  # 生产环境设为 root-owned 受限 helper；空 = 不启用
 
-    # 会话权限。full_access 默认可用；显式设为 false 才关闭。它以配置的
-    # exec_user 或后端当前 OS 身份执行，并受 TTL 限制。
+    # 全局审批权限。full_access 默认可用；显式设为 false 才关闭。它以配置的
+    # exec_user 或后端当前 OS 身份执行。完全访问持续到手动收回、入口隐藏、服务端禁用或后端重启。
     allow_full_access: bool = True
+    # 以下 TTL 仅用于会话内的单次/同类操作授权，不限制全局权限模式。
     permission_default_ttl: int = 30 * 60
-    permission_max_ttl: int = 12 * 3600
-    full_access_max_ttl: int = 30 * 60
 
     # 感知
     snapshot_interval: int = 30  # 快照后台轮询间隔（秒）

@@ -210,3 +210,18 @@
 .el-overlay {
   background: var(--kg-overlay);
 }
+.kg-critical-confirm.el-message-box {
+  border: 2px solid var(--kg-danger-border);
+  box-shadow: 0 20px 60px color-mix(in srgb, var(--kg-danger) 24%, transparent);
+}
+
+.kg-critical-confirm .el-message-box__title,
+.kg-critical-confirm .el-message-box__status.el-message-box-icon--error {
+  color: var(--kg-danger);
+}
+
+.kg-critical-confirm .el-message-box__message {
+  color: var(--kg-text-primary);
+  font-weight: 550;
+  line-height: 1.65;
+}

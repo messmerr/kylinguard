@@ -484,7 +484,7 @@ class Pipeline:
         return bool(lock and lock.locked())
 
     def _effective_permission_context(self, context):
-        """服务端 kill switch 永远优先于数据库中尚未到期的旧会话。"""
+        """服务端 kill switch 与执行边界变化永远优先于数据库中的完全访问状态。"""
         if (context is not None
                 and context.mode == PermissionMode.FULL_ACCESS
                 and (
@@ -497,9 +497,6 @@ class Pipeline:
                 )):
             return context.model_copy(update={
                 "mode": PermissionMode.ASK,
-                "trusted_roots": [],
-                "expires_at": None,
-                "expired": True,
             })
         return context
 
@@ -847,7 +844,6 @@ class Pipeline:
         full_access_active = bool(
             permission_context is not None
             and permission_context.mode == PermissionMode.FULL_ACCESS
-            and not permission_context.expired
         )
         intent = screen_user_intent(user_query)
         if intent.decision == RuleDecision.DENY:
@@ -1003,9 +999,10 @@ class Pipeline:
                     "确认后执行：完整工具能力可用；需要修改时正常提出工具调用，"
                     "系统会向管理员请求授权。"
                 ),
-                PermissionMode.TRUSTED_WORKSPACE: (
-                    "信任目录：可信目录内的结构化文件编辑可自动执行；"
-                    "其他完整能力仍可提出并由系统按需确认。"
+                PermissionMode.AUTO_REVIEW: (
+                    "自动审核：正常提出完成任务所需的工具调用；静态规则与独立 "
+                    "Reviewer 通过的可逆操作会在授权范围内自动执行，高风险、"
+                    "破坏性、越界或审核异常的动作仍会询问管理员。"
                 ),
                 PermissionMode.FULL_ACCESS: (
                     "完全访问：完整 shell、文件、网络与进程能力可用且不逐项确认；"
@@ -1331,7 +1328,6 @@ class Pipeline:
         full_access_active = bool(
             permission_context is not None
             and permission_context.mode == PermissionMode.FULL_ACCESS
-            and not permission_context.expired
         )
         policy_revision = 0
         extra_policies = None
@@ -1518,9 +1514,28 @@ class Pipeline:
                 review_kwargs["intent_history"] = (
                     self._review_intent_history(session_id, user_query)
                 )
-            review = await self._reviewer.review(
-                user_query, env_summary, action_desc, **review_kwargs,
-            )
+            try:
+                review = await self._reviewer.review(
+                    user_query, env_summary, action_desc, **review_kwargs,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                review = ReviewVerdict(
+                    safe=True,
+                    matches_intent=True,
+                    risk=step.risk,
+                    reason=(
+                        "独立 Reviewer 暂时不可用；本次动作降级为人工确认。"
+                    ),
+                    available=False,
+                )
+                await record("review_failed", {
+                    "step_id": step_id,
+                    "tool": step.tool,
+                    "error_type": type(exc).__name__,
+                    "fallback": "manual_confirmation",
+                })
         # 普通模式下 Reviewer 只提升风险/确认强度；完全访问已在上方明确
         # 跳过该在线依赖。仅协议/参数级 hard deny 保持不可覆盖。
         base_decision = decide(meta, rule, review, step.risk)
@@ -1538,6 +1553,9 @@ class Pipeline:
                 permission_context, action, base_decision,
                 has_grant=grant is not None,
                 grant_scope=grant.scope if grant else None,
+                review_approved=(
+                    review.available and review.safe and review.matches_intent
+                ),
             )
             if permission_context is not None else base_decision
         )
@@ -1606,8 +1624,10 @@ class Pipeline:
                     permission_options = ["deny", "allow_once"]
                 else:
                     permission_options = ["deny", "allow_once", "allow_session"]
-                    if action.suggested_path:
-                        permission_options.append("trust_path")
+                    if (action.suggested_path
+                            and permission_context.mode
+                            == PermissionMode.AUTO_REVIEW):
+                        permission_options.append("authorize_path")
                 await record("permission_request", {
                     "request_id": request_id,
                     "step_id": step_id,
@@ -1658,7 +1678,7 @@ class Pipeline:
                     "approved": approved,
                     "operator": resolution.operator,
                     "grant_id": resolution.grant_id,
-                    "trusted_path": resolution.trusted_path,
+                    "authorized_path": resolution.authorized_path,
                     "timed_out": timed_out,
                 })
                 if not approved:
@@ -1670,7 +1690,7 @@ class Pipeline:
                         do_not_retry=True,
                     )
             else:
-                # 兼容未注入会话权限存储的单元测试与嵌入式调用。
+                # 兼容未注入权限存储的单元测试与嵌入式调用。
                 confirm_id, fut = self.confirmations.create()
                 await record("confirm_request", {
                     "confirm_id": confirm_id, "step_id": step_id,
@@ -1717,7 +1737,7 @@ class Pipeline:
                     if fresh_context is None:
                         authorization_failure = {
                             "code": "permission_context_missing",
-                            "message": "会话权限上下文已不存在，未启动工具。",
+                            "message": "权限上下文已不存在，未启动工具。",
                             "current_context_version": None,
                         }
                     else:
@@ -1738,6 +1758,11 @@ class Pipeline:
                             has_grant=fresh_grant is not None,
                             grant_scope=(fresh_grant.scope
                                          if fresh_grant else None),
+                            review_approved=(
+                                review.available
+                                and review.safe
+                                and review.matches_intent
+                            ),
                         )
                         if fresh_decision.action != GateAction.AUTO:
                             authorization_failure = {

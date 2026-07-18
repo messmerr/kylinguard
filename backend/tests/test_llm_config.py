@@ -860,7 +860,7 @@ async def test模型配置变更与审计同事务失败会完整回滚(tmp_path
         assert after["version"] == before["version"]
 
 
-async def test会话模型绑定失败不会留下普通或完全访问幽灵会话(tmp_path, monkeypatch):
+async def test会话模型绑定失败不会留下幽灵会话(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
     app = create_app(settings, with_tools=False)
     app.state.llm_config.create_provider(
@@ -886,13 +886,3 @@ async def test会话模型绑定失败不会留下普通或完全访问幽灵会
             "/api/chat", headers=headers, json={"message": "不能留下幽灵会话"})
         assert ordinary.status_code == 400
         assert app.state.sessions.list() == []
-
-        draft_id = "a" * 32
-        full_access = await client.post("/api/sessions", headers=headers, json={
-            "session_id": draft_id,
-            "mode": "full_access",
-            "ttl_seconds": 60,
-        })
-        assert full_access.status_code == 400
-        assert app.state.sessions.exists(draft_id) is False
-        assert app.state.audit.events(draft_id) == []

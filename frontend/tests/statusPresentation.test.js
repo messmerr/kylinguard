@@ -39,13 +39,12 @@ test('扩展配置加载失败时不再同时展示两个空列表', () => {
   assert.match(source, /mcpDetailAvailable\(row\)/)
 })
 
-test('权限状态区分同步中、同步失败、未同步和任务草稿', () => {
+test('全局权限状态区分同步中、同步失败和未同步', () => {
   const source = componentSource('../src/views/PolicyView.vue')
   for (const text of [
-    '正在同步当前任务权限',
+    '正在同步全局权限',
     '权限同步失败',
-    '当前任务权限尚未同步',
-    '新任务设置将在创建时应用',
+    '全局权限尚未同步',
   ]) assert.match(source, new RegExp(text))
   assert.doesNotMatch(source, /等待服务器支持/)
 })
@@ -108,6 +107,8 @@ test('权限模式使用标准单选键盘导航并保留原切换流程', () =>
   assert.match(source, /case 'Home':/)
   assert.match(source, /case 'End':/)
   assert.match(source, /await choosePermissionMode\(targetMode\)/)
+  assert.match(source, /full-access-visibility-control/)
+  assert.doesNotMatch(source, /active-text="已显示"|inactive-text="隐藏"/)
 })
 
 test('审计页明确区分校验失败、读取失败与范围局部失败', () => {
@@ -117,4 +118,6 @@ test('审计页明确区分校验失败、读取失败与范围局部失败', ()
   assert.match(source, /Promise\.allSettled/)
   assert.match(source, /llm_provider_created: '已添加模型提供商'/)
   assert.match(source, /skill_selection_rejected: 'Skill 切换被拒绝'/)
+  assert.match(source, /full_access_visibility_changed: '完全访问入口变更'/)
+  assert.match(source, /已显示高风险入口/)
 })

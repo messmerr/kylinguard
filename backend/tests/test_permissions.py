@@ -1,5 +1,4 @@
 import asyncio
-import sqlite3
 import time
 
 import pytest
@@ -14,21 +13,21 @@ from kylinguard.permissions import (
     PermissionError,
     PermissionRequests,
     PermissionVersionConflict,
-    normalize_trusted_root,
-    normalize_trusted_roots,
+    normalize_auto_review_root,
+    normalize_auto_review_roots,
 )
 from kylinguard.sessions import SessionStore
 
 
-def test_可信目录必须是规范化的非根绝对路径(tmp_path):
+def test_自动执行范围必须是规范化的非根绝对路径(tmp_path):
     root = tmp_path / "workspace"
     root.mkdir()
-    assert normalize_trusted_root(str(root / ".." / "workspace")) == str(root.resolve())
-    assert normalize_trusted_roots([str(root), str(root)]) == [str(root.resolve())]
+    assert normalize_auto_review_root(str(root / ".." / "workspace")) == str(root.resolve())
+    assert normalize_auto_review_roots([str(root), str(root)]) == [str(root.resolve())]
     with pytest.raises(PermissionError, match="绝对路径"):
-        normalize_trusted_root("relative/docs")
+        normalize_auto_review_root("relative/docs")
     with pytest.raises(PermissionError, match="根目录"):
-        normalize_trusted_root(str(tmp_path.anchor))
+        normalize_auto_review_root(str(tmp_path.anchor))
 
 
 async def test_权限请求绑定上下文版本并返回结构化决断():
@@ -75,44 +74,102 @@ def store(tmp_path):
     value.close()
 
 
-def test_会话默认ask且权限状态可持久化(store, tmp_path):
+def test_全局默认ask且权限状态对所有会话生效(store, tmp_path):
     store.create("s1", "记录信息")
+    store.create("s2", "另一任务")
     context = store.get_permissions("s1")
     assert context.mode == PermissionMode.ASK
+    assert context.full_access_visible is False
     assert context.version == 1
 
     root = str((tmp_path / "docs").resolve())
-    changed = store.set_permissions(
-        "s1",
-        mode=PermissionMode.TRUSTED_WORKSPACE,
-        trusted_roots=[root],
-        expires_at=time.time() + 60,
+    changed = store.set_permission_settings(
+        mode=PermissionMode.AUTO_REVIEW,
+        auto_review_roots=[root],
         expected_version=1,
         updated_by="admin",
     )
-    assert changed.mode == PermissionMode.TRUSTED_WORKSPACE
-    assert changed.trusted_roots == [root]
+    assert changed.mode == PermissionMode.AUTO_REVIEW
+    assert changed.auto_review_roots == [root]
     assert changed.version == 2
     assert changed.updated_by == "admin"
-    assert store.list()[0]["permission_mode"] == "trusted_workspace"
+    assert store.get_permission_settings().mode == PermissionMode.AUTO_REVIEW
+    assert store.get_permissions("s2").mode == PermissionMode.AUTO_REVIEW
+    assert store.get_permissions("s2").auto_review_roots == [root]
 
 
-def test_过期提权安全回落到ask但保留版本用于并发控制(store, tmp_path):
-    root = str((tmp_path / "docs").resolve())
-    store.create(
-        "s1", "记录", permission_mode=PermissionMode.TRUSTED_WORKSPACE,
-        trusted_roots=[root], permission_expires_at=time.time() + 5,
+def test_完全访问入口单独揭示且隐藏时原子收回权限(store):
+    store.create("s1", "执行")
+    grant = store.add_grant(
+        "s1",
+        scope=PermissionGrantScope.SESSION,
+        action_fingerprint="fp",
+        capability="files.write",
+        resource="/srv/report.md",
+        context_version=1,
+        granted_by="admin",
+        expires_at=time.time() + 60,
     )
-    context = store.get_permissions("s1", now=time.time() + 10)
-    assert context.mode == PermissionMode.ASK
-    assert context.trusted_roots == []
-    assert context.expired is True
-    assert context.version == 1
 
-    # 一旦观察到过期，即使系统 wall clock 随后回拨也不能让提权复活。
-    rewound = store.get_permissions("s1", now=time.time())
-    assert rewound.mode == PermissionMode.ASK
-    assert rewound.expired is True
+    exposed = store.set_full_access_visibility(
+        visible=True,
+        expected_version=1,
+        updated_by="admin",
+    )
+    assert exposed.full_access_visible is True
+    assert exposed.mode == PermissionMode.ASK
+    assert exposed.version == 1
+    assert store.list_grants("s1") == [grant]
+
+    enabled = store.set_permission_settings(
+        mode=PermissionMode.FULL_ACCESS,
+        auto_review_roots=[],
+        expected_version=1,
+        updated_by="admin",
+        execution_profile="sha256:test-profile",
+    )
+    assert enabled.mode == PermissionMode.FULL_ACCESS
+    assert enabled.full_access_visible is True
+    assert enabled.version == 2
+
+    hidden = store.set_full_access_visibility(
+        visible=False,
+        expected_version=2,
+        updated_by="admin",
+    )
+    assert hidden.full_access_visible is False
+    assert hidden.mode == PermissionMode.ASK
+    assert hidden.execution_profile == ""
+    assert hidden.version == 3
+
+
+def test_自动执行范围可独立于审批模式保存(store, tmp_path):
+    root = str((tmp_path / "workspace").resolve())
+    store.create("s1", "记录信息")
+
+    changed = store.set_permission_settings(
+        mode=PermissionMode.ASK,
+        auto_review_roots=[root],
+        expected_version=1,
+        updated_by="admin",
+    )
+
+    assert changed.mode == PermissionMode.ASK
+    assert changed.auto_review_roots == [root]
+
+
+def test_完全访问持续生效并保留自动执行范围(store, tmp_path):
+    root = str((tmp_path / "docs").resolve())
+    store.create("s1", "记录")
+    store.set_permission_settings(
+        mode=PermissionMode.FULL_ACCESS, auto_review_roots=[root],
+        expected_version=1,
+        updated_by="admin",
+    )
+    context = store.get_permissions("s1")
+    assert context.mode == PermissionMode.FULL_ACCESS
+    assert context.auto_review_roots == [root]
+    assert context.version == 2
 
 
 def test_过期授权在时钟回拨后也不会复活(store):
@@ -132,21 +189,29 @@ def test_过期授权在时钟回拨后也不会复活(store):
 
 def test_权限更新使用乐观版本并使旧授权失效(store):
     store.create("s1", "执行")
+    store.create("s2", "另一个任务")
     grant = store.add_grant(
         "s1", scope=PermissionGrantScope.SESSION,
         action_fingerprint="fp", capability="run_command", resource="",
         context_version=1, granted_by="admin", expires_at=time.time() + 60,
     )
     assert store.list_grants("s1") == [grant]
-    changed = store.set_permissions(
-        "s1", mode=PermissionMode.READ_ONLY, trusted_roots=[], expires_at=None,
+    other = store.add_grant(
+        "s2", scope=PermissionGrantScope.SESSION,
+        action_fingerprint="other", capability="run_command", resource="",
+        context_version=1, granted_by="admin", expires_at=time.time() + 60,
+    )
+    assert store.list_grants("s2") == [other]
+    changed = store.set_permission_settings(
+        mode=PermissionMode.READ_ONLY, auto_review_roots=[],
         expected_version=1, updated_by="admin",
     )
     assert changed.version == 2
     assert store.list_grants("s1") == []
+    assert store.list_grants("s2") == []
     with pytest.raises(PermissionVersionConflict):
-        store.set_permissions(
-            "s1", mode=PermissionMode.ASK, trusted_roots=[], expires_at=None,
+        store.set_permission_settings(
+            mode=PermissionMode.ASK, auto_review_roots=[],
             expected_version=1, updated_by="admin",
         )
 
@@ -185,35 +250,13 @@ def test_单次授权原子消费而会话授权可重复匹配(store):
     ).id == session.id
 
 
-def test_中间版本权限表会自动补列(tmp_path):
-    db = tmp_path / "legacy-partial.db"
-    connection = sqlite3.connect(db)
-    connection.executescript("""
-        CREATE TABLE sessions (
-            id TEXT PRIMARY KEY, title TEXT NOT NULL,
-            created_at REAL NOT NULL, updated_at REAL NOT NULL
-        );
-        CREATE TABLE session_permissions (
-            session_id TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'ask'
-        );
-        CREATE TABLE permission_grants (
-            id TEXT PRIMARY KEY, session_id TEXT NOT NULL
-        );
-    """)
-    connection.commit()
-    connection.close()
-
-    migrated = SessionStore(str(db))
-    try:
-        permission_columns = {
-            row[1] for row in migrated._conn.execute(
-                "PRAGMA table_info(session_permissions)")
-        }
-        grant_columns = {
-            row[1] for row in migrated._conn.execute(
-                "PRAGMA table_info(permission_grants)")
-        }
-        assert {"trusted_roots", "expiry_observed_at", "version"} <= permission_columns
-        assert {"resource", "expiry_observed_at", "consumed_at"} <= grant_columns
-    finally:
-        migrated.close()
+def test_权限表是单例全局配置而授权仍按会话保存(store):
+    store.create("s1", "任务一")
+    store.create("s2", "任务二")
+    rows = store._conn.execute(
+        "SELECT singleton, mode, version FROM permission_settings"
+    ).fetchall()
+    assert rows == [(1, "ask", 1)]
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM permission_grants"
+    ).fetchone()[0] == 0

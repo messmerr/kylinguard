@@ -24,7 +24,6 @@ import {
   applyPermissionEvent,
   beginNewPermissionSession,
   bindPermissionSession,
-  createFullAccessDraftSession,
   loadPermissionContext,
   permissionContext,
   permissionRequestPayload,
@@ -54,7 +53,6 @@ let activeController = null
 let sessionLoadController = null
 let _nextIsReport = false // 下一条 final_answer 标记为报告
 let _loadRequest = 0
-let fullAccessDraftPromise = null
 const SESSION_LOAD_TIMEOUT_MS = 20_000
 
 const PLANNING_ACTIVITIES = new Set([
@@ -531,63 +529,8 @@ export async function refreshSessions() {
   return body
 }
 
-function secureDraftSessionId() {
-  const cryptoApi = globalThis.crypto
-  if (typeof cryptoApi?.randomUUID === 'function') {
-    return cryptoApi.randomUUID().replaceAll('-', '').toLowerCase()
-  }
-  if (typeof cryptoApi?.getRandomValues === 'function') {
-    const bytes = cryptoApi.getRandomValues(new Uint8Array(16))
-    return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('')
-  }
-  throw new Error('当前浏览器无法生成安全的任务标识，请升级浏览器后重试')
-}
-
 export async function setChatPermissionMode(mode, options = {}) {
-  if (mode !== 'full_access' || activeId.value) {
-    return setPermissionMode(mode, options)
-  }
-  if (fullAccessDraftPromise) return fullAccessDraftPromise
-
-  fullAccessDraftPromise = (async () => {
-    const requestedSessionId = secureDraftSessionId()
-    const draftModel = modelRequestPayload()
-    const result = await createFullAccessDraftSession(
-      requestedSessionId,
-      {
-        ...options,
-        providerId: draftModel.provider_id,
-        modelId: draftModel.model_id,
-        reasoningEffort: draftModel.reasoning_effort,
-      },
-    )
-    if (!result.supported) {
-      throw new Error(
-        '当前后端不支持在首条消息前开启完全访问；请先发送第一条消息创建任务，再开启。',
-      )
-    }
-
-    // 只有服务端原子创建草稿成功后，才在同一个同步片段绑定聊天与权限状态。
-    activeId.value = result.sessionId
-    bindPermissionSession(result.sessionId)
-    bindModelSession(
-      result.sessionId,
-      result.body?.model_context || result.body?.session_model || result.body?.model || null,
-    )
-    applyPermissionEvent({ type: 'permission_context', permission: result.permission })
-    try {
-      await refreshSessions()
-    } catch {
-      // 草稿及权限已经由服务端提交；列表刷新失败不能伪装成权限开启失败。
-    }
-    return result
-  })()
-
-  try {
-    return await fullAccessDraftPromise
-  } finally {
-    fullAccessDraftPromise = null
-  }
+  return setPermissionMode(mode, options)
 }
 
 export function newSession() {

@@ -19,10 +19,10 @@ export const PERMISSION_MODES = Object.freeze([
     tone: 'safe',
   },
   {
-    value: 'trusted_workspace',
-    label: '信任目录',
-    short: '文件工具可直接写指定目录',
-    description: '结构化文件工具可在可信目录内直接创建和修改；删除、终端命令和目录外操作仍会询问。',
+    value: 'auto_review',
+    label: '自动审核',
+    short: '审核通过的可逆操作自动执行',
+    description: '静态规则与独立 Reviewer 通过后，可逆操作会在自动执行范围内直接执行；高风险、破坏性、越界或审核异常的动作仍会询问。',
     tone: 'warning',
   },
   {
@@ -38,8 +38,8 @@ const MODE_ALIASES = Object.freeze({
   readonly: 'read_only',
   default: 'ask',
   confirm: 'ask',
-  workspace: 'trusted_workspace',
-  trusted: 'trusted_workspace',
+  auto: 'auto_review',
+  review: 'auto_review',
   bypass: 'full_access',
 })
 
@@ -56,14 +56,10 @@ const DEFAULT_CONTEXT = Object.freeze({
   fullAccessCapabilities: ['shell', 'files', 'network', 'processes'],
   executionAccountSeparated: false,
   grantsRoot: false,
-  expiresAt: null,
-  trustedRoots: [],
-  draftTtlSeconds: null,
+  autoReviewRoots: [],
   fullAccessAvailable: true,
+  fullAccessVisible: false,
   fullAccessUnavailableReason: '',
-  fullAccessMaxTtl: 30 * 60,
-  permissionDefaultTtl: 30 * 60,
-  permissionMaxTtl: 12 * 3600,
   synced: false,
 })
 
@@ -82,18 +78,16 @@ export const permissionModeMeta = computed(() => (
   PERMISSION_MODES.find((mode) => mode.value === permissionContext.mode)
   || PERMISSION_MODES[1]
 ))
-export const fullAccessActive = computed(() => permissionContext.mode === 'full_access')
-export const fullAccessDurationMinutes = computed(() => Math.max(
-  1,
-  Math.floor(Math.min(
-    permissionContext.permissionDefaultTtl,
-    permissionContext.fullAccessMaxTtl,
-  ) / 60),
+export const visiblePermissionModes = computed(() => PERMISSION_MODES.filter(
+  (mode) => mode.value !== 'full_access'
+    || permissionContext.fullAccessVisible
+    || permissionContext.mode === 'full_access',
 ))
-// 可信目录只来自 SessionPermissionContext.trusted_roots。
+export const fullAccessActive = computed(() => permissionContext.mode === 'full_access')
+// 自动执行范围只来自全局权限配置的 auto_review_roots。
 // PermissionGrant.resource 是一次/会话动作的匹配资源，即使长得像路径，
 // 也绝不能被提升为工作区根目录。
-export const trustedRoots = computed(() => [...permissionContext.trustedRoots])
+export const autoReviewRoots = computed(() => [...permissionContext.autoReviewRoots])
 
 export function executionIdentitySourceLabel(
   source = permissionContext.executorIdentitySource,
@@ -184,7 +178,13 @@ function removeGrantLocal(id) {
 
 function applyContext(raw = {}, { synced = true } = {}) {
   permissionContext.mode = normalizeMode(raw.mode || raw.permission_mode || permissionContext.mode)
-  permissionContext.version = Number(raw.version ?? raw.context_version ?? permissionContext.version) || 0
+  const previousVersion = permissionContext.version
+  const nextVersion = Number(raw.version ?? raw.context_version ?? previousVersion) || 0
+  permissionContext.version = nextVersion
+  if (previousVersion > 0 && nextVersion > 0 && previousVersion !== nextVersion) {
+    // 全局权限版本变化会在后端收回所有旧版本的会话动作授权。
+    permissionGrants.value = []
+  }
   const rawIdentity = raw.executor_identity || raw.executor_user
     || raw.execution_identity || raw.executor
   const rawIdentitySource = raw.execution_identity_source || raw.executor_identity_source
@@ -194,7 +194,15 @@ function applyContext(raw = {}, { synced = true } = {}) {
   } else if (rawIdentitySource) {
     permissionContext.executorIdentitySource = rawIdentitySource
   }
-  permissionContext.workspaceRoot = raw.workspace_root ?? permissionContext.workspaceRoot
+  if (Object.hasOwn(raw, 'workspace_root') && raw.workspace_root) {
+    const workspaceRoot = normalizePath(raw.workspace_root)
+    if (!raw.session_id) {
+      permissionContext.defaultWorkspaceRoot = workspaceRoot
+      if (!permissionContext.sessionId) permissionContext.workspaceRoot = workspaceRoot
+    } else {
+      permissionContext.workspaceRoot = workspaceRoot
+    }
+  }
   permissionContext.commandShell = raw.command_shell ?? permissionContext.commandShell
   permissionContext.commandMaxTimeout = Number(
     raw.command_max_timeout ?? permissionContext.commandMaxTimeout,
@@ -210,41 +218,19 @@ function applyContext(raw = {}, { synced = true } = {}) {
   permissionContext.grantsRoot = Boolean(
     raw.grants_root ?? permissionContext.grantsRoot,
   )
-  if (Object.hasOwn(raw, 'expires_at') || Object.hasOwn(raw, 'full_access_expires_at')) {
-    permissionContext.expiresAt = normalizeTimestamp(
-      raw.expires_at ?? raw.full_access_expires_at,
-    )
-  }
   permissionContext.fullAccessAvailable = raw.full_access_available
     ?? raw.capabilities?.full_access ?? permissionContext.fullAccessAvailable
+  if (Object.hasOwn(raw, 'full_access_visible')) {
+    permissionContext.fullAccessVisible = Boolean(raw.full_access_visible)
+  }
   permissionContext.fullAccessUnavailableReason = raw.full_access_unavailable_reason
     ?? permissionContext.fullAccessUnavailableReason
-  permissionContext.fullAccessMaxTtl = Number(
-    raw.full_access_max_ttl ?? permissionContext.fullAccessMaxTtl,
-  ) || DEFAULT_CONTEXT.fullAccessMaxTtl
-  permissionContext.permissionDefaultTtl = Number(
-    raw.permission_default_ttl ?? permissionContext.permissionDefaultTtl,
-  ) || DEFAULT_CONTEXT.permissionDefaultTtl
-  permissionContext.permissionMaxTtl = Number(
-    raw.permission_max_ttl ?? permissionContext.permissionMaxTtl,
-  ) || DEFAULT_CONTEXT.permissionMaxTtl
   permissionContext.synced = synced
   if (Array.isArray(raw.grants)) permissionGrants.value = raw.grants.map(normalizeGrant)
-  if (Array.isArray(raw.trusted_roots)) {
-    permissionContext.trustedRoots = [...new Set(raw.trusted_roots.map(normalizePath))]
-  }
-  if (raw.expired && ['trusted_workspace', 'full_access'].includes(permissionContext.mode)) {
-    permissionContext.mode = 'ask'
-    permissionContext.expiresAt = null
-    permissionContext.trustedRoots = []
-    permissionGrants.value = []
-  }
-  if (permissionContext.mode === 'trusted_workspace' && permissionContext.expiresAt) {
-    permissionContext.draftTtlSeconds = Math.max(
-      1, Math.ceil((permissionContext.expiresAt - Date.now()) / 1000),
-    )
-  } else if (permissionContext.mode !== 'trusted_workspace') {
-    permissionContext.draftTtlSeconds = null
+  if (Array.isArray(raw.auto_review_roots)) {
+    permissionContext.autoReviewRoots = [
+      ...new Set(raw.auto_review_roots.map(normalizePath)),
+    ]
   }
 }
 
@@ -263,7 +249,7 @@ export function applyPermissionCapabilities(raw = {}) {
   const metadata = {}
   const keys = [
     'full_access_available', 'full_access_unavailable_reason',
-    'full_access_max_ttl', 'permission_default_ttl', 'permission_max_ttl',
+    'full_access_visible',
     'execution_identity', 'execution_identity_source', 'executor_identity',
     'executor_identity_source', 'command_shell',
     'command_max_timeout', 'full_access_capabilities',
@@ -280,8 +266,6 @@ export function applyPermissionCapabilities(raw = {}) {
       ?? metadata.full_access_available
     metadata.full_access_unavailable_reason = fullAccess.unavailable_reason
       ?? fullAccess.reason ?? metadata.full_access_unavailable_reason
-    metadata.full_access_max_ttl = fullAccess.max_ttl
-      ?? metadata.full_access_max_ttl
   }
   applyContext(metadata, { synced: permissionContext.synced })
 }
@@ -307,17 +291,11 @@ function isCompatibilityMiss(response) {
 export function beginNewPermissionSession() {
   permissionLoadToken++
   permissionContext.sessionId = ''
-  permissionContext.mode = 'ask'
-  permissionContext.version = 0
-  permissionContext.expiresAt = null
-  permissionContext.trustedRoots = []
-  permissionContext.draftTtlSeconds = null
   permissionContext.workspaceRoot = permissionContext.defaultWorkspaceRoot
-  permissionContext.synced = false
   permissionLoading.value = false
   permissionLoadError.value = ''
   permissionError.value = ''
-  // 授权属于会话；新任务从干净的 ask 模式开始。
+  // 审批模式和自动执行范围是全局设置；只有动作授权随会话清空。
   permissionGrants.value = []
 }
 
@@ -343,31 +321,9 @@ export function setDraftWorkspaceRoot(path) {
 
 export function permissionRequestPayload() {
   return {
-    permission_mode: permissionContext.mode,
-    trusted_roots: permissionContext.mode === 'trusted_workspace'
-      ? trustedRoots.value : [],
-    ...(permissionContext.mode === 'trusted_workspace'
-      && permissionContext.draftTtlSeconds
-      ? { permission_ttl_seconds: permissionContext.draftTtlSeconds } : {}),
     ...(permissionContext.workspaceRoot
       ? { workspace_root: permissionContext.workspaceRoot } : {}),
   }
-}
-
-export function fullAccessRemainingMs(now = Date.now()) {
-  if (!fullAccessActive.value || permissionContext.expiresAt == null) return null
-  return Math.max(0, permissionContext.expiresAt - now)
-}
-
-export function expirePermissionContext(now = Date.now()) {
-  if (permissionContext.expiresAt == null || permissionContext.expiresAt > now) return false
-  if (!['trusted_workspace', 'full_access'].includes(permissionContext.mode)) return false
-  permissionContext.mode = 'ask'
-  permissionContext.expiresAt = null
-  permissionContext.trustedRoots = []
-  permissionContext.draftTtlSeconds = null
-  permissionGrants.value = []
-  return true
 }
 
 export async function loadPermissionContext(
@@ -375,7 +331,6 @@ export async function loadPermissionContext(
 ) {
   const id = String(sessionId || '')
   bindPermissionSession(id)
-  if (!id) return { supported: false, reason: 'draft' }
   const loadToken = ++permissionLoadToken
   const isCurrentLoad = () => (
     loadToken === permissionLoadToken && permissionContext.sessionId === id
@@ -385,7 +340,7 @@ export async function loadPermissionContext(
   permissionError.value = ''
   try {
     const response = await apiFetch(
-      `/api/sessions/${encodeURIComponent(id)}/permissions`,
+      '/api/permissions',
       { signal },
     )
     if (!isCurrentLoad()) return { supported: false, reason: 'stale' }
@@ -398,6 +353,11 @@ export async function loadPermissionContext(
     if (!response.ok) throw new Error(detailMessage(body, `权限读取失败（HTTP ${response.status}）`))
     const contextBody = body.permission || body.context || body
     applyContext(contextBody)
+
+    if (!id) {
+      permissionGrants.value = []
+      return { supported: true }
+    }
 
     const grantsResponse = await apiFetch(
       `/api/sessions/${encodeURIComponent(id)}/grants`,
@@ -425,95 +385,27 @@ export async function loadPermissionContext(
   }
 }
 
-export async function createFullAccessDraftSession(sessionId, {
-  durationMinutes = 30, ttlSeconds = null,
-  workspaceRoot = permissionContext.workspaceRoot,
-  providerId = '', modelId = '', reasoningEffort = 'auto',
-} = {}) {
-  const requestedSessionId = String(sessionId || '')
-  if (!/^[a-f0-9]{32}$/.test(requestedSessionId)) {
-    throw new Error('无法生成安全的任务标识，请刷新页面后重试')
-  }
-  if (!permissionContext.fullAccessAvailable) {
-    throw new Error(permissionContext.fullAccessUnavailableReason || '当前服务未开放完全访问')
-  }
-  const requestedTtl = ttlSeconds ?? durationMinutes * 60
-  const effectiveTtl = Math.max(
-    1, Math.min(requestedTtl, permissionContext.fullAccessMaxTtl),
-  )
-  const selectedWorkspaceRoot = normalizePath(
-    workspaceRoot || permissionContext.defaultWorkspaceRoot,
-  )
-  const response = await apiFetch('/api/sessions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      session_id: requestedSessionId,
-      mode: 'full_access',
-      ttl_seconds: effectiveTtl,
-      ...(selectedWorkspaceRoot ? { workspace_root: selectedWorkspaceRoot } : {}),
-      ...(providerId && modelId ? {
-        provider_id: providerId,
-        model_id: modelId,
-        reasoning_effort: reasoningEffort || 'auto',
-      } : {}),
-    }),
-  })
-  if (isCompatibilityMiss(response)) {
-    return { supported: false, reason: 'legacy_backend' }
-  }
-  const body = await readJson(response)
-  if (!response.ok) {
-    throw new Error(detailMessage(
-      body, `完全访问草稿创建失败（HTTP ${response.status}）`,
-    ))
-  }
-  const returnedSessionId = String(body.session_id || '')
-  const permission = body.permission || body.context
-  if (response.status !== 201 || returnedSessionId !== requestedSessionId
-      || body.draft !== true || !permission || typeof permission !== 'object') {
-    throw new Error('服务端返回的完全访问草稿不完整，未绑定该任务')
-  }
-  return {
-    supported: true,
-    sessionId: returnedSessionId,
-    permission,
-    body,
-  }
-}
-
-// full_access 的后端升级协议集中在这里。若后端改为专门的 /full-access，
-// 只需替换本函数，不影响 PermissionSelector、App 或 PolicyView。
-async function persistPermissionMode(mode, {
-  durationMinutes = 30, ttlSeconds = null, trustedRoots: roots = null,
-} = {}) {
-  const sessionId = permissionContext.sessionId
-  if (!sessionId) return { supported: false, reason: 'draft' }
+// 审批模式与自动执行范围通过全局接口统一更新。
+async function persistPermissionMode(mode, { autoReviewRoots: roots = null } = {}) {
   const contextVersion = permissionContext.version
-  const isCurrentSession = () => permissionContext.sessionId === sessionId
-  const requestedTtl = ttlSeconds ?? durationMinutes * 60
-  const maxTtl = mode === 'full_access'
-    ? permissionContext.fullAccessMaxTtl : permissionContext.permissionMaxTtl
-  const effectiveTtl = Math.max(1, Math.min(requestedTtl, maxTtl))
+  let effectiveRoots = roots || autoReviewRoots.value
+  if (mode === 'auto_review' && !effectiveRoots.length && permissionContext.defaultWorkspaceRoot) {
+    effectiveRoots = [permissionContext.defaultWorkspaceRoot]
+  }
   const response = await apiFetch(
-    `/api/sessions/${encodeURIComponent(sessionId)}/permissions`,
+    '/api/permissions',
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         mode,
         version: contextVersion,
-        trusted_roots: mode === 'trusted_workspace'
-          ? (roots || trustedRoots.value) : [],
-        ...(['trusted_workspace', 'full_access'].includes(mode)
-          ? { ttl_seconds: effectiveTtl } : {}),
+        auto_review_roots: effectiveRoots,
       }),
     },
   )
-  if (!isCurrentSession()) return { supported: false, reason: 'stale' }
   if (isCompatibilityMiss(response)) return { supported: false, reason: 'legacy_backend' }
   const body = await readJson(response)
-  if (!isCurrentSession()) return { supported: false, reason: 'stale' }
   if (!response.ok) {
     throw new Error(detailMessage(body, `权限修改失败（HTTP ${response.status}）`))
   }
@@ -523,110 +415,89 @@ async function persistPermissionMode(mode, {
 
 export async function setPermissionMode(mode, options = {}) {
   const normalized = normalizeMode(mode)
-  const operationSessionId = permissionContext.sessionId
   permissionError.value = ''
-  if (permissionContext.sessionId && permissionContext.version < 1) {
+  if (permissionContext.version < 1) {
     await loadPermissionContext(permissionContext.sessionId)
-    if (permissionContext.sessionId !== operationSessionId) {
-      return { supported: false, reason: 'stale' }
-    }
   }
   if (normalized === 'full_access') {
     if (!permissionContext.fullAccessAvailable) {
       throw new Error(permissionContext.fullAccessUnavailableReason || '当前服务未开放完全访问')
     }
+    if (!permissionContext.fullAccessVisible) {
+      throw new Error('完全访问入口仍处于隐藏状态，请先在“权限与安全”中显式显示')
+    }
   }
   const previous = {
     mode: permissionContext.mode,
-    expiresAt: permissionContext.expiresAt,
     synced: permissionContext.synced,
   }
   try {
     const result = await persistPermissionMode(normalized, options)
-    if (result.reason === 'stale') return result
     if (!result.supported) {
-      // 只有新任务草稿可以留在前端并随首条消息提交。已有任务若后端
-      // 不支持该协议，不能仅改变页面状态，否则显示权限会与实际执行不一致。
-      if (normalized === 'full_access') {
-        throw new Error('当前后端尚未支持完全访问，未开启该模式')
-      }
-      if (result.reason === 'draft') {
-        permissionContext.mode = normalized
-        permissionContext.expiresAt = null
-        if (normalized === 'trusted_workspace') {
-          permissionContext.trustedRoots = [...new Set(
-            (options.trustedRoots || trustedRoots.value).map(normalizePath),
-          )]
-          permissionContext.draftTtlSeconds = Math.min(
-            options.ttlSeconds ?? (options.durationMinutes || 30) * 60,
-            permissionContext.permissionMaxTtl,
-          )
-        } else {
-          permissionContext.draftTtlSeconds = null
-        }
-        permissionContext.synced = false
-      }
+      throw new Error('当前后端未提供全局权限设置接口，权限未更改')
     } else {
       permissionLoadError.value = ''
     }
     return result
   } catch (error) {
-    if (permissionContext.sessionId !== operationSessionId) {
-      return { supported: false, reason: 'stale' }
-    }
     Object.assign(permissionContext, previous)
     permissionError.value = error.message || '权限修改失败'
     throw error
   }
 }
 
+export async function setFullAccessVisibility(visible) {
+  permissionError.value = ''
+  if (permissionContext.version < 1) {
+    await loadPermissionContext(permissionContext.sessionId)
+  }
+  if (visible && !permissionContext.fullAccessAvailable) {
+    throw new Error(permissionContext.fullAccessUnavailableReason || '当前服务未开放完全访问')
+  }
+  const response = await apiFetch(
+    '/api/permissions/full-access-visibility',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        visible: Boolean(visible),
+        version: permissionContext.version,
+      }),
+    },
+  )
+  const body = await readJson(response)
+  if (!response.ok) {
+    const message = detailMessage(body, `完全访问入口更新失败（HTTP ${response.status}）`)
+    permissionError.value = message
+    throw new Error(message)
+  }
+  applyContext(body.permission || body.context || body)
+  permissionLoadError.value = ''
+  return { supported: true, body }
+}
+
 export async function revokeFullAccess() {
   return setPermissionMode('ask')
 }
 
-export async function addTrustedRoot(path, { lifetime = 'session' } = {}) {
+export async function addAutoReviewRoot(path) {
   const normalizedPath = normalizePath(path)
-  if (normalizedPath === '/') throw new Error('不能把服务器根目录设为可信目录')
-  if (trustedRoots.value.includes(normalizedPath)) {
+  if (normalizedPath === '/') throw new Error('不能把服务器根目录设为自动执行范围')
+  if (autoReviewRoots.value.includes(normalizedPath)) {
     return { path: normalizedPath, supported: permissionContext.synced }
   }
-  const nextRoots = [...trustedRoots.value, normalizedPath]
-  const ttlSeconds = lifetime === 'extended' ? 12 * 3600 : 30 * 60
-  if (!permissionContext.sessionId) {
-    permissionContext.trustedRoots = nextRoots
-    permissionContext.draftTtlSeconds = Math.min(
-      ttlSeconds, permissionContext.permissionMaxTtl,
-    )
-    return { path: normalizedPath, supported: false, reason: 'draft' }
-  }
-
-  const result = await setPermissionMode('trusted_workspace', {
-    trustedRoots: nextRoots,
-    ttlSeconds,
+  const nextRoots = [...autoReviewRoots.value, normalizedPath]
+  const result = await setPermissionMode(permissionContext.mode, {
+    autoReviewRoots: nextRoots,
   })
   return { path: normalizedPath, ...result }
 }
 
-export function remainingPermissionTtlSeconds(now = Date.now()) {
-  if (!permissionContext.expiresAt) return permissionContext.draftTtlSeconds
-  return Math.max(1, Math.ceil((permissionContext.expiresAt - now) / 1000))
-}
-
-export async function revokeTrustedRoot(path) {
+export async function revokeAutoReviewRoot(path) {
   const normalizedPath = normalizePath(path)
-  const remainingRoots = trustedRoots.value.filter((root) => root !== normalizedPath)
-  if (!permissionContext.sessionId) {
-    permissionContext.trustedRoots = remainingRoots
-    if (!remainingRoots.length) {
-      permissionContext.mode = 'ask'
-      permissionContext.draftTtlSeconds = null
-    }
-    return { supported: false }
-  }
-  if (!remainingRoots.length) return setPermissionMode('ask')
-  return setPermissionMode('trusted_workspace', {
-    trustedRoots: remainingRoots,
-    ttlSeconds: remainingPermissionTtlSeconds(),
+  const remainingRoots = autoReviewRoots.value.filter((root) => root !== normalizedPath)
+  return setPermissionMode(permissionContext.mode, {
+    autoReviewRoots: remainingRoots,
   })
 }
 
@@ -664,9 +535,7 @@ export async function resolvePermissionRequest(card, decision, scope = null) {
         body: JSON.stringify({
           decision,
           context_version: card.contextVersion || permissionContext.version,
-          trusted_path: decision === 'trust_path' ? (scope?.path || '') : '',
-          ...(decision === 'trust_path' && scope?.ttlSeconds
-            ? { ttl_seconds: scope.ttlSeconds } : {}),
+          authorized_path: decision === 'authorize_path' ? (scope?.path || '') : '',
         }),
       },
     )
@@ -676,14 +545,12 @@ export async function resolvePermissionRequest(card, decision, scope = null) {
     }
     if (body.grant) replaceGrant(body.grant)
     if (body.permission) applyContext(body.permission)
-    const trustedPath = body.resolution?.trusted_path
-    if (trustedPath && !body.permission) {
-      permissionContext.mode = 'trusted_workspace'
-      permissionContext.trustedRoots = [...new Set([
-        ...trustedRoots.value, normalizePath(trustedPath),
+    const authorizedPath = body.resolution?.authorized_path
+    if (authorizedPath && !body.permission) {
+      permissionContext.autoReviewRoots = [...new Set([
+        ...autoReviewRoots.value, normalizePath(authorizedPath),
       ])]
     }
-    if (permissionContext.sessionId) loadPermissionContext(permissionContext.sessionId).catch(() => {})
     return body
   }
 
@@ -703,13 +570,13 @@ export async function resolvePermissionRequest(card, decision, scope = null) {
   if (!body.ok) throw new Error('该确认请求已失效或已经处理。')
 
   // 后端尚未返回 grant 时仅用于当前页面展示；真正执行仍由后端确认结果决定。
-  if (decision === 'allow_session' || decision === 'trust_path') {
+  if (decision === 'allow_session') {
     const path = scope?.path
     if (path) recordLocalGrant({
       id: `decision:${card.confirmId}:${path}`,
       path,
       actions: scope.actions || ['create', 'modify'],
-      lifetime: decision === 'trust_path' ? 'persistent' : 'session',
+      lifetime: 'session',
     })
   }
   return body
