@@ -1,3 +1,0 @@
-你好，这是 KylinGuard 的 Filesystem MCP 手工测试文件。
-
-如果 Agent 能列出本目录并读到这句话，说明第三方 stdio MCP 已连接成功。
