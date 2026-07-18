@@ -881,7 +881,7 @@ function showBuiltinSkillRestriction(action) {
 .skill-issues span { overflow-wrap: anywhere; }
 .extension-section { margin-top: var(--kg-space-6); }
 .extensions-inner > .extension-section:first-child { margin-top: 0; }
-.section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--kg-space-5); margin-bottom: var(--kg-space-3); }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--kg-space-5); margin-bottom: var(--kg-space-3); }
 .section-head p { margin: 3px 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
 .section-meta { display: flex; align-items: center; gap: var(--kg-space-2); }
 .section-meta :deep(.el-button) { gap: 5px; margin-left: 0; }
