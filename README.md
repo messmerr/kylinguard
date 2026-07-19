@@ -17,49 +17,86 @@
 
 ## 环境要求
 
-比赛目标环境为银河麒麟高级服务器操作系统 V11 + LoongArch64；普通 Linux 可用于后端开发，macOS 和 Windows 可用于前端或部分单元测试，但都不能作为赛题平台适配结论。建议配置：
+比赛验收目标环境为银河麒麟高级服务器操作系统 V11 + LoongArch64。普通 Linux 可用于后端开发，macOS 和 Windows 可用于前端或部分单元测试，但都不能作为目标平台适配结论。
 
-- Python 3.10 或更高版本；
-- Node.js 18 或更高版本及 npm；
-- Bash；
-- 可访问的 OpenAI、DeepSeek、DashScope 或其他 OpenAI 兼容模型服务。
+两种运行方式的依赖不同：
 
-`systemctl`、`journalctl`、`free` 等系统命令依赖 Linux 环境。请勿使用普通容器或 Windows 后端评估主机级运维能力。
+| 环境 | 方法 A：安装包部署 | 方法 B：源码直接运行 |
+| --- | --- | --- |
+| 适用场景 | 比赛提交、正式部署、验收演示 | 开发联调、功能调试、快速验证 |
+| Python | 目标机需要 Python 3.10 及以上 | 开发机需要 Python 3.10 及以上 |
+| Node.js | 目标机不需要，前端已预构建 | 需要 Node.js 18 及以上和 npm |
+| Rust/C | LoongArch64 缺少部分第三方 wheel 时由安装器准备并校验 | 在干净的 LoongArch64 环境安装后端依赖时同样需要 |
+| 服务管理 | systemd 后台服务并开机启动 | 当前终端前台运行 |
+| 账户边界 | 自动创建 `kylinguard` 与 `kylinguard-exec` 双账户 | 默认使用启动者的 OS 账户 |
+
+两种方式都需要可访问的 pip 软件源和 OpenAI、DeepSeek、DashScope 或其他 OpenAI 兼容模型服务。`systemctl`、`journalctl`、`free` 等主机命令依赖 Linux 环境，请勿使用普通容器或 Windows 后端评估主机级运维能力。
 
 ## 安装与启动
 
-以下命令均从仓库根目录执行。保持这个工作目录可以确保默认数据库写入 `data/`，并让后端正确发现构建后的前端。
+### 方法 A：安装包部署（推荐）
+
+该方式用于比赛提交、正式部署和验收。构建机需要 Python、Node.js 18 及以上和 npm；构建脚本会生成 KylinGuard 后端 wheel、预构建前端、部署脚本以及完整性校验文件：
 
 ```bash
-# 1. 创建 Python 环境
+# 在源码仓库根目录执行
+python tools/build_install_package.py
+```
+
+生成的交付文件位于 `dist/`：
+
+```text
+KylinGuard-0.1.0-KylinV11-LoongArch64.tar.gz
+KylinGuard-0.1.0-KylinV11-LoongArch64.tar.gz.sha256
+```
+
+将这两个文件复制到银河麒麟 V11 / LoongArch64 目标机，在普通管理员账户下执行：
+
+```bash
+sha256sum -c KylinGuard-0.1.0-KylinV11-LoongArch64.tar.gz.sha256
+tar -xzf KylinGuard-0.1.0-KylinV11-LoongArch64.tar.gz
+cd KylinGuard-0.1.0-KylinV11-LoongArch64
+
+# 只读检查，不修改系统
+./install.sh --check-only
+
+# 正式安装并启动 systemd 服务
+sudo ./install.sh
+```
+
+安装器会安装锁定的后端依赖，创建控制面/受限执行面双账户，配置 systemd、精确 sudoers 和受限 root helper。安装完成后检查：
+
+```bash
+sudo systemctl status kylinguard.service --no-pager -l
+sudo /opt/kylinguard/current/docs/verify-install.sh
+```
+
+浏览器访问 `http://127.0.0.1:8000`。从其他机器访问时应使用 SSH 端口转发，不要直接将 8000 端口暴露到网络。完整参数、升级和卸载说明见[安装包与银河麒麟 V11 部署手册](docs/安装包与银河麒麟V11部署手册.md)。
+
+### 方法 B：源码直接运行（开发）
+
+该方式适合开发联调和快速验证，不会自动创建生产双账户、安装 systemd 服务或配置受限 root helper。以下命令均从仓库根目录执行：
+
+```bash
+# 1. 创建后端虚拟环境
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e "./backend"
+python -m pip install --upgrade 'pip>=25.3,<27' 'setuptools>=68' wheel
+python -m pip install \
+  --constraint deploy/constraints-kylin-v11.txt \
+  --build-constraint deploy/constraints-kylin-v11.txt \
+  -e "./backend"
 
-# 2. 安装并构建前端
+# 2. 安装前端依赖并构建静态文件
 npm --prefix frontend ci
 npm --prefix frontend run build
 
-# 3. 启动服务
+# 3. 在当前 OS 账户下启动后端
 python -m uvicorn --factory kylinguard.api:create_app \
   --host 127.0.0.1 --port 8000
 ```
 
-浏览器访问 `http://127.0.0.1:8000`。
-
-### 银河麒麟 V11 安装包
-
-比赛提交用安装包由构建脚本生成，目标机不需要 Node.js，也不把第三方安装包
-塞进归档；后端依赖按锁定版本从目标机配置的 pip 源安装：
-
-```bash
-python tools/build_install_package.py
-```
-
-目标机先执行 `./install.sh --check-only`，确认后执行 `sudo ./install.sh`。
-安装器会创建控制面/受限执行面双账户、安装 systemd 服务和精确 sudoers，并
-对 LoongArch64 所需 Rust/C 源码依赖做版本检查。完整说明见
-[安装包与银河麒麟 V11 部署手册](docs/安装包与银河麒麟V11部署手册.md)。
+浏览器访问 `http://127.0.0.1:8000`，按 `Ctrl+C` 停止服务。在全新的 LoongArch64 环境中，安装 Python 依赖前还需要准备 `gcc`、`rust`、`cargo`、`python3-devel`、`openssl-devel`、`libffi-devel` 和 `pkgconf`。正式比赛验收仍应使用方法 A。
 
 首次使用时，在“模型服务”页面完成以下配置：
 
