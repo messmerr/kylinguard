@@ -617,12 +617,25 @@ async def test_策略CRUD端点(app):
         assert r4.json()["ok"] is True
         r5 = await c.delete("/api/policies/99999", headers=h)
         assert r5.status_code == 404
+        scopes = await c.get("/api/audit/scopes", headers=h)
+        visible_events = await c.get(
+            "/api/audit/scopes/policies/events", headers=h,
+        )
+        visible_verify = await c.get(
+            "/api/audit/scopes/policies/verify", headers=h,
+        )
     events = app.state.audit.events("__policies__")
     assert [event["event_type"] for event in events] == [
         "policy_added", "policy_removed",
     ]
     assert all(event["payload"]["operator"] == "local" for event in events)
     assert app.state.audit.verify_chain("__policies__") is True
+    assert any(
+        scope["id"] == "policies" and scope["event_count"] == 2
+        for scope in scopes.json()["scopes"]
+    )
+    assert visible_events.json()["events"] == events
+    assert visible_verify.json() == {"ok": True}
 
 
 async def test_策略审计失败会回滚策略变更(app, monkeypatch):

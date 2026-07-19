@@ -105,9 +105,13 @@ from kylinguard.skills import (
 
 
 _SYSTEM_AUDIT_SCOPES = {
-    "__extensions__": "扩展配置",
-    "__llm_config__": "模型配置",
-    "__permissions__": "全局权限",
+    "permissions": {"audit_id": "__permissions__", "title": "权限配置"},
+    "policies": {"audit_id": "__policies__", "title": "策略规则"},
+    "llm_config": {"audit_id": "__llm_config__", "title": "模型配置"},
+    "extensions": {"audit_id": "__extensions__", "title": "扩展配置"},
+}
+_SYSTEM_AUDIT_IDS = {
+    item["audit_id"] for item in _SYSTEM_AUDIT_SCOPES.values()
 }
 from kylinguard.storage_security import secure_database_path
 from kylinguard.subprocess_env import safe_subprocess_env
@@ -542,14 +546,14 @@ def create_app(settings: Settings | None = None,
     settings.skills_dir = str(skills.user_dir)
     settings.skills_state_path = str(skills.state_path)
     current_execution_profile = execution_profile_fingerprint(settings)
+    revoke_reason = (
+        "full_access_disabled"
+        if not settings.allow_full_access
+        else "service_restarted"
+    )
     # 兼容旧数据库中的全局 FULL_ACCESS；新版本只允许任务级完全访问。
     context = sessions.get_permission_settings()
     if context.mode == PermissionMode.FULL_ACCESS:
-        revoke_reason = (
-            "full_access_disabled"
-            if not settings.allow_full_access
-            else "service_restarted"
-        )
         with audit.serialized():
             with sessions.transaction() as connection:
                 fresh = sessions.get_permission_settings()
@@ -598,7 +602,7 @@ def create_app(settings: Settings | None = None,
                         "source": "startup",
                         "from_mode": PermissionMode.FULL_ACCESS.value,
                         "to_mode": changed.mode.value,
-                        "reason": "service_restarted",
+                        "reason": revoke_reason,
                         "session_id": session_id,
                     },
                     connection=connection,
@@ -2802,30 +2806,63 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/api/audit/scopes")
     async def audit_scopes(_user: str = Depends(local_operator)):
-        return {"scopes": [
-            {
+        scopes = []
+        for scope_id, metadata in _SYSTEM_AUDIT_SCOPES.items():
+            events = app.state.audit.events(metadata["audit_id"])
+            scopes.append({
                 "id": scope_id,
-                "title": title,
-                "event_count": len(app.state.audit.events(scope_id)),
-            }
-            for scope_id, title in _SYSTEM_AUDIT_SCOPES.items()
-        ]}
+                "title": metadata["title"],
+                "kind": "system",
+                "event_count": len(events),
+                "last_event_at": events[-1]["ts"] if events else None,
+            })
+        return {"scopes": scopes}
+
+    def system_audit_id(scope_id: str) -> str:
+        metadata = _SYSTEM_AUDIT_SCOPES.get(scope_id)
+        if metadata is None:
+            raise HTTPException(404, "系统审计范围不存在")
+        return metadata["audit_id"]
+
+    @app.get("/api/audit/scopes/{scope_id}/events")
+    async def system_audit_events(
+        scope_id: str,
+        _user: str = Depends(local_operator),
+    ):
+        return {"events": app.state.audit.events(system_audit_id(scope_id))}
+
+    @app.get("/api/audit/scopes/{scope_id}/verify")
+    async def system_audit_verify(
+        scope_id: str,
+        _user: str = Depends(local_operator),
+    ):
+        return {"ok": app.state.audit.verify_chain(system_audit_id(scope_id))}
 
     @app.get("/api/sessions/{session_id}/events")
     async def session_events(session_id: str,
                              _user: str = Depends(local_operator)):
-        if (session_id not in _SYSTEM_AUDIT_SCOPES
-                and not app.state.sessions.exists(session_id)):
+        # 兼容旧版审计页使用系统内部 ID 访问会话路由；新界面只通过
+        # /api/audit/scopes/{scope_id} 读取系统变更。
+        legacy_audit_id = (
+            _SYSTEM_AUDIT_SCOPES[session_id]["audit_id"]
+            if session_id in _SYSTEM_AUDIT_SCOPES else session_id
+        )
+        if (legacy_audit_id not in _SYSTEM_AUDIT_IDS
+                and not app.state.sessions.exists(legacy_audit_id)):
             raise HTTPException(404, "会话不存在")
-        return {"events": app.state.audit.events(session_id)}
+        return {"events": app.state.audit.events(legacy_audit_id)}
 
     @app.get("/api/sessions/{session_id}/verify")
     async def session_verify(session_id: str,
                              _user: str = Depends(local_operator)):
-        if (session_id not in _SYSTEM_AUDIT_SCOPES
-                and not app.state.sessions.exists(session_id)):
+        legacy_audit_id = (
+            _SYSTEM_AUDIT_SCOPES[session_id]["audit_id"]
+            if session_id in _SYSTEM_AUDIT_SCOPES else session_id
+        )
+        if (legacy_audit_id not in _SYSTEM_AUDIT_IDS
+                and not app.state.sessions.exists(legacy_audit_id)):
             raise HTTPException(404, "会话不存在")
-        return {"ok": app.state.audit.verify_chain(session_id)}
+        return {"ok": app.state.audit.verify_chain(legacy_audit_id)}
 
     @app.get("/api/stats")
     async def stats(_user: str = Depends(local_operator)):

@@ -126,12 +126,17 @@ async def test_扩展审计范围可在界面查看并校验(app):
             "/api/extensions/mcp", json=_mcp_payload(),
         )
         scopes = await client.get("/api/audit/scopes")
-        events = await client.get("/api/sessions/__extensions__/events")
-        verified = await client.get("/api/sessions/__extensions__/verify")
+        events = await client.get("/api/audit/scopes/extensions/events")
+        verified = await client.get("/api/audit/scopes/extensions/verify")
+        legacy_events = await client.get("/api/sessions/extensions/events")
+        missing = await client.get("/api/audit/scopes/unknown/events")
 
     assert created.status_code == 201
     assert any(
-        item["id"] == "__extensions__" and item["event_count"] >= 2
+        item["id"] == "extensions"
+        and item["kind"] == "system"
+        and item["event_count"] >= 2
+        and item["last_event_at"]
         for item in scopes.json()["scopes"]
     )
     assert events.status_code == 200
@@ -139,6 +144,8 @@ async def test_扩展审计范围可在界面查看并校验(app):
         "mcp_server_create_requested"
     )
     assert verified.json() == {"ok": True}
+    assert legacy_events.json() == events.json()
+    assert missing.status_code == 404
 
 
 async def test_控制面拒绝非本机host与跨源写请求(app):

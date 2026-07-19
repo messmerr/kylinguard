@@ -3,6 +3,7 @@ import time
 import pytest
 
 from kylinguard.audit import AuditError, AuditLog
+from kylinguard.authorization import execution_profile_fingerprint
 from kylinguard.config import Settings
 from kylinguard.models import (
     PermissionDecision,
@@ -82,7 +83,8 @@ def make_pipeline(tmp_path, outputs, mode=PermissionMode.ASK, roots=None,
     if mode == PermissionMode.FULL_ACCESS:
         sessions.set_session_full_access(
             "s1", enabled=True, expected_version=1,
-            updated_by="admin", execution_profile="sha256:test-profile",
+            updated_by="admin",
+            execution_profile=execution_profile_fingerprint(settings),
         )
     elif mode != PermissionMode.ASK or roots:
         sessions.set_permission_settings(
