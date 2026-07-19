@@ -1,19 +1,44 @@
 <template>
   <div class="kg-page audit-page">
     <div class="kg-page-inner audit-inner">
-      <div class="audit-toolbar kg-enter">
-        <label class="session-picker">
+      <div class="audit-kind-tabs kg-enter" role="tablist" aria-label="审计记录类型">
+        <button
+          class="audit-kind-tab"
+          :class="{ active: activeKind === 'task' }"
+          type="button"
+          role="tab"
+          :aria-selected="activeKind === 'task'"
+          @click="switchKind('task')"
+        >
+          <KgIcon name="task" :size="15" />
+          任务审计
+        </button>
+        <button
+          class="audit-kind-tab"
+          :class="{ active: activeKind === 'system' }"
+          type="button"
+          role="tab"
+          :aria-selected="activeKind === 'system'"
+          @click="switchKind('system')"
+        >
+          <KgIcon name="settings" :size="15" />
+          系统变更
+        </button>
+      </div>
+
+      <div class="audit-toolbar kg-enter" :class="{ 'is-system': activeKind === 'system' }">
+        <label v-if="activeKind === 'task'" class="session-picker">
           <el-select
-            :model-value="selectedId"
+            :model-value="selectedTaskId"
             :loading="targetsLoading"
-            :disabled="targetsLoading && !auditTargets.length"
+            :disabled="targetsLoading && !sessions.length"
             filterable
             placeholder="选择一项任务"
-            aria-label="选择审计范围"
-            @change="select"
+            aria-label="选择任务审计范围"
+            @change="selectTask"
           >
             <el-option
-              v-for="session in auditTargets"
+              v-for="session in sessions"
               :key="session.id"
               :label="session.title"
               :value="session.id"
@@ -21,7 +46,30 @@
           </el-select>
         </label>
 
-        <div v-if="selectedId" class="chain-summary" aria-live="polite">
+        <div v-else class="system-scope-picker" role="group" aria-label="系统变更范围">
+          <button
+            class="system-scope-option"
+            :class="{ active: selectedSystemScope === 'all' }"
+            type="button"
+            @click="selectSystemScope('all')"
+          >
+            全部
+            <span>{{ systemEventCount }}</span>
+          </button>
+          <button
+            v-for="scope in systemScopes"
+            :key="scope.id"
+            class="system-scope-option"
+            :class="{ active: selectedSystemScope === scope.id }"
+            type="button"
+            @click="selectSystemScope(scope.id)"
+          >
+            {{ scope.title }}
+            <span>{{ scope.event_count }}</span>
+          </button>
+        </div>
+
+        <div v-if="hasSelection" class="chain-summary" aria-live="polite">
           <span class="chain-status" :class="chainStatusClass">
             <KgIcon :name="chainStatusIcon" :size="14" />
             {{ chainStatusText }}
@@ -30,7 +78,7 @@
         </div>
         <el-button
           class="audit-export"
-          :disabled="!selectedId || !events.length || loading"
+          :disabled="!hasSelection || !events.length || loading"
           aria-label="导出当前范围的审计 JSON"
           @click="exportReport"
         >
@@ -40,7 +88,7 @@
       </div>
 
       <div
-        v-if="targetsError && auditTargets.length"
+        v-if="targetsError && hasAnyTargets"
         class="audit-notice is-error"
         role="alert"
       >
@@ -52,14 +100,14 @@
         <el-button size="small" :loading="targetsLoading" @click="loadAuditTargets">重新加载</el-button>
       </div>
 
-      <div v-if="targetsLoading && !auditTargets.length" class="kg-empty audit-empty audit-state kg-enter-fade">
+      <div v-if="targetsLoading && !hasAnyTargets" class="kg-empty audit-empty audit-state kg-enter-fade">
         <span class="kg-spinner" aria-hidden="true"></span>
         <strong>正在读取审计范围</strong>
         <span>正在同步任务与系统配置记录。</span>
       </div>
 
       <div
-        v-else-if="targetsError && !auditTargets.length"
+        v-else-if="targetsError && !hasAnyTargets"
         class="kg-empty audit-empty audit-state is-error kg-enter-fade"
         role="alert"
       >
@@ -83,14 +131,14 @@
       </div>
 
       <section
-        v-else-if="selectedId && events.length"
+        v-else-if="hasSelection && events.length"
         class="timeline kg-enter"
         :style="{ '--kg-enter-delay': '80ms' }"
         aria-label="审计事件"
       >
         <article
           v-for="ev in pagedEvents"
-          :key="ev.seq"
+          :key="eventKey(ev)"
           class="event"
           :class="[eventTone(ev), { 'is-internal': isInternalEvent(ev.event_type) }]"
         >
@@ -101,11 +149,14 @@
           <button
             class="event-head"
             type="button"
-            :aria-expanded="expanded.has(ev.seq)"
-            @click="toggle(ev.seq)"
+            :aria-expanded="expanded.has(eventKey(ev))"
+            @click="toggle(eventKey(ev))"
           >
             <span class="event-seq">#{{ ev.seq }}</span>
-            <span class="event-type" :title="typeLabel(ev.event_type)">{{ typeLabel(ev.event_type) }}</span>
+            <span class="event-type" :title="typeLabel(ev.event_type)">
+              <small v-if="activeKind === 'system'">{{ ev.scope_title }}</small>
+              {{ typeLabel(ev.event_type) }}
+            </span>
             <span class="event-brief" :title="brief(ev)">{{ brief(ev) }}</span>
             <span class="event-ts">
               <span class="event-date">{{ tsParts(ev.ts).date }}</span>
@@ -116,11 +167,11 @@
               name="chevron"
               :size="14"
               class="event-chevron"
-              :class="{ open: expanded.has(ev.seq) }"
+              :class="{ open: expanded.has(eventKey(ev)) }"
             />
           </button>
 
-          <div v-if="expanded.has(ev.seq)" class="event-detail">
+          <div v-if="expanded.has(eventKey(ev))" class="event-detail">
             <dl v-if="detailRows(ev).length" class="detail-list">
               <div v-for="row in detailRows(ev)" :key="row.label" class="detail-row">
                 <dt>{{ row.label }}</dt>
@@ -140,15 +191,15 @@
               </div>
             </div>
 
-            <button class="raw-toggle" type="button" @click.stop="toggleRaw(ev.seq)">
-              {{ rawExpanded.has(ev.seq) ? '收起原始数据' : '查看原始数据' }}
+            <button class="raw-toggle" type="button" @click.stop="toggleRaw(eventKey(ev))">
+              {{ rawExpanded.has(eventKey(ev)) ? '收起原始数据' : '查看原始数据' }}
               <KgIcon
                 name="chevron"
                 :size="13"
-                :class="{ open: rawExpanded.has(ev.seq) }"
+                :class="{ open: rawExpanded.has(eventKey(ev)) }"
               />
             </button>
-            <pre v-if="rawExpanded.has(ev.seq)" class="event-payload">{{
+            <pre v-if="rawExpanded.has(eventKey(ev))" class="event-payload">{{
               JSON.stringify(ev.payload, null, 2)
             }}</pre>
           </div>
@@ -165,16 +216,16 @@
         </div>
       </section>
 
-      <div v-else-if="selectedId" class="kg-empty audit-empty audit-state kg-enter-fade">
+      <div v-else-if="hasSelection" class="kg-empty audit-empty audit-state kg-enter-fade">
         <KgIcon name="audit" :size="28" />
-        <strong>这项任务还没有审计事件</strong>
+        <strong>{{ activeKind === 'task' ? '这项任务还没有审计事件' : '当前范围还没有系统变更记录' }}</strong>
       </div>
 
       <div v-else class="kg-empty audit-empty audit-state kg-enter-fade">
         <KgIcon name="audit" :size="28" />
-        <strong>{{ auditTargets.length ? '选择一项范围查看审计记录' : '还没有可审计的记录' }}</strong>
-        <span v-if="auditTargets.length">每次检查、确认和执行都会记录在这里。</span>
-        <span v-else-if="targetsLoaded">任务运行或系统配置发生变更后，记录会显示在这里。</span>
+        <strong>{{ sessions.length ? '选择一项任务查看审计记录' : '还没有任务审计记录' }}</strong>
+        <span v-if="sessions.length">每次检查、确认和执行都会记录在这里。</span>
+        <span v-else-if="targetsLoaded">任务运行后，完整决策链会显示在这里。</span>
       </div>
     </div>
   </div>
@@ -186,10 +237,12 @@ import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useApi.js'
 import { refreshSessions, sessions } from '../composables/useChat.js'
 
-const selectedId = ref('')
+const activeKind = ref('task')
+const selectedTaskId = ref('')
+const selectedSystemScope = ref('all')
 const systemScopes = ref([])
 const events = ref([])
-const chainOk = ref(null)
+const chainChecks = ref([])
 const loading = ref(false)
 const loadError = ref('')
 const targetsLoading = ref(false)
@@ -206,7 +259,19 @@ const pagedEvents = computed(() => {
   const start = (currentPage.value - 1) * pageSize
   return events.value.slice(start, start + pageSize)
 })
-const auditTargets = computed(() => [...systemScopes.value, ...sessions.value])
+const hasSelection = computed(() => (
+  activeKind.value === 'system' || Boolean(selectedTaskId.value)
+))
+const hasAnyTargets = computed(() => Boolean(
+  sessions.value.length || systemScopes.value.length,
+))
+const systemEventCount = computed(() => systemScopes.value.reduce(
+  (total, scope) => total + (scope.event_count || 0), 0,
+))
+const chainOk = computed(() => {
+  if (!chainChecks.value.length) return null
+  return chainChecks.value.every((check) => check.ok === true)
+})
 
 const TYPE_LABELS = {
   user_query: '管理员指令',
@@ -244,6 +309,8 @@ const TYPE_LABELS = {
   mcp_server_updated: '已修改 MCP',
   mcp_server_test_requested: '请求测试 MCP',
   mcp_server_tested: 'MCP 测试结果',
+  mcp_tool_policies_update_requested: '请求修改 MCP 工具风险',
+  mcp_tool_policies_updated: '已修改 MCP 工具风险',
   mcp_server_enable_requested: '请求启用 MCP',
   mcp_server_disable_requested: '请求停用 MCP',
   mcp_server_enabled: '已启用 MCP',
@@ -264,8 +331,11 @@ const TYPE_LABELS = {
   llm_provider_created: '已添加模型提供商',
   llm_provider_updated: '已修改模型提供商',
   llm_provider_deleted: '已删除模型提供商',
+  llm_provider_tested: '模型提供商测试结果',
   llm_models_discovered: '已读取提供商模型',
   llm_defaults_updated: '已更新默认模型',
+  policy_added: '已添加策略规则',
+  policy_removed: '已删除策略规则',
   skill_selection_rejected: 'Skill 切换被拒绝',
 }
 
@@ -301,8 +371,14 @@ const INTERNAL_EVENT_TYPES = new Set([
 const chainStatusText = computed(() => {
   if (loading.value) return '正在校验'
   if (loadError.value) return '校验未完成'
-  if (chainOk.value === true) return '链路校验通过'
-  if (chainOk.value === false) return '链路校验失败'
+  if (activeKind.value === 'system' && chainChecks.value.length > 1) {
+    const verified = chainChecks.value.filter((check) => check.ok === true).length
+    return chainOk.value === true
+      ? `${verified}/${chainChecks.value.length} 条配置审计链校验通过`
+      : `${verified}/${chainChecks.value.length} 条配置审计链通过，存在失败`
+  }
+  if (chainOk.value === true) return '审计链校验通过'
+  if (chainOk.value === false) return '审计链校验失败'
   return '等待校验'
 })
 
@@ -345,8 +421,10 @@ function eventIcon(type) {
     skill_routing_catalog: 'skill', skill_routing_decision: 'skill',
     skill_not_selected: 'skill', skill_selection_rejected: 'warning', skills_composed: 'skill',
     llm_provider_created: 'model', llm_provider_updated: 'model',
-    llm_provider_deleted: 'model', llm_models_discovered: 'model',
+    llm_provider_deleted: 'model', llm_provider_tested: 'model',
+    llm_models_discovered: 'model',
     llm_defaults_updated: 'model',
+    policy_added: 'shield', policy_removed: 'shield',
     task_cancelled: 'close',
     skill_selected: 'skill',
   }[type] || 'audit'
@@ -419,9 +497,19 @@ function brief(ev) {
     case 'llm_provider_created':
     case 'llm_provider_updated': return `${p.name || p.provider_id || '提供商'} · ${(p.models || []).length} 个模型`
     case 'llm_provider_deleted': return p.name || p.provider_id || '模型提供商'
+    case 'llm_provider_tested': return `${p.provider_id || '提供商'} · ${p.ok ? '连接正常' : '连接失败'} · ${durationText(p.latency_ms)}`
     case 'llm_models_discovered': return `${p.provider_id || '提供商'} · ${(p.models || []).length} 个模型`
     case 'llm_defaults_updated': return `Agent ${modelLabel(p.agent)} · Reviewer ${modelLabel(p.reviewer)}`
-    default: return '—'
+    case 'policy_added': return `${p.kind || '策略'} · ${compactText(p.pattern || '', 72)}`
+    case 'policy_removed': return `${p.kind || '策略'} · ${compactText(p.pattern || '', 72)}`
+    default:
+      if (ev.event_type.startsWith('mcp_')) {
+        return `${p.name || p.server_id || 'MCP 服务'} · 操作人 ${p.operator || '—'}`
+      }
+      if (ev.event_type.startsWith('skill_')) {
+        return `${p.name || p.skill_id || 'Skill'} · 操作人 ${p.operator || '—'}`
+      }
+      return '—'
   }
 }
 
@@ -591,13 +679,17 @@ function detailRows(ev) {
     case 'llm_provider_created':
     case 'llm_provider_updated':
     case 'llm_provider_deleted':
+    case 'llm_provider_tested':
     case 'llm_models_discovered':
       return [
         { label: '提供商', value: p.name || p.provider_id || '—' },
         { label: '提供商编号', value: p.provider_id || '—', mono: true },
         ...(p.adapter ? [{ label: '接口类型', value: p.adapter, mono: true }] : []),
         ...(p.models ? [{ label: '模型', value: p.models.join('、') || '无', mono: true }] : []),
+        ...(p.ok != null ? [{ label: '测试结果', value: p.ok ? '连接正常' : '连接失败' }] : []),
+        ...(p.latency_ms != null ? [{ label: '响应耗时', value: durationText(p.latency_ms), mono: true }] : []),
         ...(p.version != null ? [{ label: '配置版本', value: String(p.version), mono: true }] : []),
+        { label: '操作人', value: p.operator || '—' },
       ]
     case 'llm_defaults_updated':
       return [
@@ -605,7 +697,37 @@ function detailRows(ev) {
         { label: 'Reviewer 模型', value: modelContextText(p.reviewer) },
         { label: '配置版本', value: String(p.version ?? '—'), mono: true },
       ]
+    case 'policy_added':
+    case 'policy_removed':
+      return [
+        { label: '策略编号', value: String(p.policy_id ?? '—'), mono: true },
+        { label: '策略类型', value: p.kind || '—' },
+        { label: '匹配内容', value: p.pattern || '—', mono: true },
+        { label: '说明', value: p.note || '—' },
+        { label: '操作人', value: p.operator || '—' },
+      ]
     default:
+      if (ev.event_type.startsWith('mcp_')) {
+        return [
+          { label: 'MCP 服务', value: p.name || p.server_id || '—' },
+          { label: '服务编号', value: p.server_id || '—', mono: true },
+          ...(p.version != null ? [{ label: '配置版本', value: String(p.version), mono: true }] : []),
+          ...(p.enabled != null ? [{ label: '启用状态', value: p.enabled ? '已启用' : '已停用' }] : []),
+          ...(p.tools ? [{ label: '工具', value: p.tools.join('、') || '无', mono: true }] : []),
+          ...(p.error ? [{ label: '结果说明', value: p.error }] : []),
+          { label: '操作人', value: p.operator || '—' },
+        ]
+      }
+      if (ev.event_type.startsWith('skill_')) {
+        return [
+          { label: 'Skill', value: p.name || p.skill_id || p.id || '—' },
+          { label: 'Skill 编号', value: p.skill_id || p.id || '—', mono: true },
+          ...(p.version ? [{ label: '版本', value: String(p.version), mono: true }] : []),
+          ...(p.enabled != null ? [{ label: '启用状态', value: p.enabled ? '已启用' : '已停用' }] : []),
+          ...(p.required_tools ? [{ label: '工具依赖', value: p.required_tools.join('、') || '无', mono: true }] : []),
+          { label: '操作人', value: p.operator || '—' },
+        ]
+      }
       return []
   }
 }
@@ -651,16 +773,30 @@ function tsParts(ts) {
   return { date: dateText, time: timeText }
 }
 
-function toggle(seq) {
-  expanded.has(seq) ? expanded.delete(seq) : expanded.add(seq)
+function eventKey(ev) {
+  return `${ev.scope_id || 'task'}:${ev.seq}`
 }
 
-function toggleRaw(seq) {
-  rawExpanded.has(seq) ? rawExpanded.delete(seq) : rawExpanded.add(seq)
+function toggle(key) {
+  expanded.has(key) ? expanded.delete(key) : expanded.add(key)
+}
+
+function toggleRaw(key) {
+  rawExpanded.has(key) ? rawExpanded.delete(key) : rawExpanded.add(key)
+}
+
+function resetAuditResult() {
+  events.value = []
+  chainChecks.value = []
+  loadError.value = ''
+  expanded.clear()
+  rawExpanded.clear()
+  currentPage.value = 1
 }
 
 function retrySelected() {
-  if (selectedId.value) select(selectedId.value)
+  if (activeKind.value === 'system') loadSystemSelection()
+  else if (selectedTaskId.value) selectTask(selectedTaskId.value)
 }
 
 async function responseError(response, fallback) {
@@ -672,15 +808,10 @@ async function responseError(response, fallback) {
   }
 }
 
-async function select(id) {
+async function selectTask(id) {
   const requestId = ++selectRequest
-  selectedId.value = id || ''
-  events.value = []
-  chainOk.value = null
-  loadError.value = ''
-  expanded.clear()
-  rawExpanded.clear()
-  currentPage.value = 1
+  selectedTaskId.value = id || ''
+  resetAuditResult()
   if (!id) {
     loading.value = false
     return
@@ -700,11 +831,15 @@ async function select(id) {
     }
     const eventBody = await eventResponse.json()
     const verifyBody = await verifyResponse.json()
-    if (requestId !== selectRequest || selectedId.value !== id) return
+    if (requestId !== selectRequest
+        || activeKind.value !== 'task'
+        || selectedTaskId.value !== id) return
     events.value = eventBody.events || []
-    chainOk.value = verifyBody.ok
+    chainChecks.value = [{ id, title: '任务审计', ok: verifyBody.ok }]
   } catch (error) {
-    if (requestId === selectRequest && selectedId.value === id) {
+    if (requestId === selectRequest
+        && activeKind.value === 'task'
+        && selectedTaskId.value === id) {
       loadError.value = error.message || '请稍后重试'
     }
   } finally {
@@ -712,17 +847,111 @@ async function select(id) {
   }
 }
 
+async function readSystemScope(scope) {
+  let [eventResponse, verifyResponse] = await Promise.all([
+    apiFetch(`/api/audit/scopes/${scope.id}/events`),
+    apiFetch(`/api/audit/scopes/${scope.id}/verify`),
+  ])
+  // 滚动升级期间，旧后端仍会返回 __extensions__ 一类内部 ID，且只提供
+  // 历史会话路由。识别这种响应并只读回退；新后端始终使用独立范围接口。
+  if ((eventResponse.status === 404 || verifyResponse.status === 404)
+      && /^__[a-z0-9_]+__$/.test(scope.id)) {
+    [eventResponse, verifyResponse] = await Promise.all([
+      apiFetch(`/api/sessions/${scope.id}/events`),
+      apiFetch(`/api/sessions/${scope.id}/verify`),
+    ])
+  }
+  if (!eventResponse.ok) {
+    throw new Error(await responseError(
+      eventResponse, `服务器未能返回${scope.title}审计事件`,
+    ))
+  }
+  if (!verifyResponse.ok) {
+    throw new Error(await responseError(
+      verifyResponse, `服务器未能校验${scope.title}审计链`,
+    ))
+  }
+  const eventBody = await eventResponse.json()
+  const verifyBody = await verifyResponse.json()
+  return {
+    scope,
+    events: (eventBody.events || []).map((event) => ({
+      ...event,
+      scope_id: scope.id,
+      scope_title: scope.title,
+    })),
+    ok: verifyBody.ok,
+  }
+}
+
+async function loadSystemSelection() {
+  const requestId = ++selectRequest
+  const selectedScope = selectedSystemScope.value
+  const scopes = selectedScope === 'all'
+    ? systemScopes.value
+    : systemScopes.value.filter((scope) => scope.id === selectedScope)
+  resetAuditResult()
+  if (!scopes.length) {
+    loading.value = false
+    return
+  }
+
+  loading.value = true
+  try {
+    const results = await Promise.all(scopes.map(readSystemScope))
+    if (requestId !== selectRequest
+        || activeKind.value !== 'system'
+        || selectedSystemScope.value !== selectedScope) return
+    events.value = results
+      .flatMap((result) => result.events)
+      .sort((left, right) => new Date(right.ts) - new Date(left.ts))
+    chainChecks.value = results.map((result) => ({
+      id: result.scope.id,
+      title: result.scope.title,
+      ok: result.ok,
+    }))
+  } catch (error) {
+    if (requestId === selectRequest
+        && activeKind.value === 'system'
+        && selectedSystemScope.value === selectedScope) {
+      loadError.value = error.message || '请稍后重试'
+    }
+  } finally {
+    if (requestId === selectRequest) loading.value = false
+  }
+}
+
+function selectSystemScope(scopeId) {
+  selectedSystemScope.value = scopeId || 'all'
+  loadSystemSelection()
+}
+
+function switchKind(kind) {
+  if (kind === activeKind.value) return
+  ++selectRequest
+  activeKind.value = kind
+  resetAuditResult()
+  if (kind === 'system') loadSystemSelection()
+  else if (selectedTaskId.value) selectTask(selectedTaskId.value)
+  else loading.value = false
+}
+
 function exportReport() {
+  const targetId = activeKind.value === 'task'
+    ? selectedTaskId.value
+    : selectedSystemScope.value
   const report = {
-    session_id: selectedId.value,
+    scope_type: activeKind.value,
+    scope_id: targetId,
     exported_at: new Date().toISOString(),
     chain_verified: chainOk.value,
+    chains: chainChecks.value,
     events: events.value,
   }
   const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })
   const anchor = document.createElement('a')
   anchor.href = URL.createObjectURL(blob)
-  anchor.download = `kylinguard-audit-${selectedId.value.slice(0, 8)}.json`
+  anchor.download = `kylinguard-audit-${activeKind.value}-${targetId.slice(0, 16)}.json`
   anchor.click()
   URL.revokeObjectURL(anchor.href)
 }
@@ -754,6 +983,9 @@ async function loadAuditTargets() {
   targetsLoaded.value = scopeResult.status === 'fulfilled' || sessionsResult.status === 'fulfilled'
   targetsError.value = errors.join('；')
   targetsLoading.value = false
+  if (activeKind.value === 'system' && scopeResult.status === 'fulfilled') {
+    loadSystemSelection()
+  }
 }
 
 onMounted(loadAuditTargets)
@@ -765,14 +997,72 @@ onMounted(loadAuditTargets)
   min-height: 100%;
 }
 
+.audit-kind-tabs {
+  display: inline-flex;
+  gap: 3px;
+  margin-top: var(--kg-space-2);
+  padding: 3px;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-bg-surface-1);
+}
+
+.audit-kind-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 15px;
+  border: 0;
+  border-radius: var(--kg-radius-sm);
+  background: transparent;
+  color: var(--kg-text-tertiary);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background var(--kg-motion-fast) var(--kg-ease-standard),
+    color var(--kg-motion-fast) var(--kg-ease-standard);
+}
+
+.audit-kind-tab:hover { color: var(--kg-text-primary); }
+.audit-kind-tab.active {
+  background: var(--kg-bg-canvas);
+  color: var(--kg-accent);
+  box-shadow: var(--kg-shadow-xs);
+}
+
 .audit-toolbar {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: var(--kg-space-5);
-  margin-top: var(--kg-space-2);
+  margin-top: var(--kg-space-4);
   padding-bottom: var(--kg-space-4);
   border-bottom: 1px solid var(--kg-border-subtle);
+}
+
+.audit-toolbar.is-system {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--kg-space-3) var(--kg-space-5);
+}
+
+.audit-toolbar.is-system .system-scope-picker {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.audit-toolbar.is-system .chain-summary {
+  grid-column: 1;
+  grid-row: 2;
+  justify-content: flex-start;
+  margin-left: 0;
+}
+
+.audit-toolbar.is-system .audit-export {
+  grid-column: 2;
+  grid-row: 2;
 }
 
 .session-picker {
@@ -781,6 +1071,46 @@ onMounted(loadAuditTargets)
   width: min(380px, 45%);
   color: var(--kg-text-tertiary);
   font-size: 12px;
+}
+
+.system-scope-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.system-scope-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-pill);
+  background: transparent;
+  color: var(--kg-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all var(--kg-motion-fast) var(--kg-ease-standard);
+}
+
+.system-scope-option:hover {
+  border-color: var(--kg-border-default);
+  color: var(--kg-text-primary);
+}
+
+.system-scope-option.active {
+  border-color: var(--kg-accent-bright);
+  background: var(--kg-accent-soft);
+  color: var(--kg-accent);
+}
+
+.system-scope-option span {
+  color: var(--kg-text-disabled);
+  font-family: var(--kg-font-mono);
+  font-size: 10px;
 }
 
 .audit-export {
@@ -895,6 +1225,13 @@ onMounted(loadAuditTargets)
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.event-type small {
+  margin-right: 5px;
+  color: var(--kg-text-tertiary);
+  font-size: 10px;
+  font-weight: 400;
 }
 
 .event-brief {
@@ -1043,6 +1380,8 @@ onMounted(loadAuditTargets)
 
 @media (max-width: 1080px) {
   .session-picker { width: min(340px, 52%); }
+  .audit-toolbar { flex-wrap: wrap; }
+  .system-scope-picker { flex-basis: 100%; }
 
   .event-head {
     grid-template-columns: 28px 96px minmax(100px, 1fr) 72px 14px;
@@ -1053,6 +1392,9 @@ onMounted(loadAuditTargets)
 }
 
 @media (max-width: 720px) {
+  .audit-kind-tabs { display: flex; }
+  .audit-kind-tab { flex: 1; justify-content: center; }
+
   .audit-toolbar {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -1061,6 +1403,13 @@ onMounted(loadAuditTargets)
   }
 
   .session-picker { width: 100%; }
+  .system-scope-picker {
+    grid-column: 1 / -1;
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 2px;
+  }
 
   .chain-summary {
     grid-column: 1 / -1;
