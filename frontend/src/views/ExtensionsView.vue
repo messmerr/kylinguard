@@ -24,7 +24,7 @@
         </div>
       </div>
 
-      <section class="extension-section">
+      <section class="extension-section kg-enter">
         <div class="section-head">
           <div>
             <h2 class="kg-section-title">第三方 MCP</h2>
@@ -45,18 +45,18 @@
             <template #default="{ row }">
               <div class="name-cell">
                 <span class="state-dot" :class="{ enabled: row.enabled }"></span>
-                <span><strong>{{ row.name }}</strong><small>{{ row.id }}</small></span>
+                <span><strong :title="row.name">{{ row.name }}</strong><small :title="row.id">{{ row.id }}</small></span>
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="启动命令" min-width="260">
+          <el-table-column label="启动命令" min-width="340">
             <template #default="{ row }">
               <code class="command" :title="commandText(row)">{{ commandText(row) }}</code>
             </template>
           </el-table-column>
           <el-table-column label="工具" width="78" align="center">
             <template #default="{ row }">
-              <span :title="row.tools.map(tool => tool.name).join('、')">{{ row.toolCount }}</span>
+              <span class="kg-mono tool-count" :title="row.tools.map(tool => tool.name).join('、')">{{ row.toolCount }}</span>
             </template>
           </el-table-column>
           <el-table-column label="连接状态" width="112">
@@ -102,7 +102,7 @@
         </div>
       </section>
 
-      <section class="extension-section skill-section">
+      <section class="extension-section skill-section kg-enter" :style="{ '--kg-enter-delay': '90ms' }">
         <div class="section-head">
           <div>
             <h2 class="kg-section-title">Skills</h2>
@@ -119,11 +119,11 @@
         </div>
 
         <el-table v-if="extensionSkills.length" :data="extensionSkills" class="extension-table skill-table">
-          <el-table-column label="Skill" min-width="190">
+          <el-table-column label="Skill" min-width="210">
             <template #default="{ row }">
               <div class="name-cell skill-name">
                 <span class="skill-mark"><KgIcon name="task" :size="14" /></span>
-                <span><strong>{{ row.name }}</strong><small>{{ row.id }}</small></span>
+                <span><strong :title="row.name">{{ row.name }}</strong><small :title="row.id">{{ row.id }}</small></span>
               </div>
             </template>
           </el-table-column>
@@ -868,7 +868,7 @@ function showBuiltinSkillRestriction(action) {
 </script>
 
 <style scoped>
-.extensions-inner { width: min(100%, 1160px); }
+.extensions-inner { width: 100%; }
 .extension-error { min-height: 40px; display: flex; align-items: center; gap: 8px; margin-top: var(--kg-space-4); padding: 7px 10px; border: 1px solid var(--kg-danger-border); border-radius: var(--kg-radius-sm); background: var(--kg-danger-soft); color: var(--kg-danger); font-size: 12px; }
 .extension-error > span { min-width: 0; flex: 1; }
 .extension-loading { min-height: 48px; display: flex; align-items: center; gap: 10px; margin-top: var(--kg-space-4); padding: 8px 11px; border: 1px solid var(--kg-info-border); border-radius: var(--kg-radius-sm); background: var(--kg-info-soft); color: var(--kg-info); }
@@ -881,24 +881,35 @@ function showBuiltinSkillRestriction(action) {
 .skill-issues span { overflow-wrap: anywhere; }
 .extension-section { margin-top: var(--kg-space-6); }
 .extensions-inner > .extension-section:first-child { margin-top: 0; }
-.section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--kg-space-5); margin-bottom: var(--kg-space-3); }
-.section-head p { margin: 3px 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
-.section-meta { display: flex; align-items: center; gap: var(--kg-space-2); }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--kg-space-5); margin-bottom: var(--kg-space-4); }
+/* 标题左侧渐变装饰条，与页头标题层次呼应 */
+.section-head .kg-section-title { position: relative; padding-left: 11px; }
+.section-head .kg-section-title::before { content: ''; position: absolute; top: 3px; bottom: 3px; left: 0; width: 3px; border-radius: var(--kg-radius-pill); background: var(--kg-accent-gradient); }
+.section-head p { margin: 3px 0 0; padding-left: 11px; color: var(--kg-text-tertiary); font-size: 12px; }
+.section-meta { display: flex; align-items: center; gap: var(--kg-space-3); }
 .section-meta :deep(.el-button) { gap: 5px; margin-left: 0; }
-.section-count { color: var(--kg-text-tertiary); font-size: 12px; white-space: nowrap; }
+/* 计数数字统一等宽 + 表格数字对齐 */
+.section-count { color: var(--kg-text-tertiary); font: 600 12px/1.5 var(--kg-font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .name-cell { min-width: 0; display: flex; align-items: center; gap: 9px; }
 .name-cell > span:last-child { min-width: 0; display: grid; }
 .name-cell strong { overflow: hidden; color: var(--kg-text-primary); font-size: 13px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
-.name-cell small { margin-top: 1px; color: var(--kg-text-tertiary); font: 10px/1.3 var(--kg-font-mono); }
+/* Skill 名放宽到两行，完整名走 :title */
+.skill-name strong { display: -webkit-box; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+/* slug 按字符折行，避免断词难看 */
+.name-cell small { margin-top: 1px; color: var(--kg-text-tertiary); font: 10px/1.3 var(--kg-font-mono); word-break: break-all; }
 .state-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--kg-text-disabled); }
 .state-dot.enabled { background: var(--kg-success); }
-.command { display: block; overflow: hidden; color: var(--kg-text-secondary); font: 11px/1.45 var(--kg-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+/* 启动命令：等宽 + 按字符折行，最多两行，完整命令走 :title */
+.command { display: -webkit-box; overflow: hidden; color: var(--kg-text-secondary); font: 11px/1.45 var(--kg-font-mono); word-break: break-all; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .connection-state { font-size: 11px; }
 .connection-state.ok { color: var(--kg-success); }
 .connection-state.failed { color: var(--kg-danger); }
 .connection-state.pending { color: var(--kg-warning); }
 .connection-state.unknown, .connection-state.muted, .muted { color: var(--kg-text-tertiary); }
-.row-actions { display: flex; justify-content: center; white-space: nowrap; }
+/* 行高放宽，两行文本与 toggle 不拥挤 */
+.extension-table :deep(td.el-table__cell) { height: 56px; padding: 10px 0; }
+.tool-count { color: var(--kg-text-secondary); font-weight: 600; }
+.row-actions { display: flex; justify-content: center; gap: 4px; white-space: nowrap; }
 .row-actions :deep(.el-button + .el-button) { margin-left: 0; }
 .row-actions :deep(.restricted-skill-action) { color: var(--kg-text-disabled); }
 .row-actions :deep(.restricted-skill-action:hover),
@@ -910,19 +921,22 @@ function showBuiltinSkillRestriction(action) {
 .empty-state strong { color: var(--kg-text-primary); font-size: 13px; font-weight: 550; }
 .empty-state p { margin: 3px 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
 .empty-state > :deep(.el-button) { gap: 5px; }
-.skill-section { padding-bottom: var(--kg-space-7); }
+.skill-section { padding-bottom: var(--kg-space-8); }
 .skill-mark { width: 28px; height: 28px; display: grid; flex: none; place-items: center; border-radius: var(--kg-radius-sm); background: var(--kg-accent-soft); color: var(--kg-accent); }
 .skill-mark.large { width: 36px; height: 36px; }
-.description, .tool-summary { display: block; overflow: hidden; color: var(--kg-text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+/* 说明列：两行 clamp，完整文本走 :title */
+.description { display: -webkit-box; overflow: hidden; color: var(--kg-text-secondary); font-size: 12px; line-height: 1.55; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+/* 工具依赖：chip 化单行截断，完整列表走 :title */
+.tool-summary { display: inline-block; max-width: 100%; overflow: hidden; padding: 1px 6px; border-radius: var(--kg-radius-xs); background: var(--kg-bg-surface-3); color: var(--kg-text-secondary); font: 10px/1.5 var(--kg-font-mono); text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
 .missing-tools { display: block; margin-top: 2px; color: var(--kg-danger); font-size: 10px; }
-.source-badge, .mode-badge { display: inline-flex; padding: 2px 6px; border-radius: var(--kg-radius-xs); background: var(--kg-bg-surface-3); color: var(--kg-text-secondary); font-size: 10px; }
+.source-badge, .mode-badge { display: inline-flex; padding: 2px 6px; border-radius: var(--kg-radius-xs); background: var(--kg-bg-surface-3); color: var(--kg-text-secondary); font-size: 10px; white-space: nowrap; }
 :deep(.extension-edit-dialog) { display: flex; max-height: calc(100vh - 32px); flex-direction: column; }
 :deep(.extension-edit-dialog .el-dialog__body) { min-height: 0; overflow-y: auto; }
 :deep(.extension-edit-dialog .el-dialog__footer) { flex: none; border-top: 1px solid var(--kg-border-subtle); }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--kg-space-4); }
-:deep(.el-form-item) { margin-bottom: 17px; }
-:deep(.el-form-item__label) { margin-bottom: 6px; color: var(--kg-text-secondary); font-size: 12px; line-height: 18px; }
-.field-note { margin-top: 5px; color: var(--kg-text-tertiary); font-size: 11px; }
+:deep(.el-form-item) { margin-bottom: var(--kg-space-4); }
+:deep(.el-form-item__label) { margin-bottom: var(--kg-space-1); color: var(--kg-text-secondary); font-size: 12px; line-height: 18px; }
+.field-note { margin-top: var(--kg-space-1); color: var(--kg-text-tertiary); font-size: 11px; }
 .scope-warning { display: flex; align-items: flex-start; gap: 8px; margin: -4px 0 16px; padding: 9px 11px; border: 1px solid var(--kg-warning-border); border-radius: var(--kg-radius-sm); background: var(--kg-warning-soft); color: var(--kg-warning); font-size: 11px; line-height: 1.55; }
 .import-warning { margin: 0 0 16px; }
 .import-warning > div { display: grid; gap: 2px; }

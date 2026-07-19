@@ -58,7 +58,12 @@
   font-size: 13px;
   font-weight: 500;
   transition: color var(--kg-motion-fast), background var(--kg-motion-fast),
-    border-color var(--kg-motion-fast);
+    border-color var(--kg-motion-fast), box-shadow var(--kg-motion-fast),
+    transform var(--kg-motion-fast);
+}
+
+.el-button:not(.is-text):not(.is-link):active {
+  transform: translateY(1px);
 }
 
 .el-button--primary {
@@ -71,6 +76,11 @@
   --el-button-active-text-color: var(--kg-text-on-accent);
   --el-button-active-bg-color: var(--kg-accent-active);
   --el-button-active-border-color: var(--kg-accent-active);
+  box-shadow: 0 3px 10px rgb(23 92 255 / 22%);
+}
+
+.el-button--primary:hover {
+  box-shadow: 0 6px 16px rgb(23 92 255 / 30%);
 }
 
 .el-button--warning {
@@ -119,6 +129,14 @@
     0 0 0 3px rgb(23 92 255 / 12%);
 }
 
+/* Element 控件的焦点视觉由外层 wrapper 光环承担；
+   内部原生输入框的全局 :focus-visible 描边会形成“两层框”，这里去掉内层。 */
+.el-input__inner:focus-visible,
+.el-select__input:focus-visible,
+.el-textarea__inner:focus-visible {
+  outline: none;
+}
+
 .el-table,
 .el-table tr,
 .el-table td.el-table__cell {
@@ -135,14 +153,15 @@
 }
 
 .el-table th.el-table__cell {
-  height: 38px;
+  height: 40px;
   background: var(--kg-bg-surface-2);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 11.5px;
+  font-weight: 550;
+  letter-spacing: .03em;
 }
 
 .el-table td.el-table__cell {
-  height: 44px;
+  height: 48px;
   font-size: 13px;
 }
 
@@ -153,8 +172,9 @@
 
 .el-tag {
   height: 22px;
-  border-radius: var(--kg-radius-xs);
+  border-radius: var(--kg-radius-pill);
   font-size: 12px;
+  font-weight: 500;
 }
 
 .el-dialog {
@@ -171,24 +191,35 @@
 }
 
 .el-tabs__item {
-  height: 38px;
+  height: 40px;
   color: var(--kg-text-tertiary);
   font-size: 13px;
+  transition: color var(--kg-motion-fast);
 }
 
-.el-tabs__item.is-active,
+.el-tabs__item.is-active {
+  color: var(--kg-text-primary);
+  font-weight: 600;
+}
+
 .el-tabs__item:hover {
   color: var(--kg-text-primary);
 }
 
 .el-tabs__active-bar {
   height: 2px;
+  border-radius: 2px;
   background: var(--kg-accent);
 }
 
 .el-tabs__nav-wrap::after {
   height: 1px;
   background: var(--kg-border-subtle);
+}
+
+/* tab 内容切换时轻微淡入，让切换有感知 */
+.el-tabs__content .el-tab-pane {
+  animation: kg-fade-in var(--kg-motion-base) var(--kg-ease-standard);
 }
 
 .el-collapse {

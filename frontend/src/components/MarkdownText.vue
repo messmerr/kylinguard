@@ -59,27 +59,26 @@ async function handleContentClick(event) {
 </script>
 
 <style>
-.md { color: var(--kg-text-secondary); font-size: 14px; line-height: 1.78; word-break: break-word; }
+.md { color: var(--kg-text-secondary); font-size: 14px; line-height: 1.7; word-break: break-word; }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
-.md p { margin: 8px 0; }
+.md p { margin: 9px 0; }
 .md strong { color: var(--kg-text-primary); font-weight: 600; }
-.md h1 { margin: 22px 0 10px; color: var(--kg-text-primary); font-size: 22px;
-  font-weight: 650; line-height: 1.35; letter-spacing: 0; }
-.md h3 { margin: 18px 0 7px; color: var(--kg-text-primary); font-size: 15px;
+.md h1 { margin: 20px 0 8px; color: var(--kg-text-primary); font-size: 18px;
+  font-weight: 650; line-height: 1.4; letter-spacing: 0; }
+.md h3 { margin: 14px 0 6px; color: var(--kg-text-primary); font-size: 14px;
   font-weight: 600; line-height: 1.45; }
-.md h2 { margin: 20px 0 8px; padding-top: 14px;
-  border-top: 1px solid var(--kg-border-subtle); color: var(--kg-text-primary);
-  font-size: 15px; font-weight: 600; line-height: 1.45; }
-.md ul, .md ol { margin: 8px 0; padding-left: 23px; }
-.md li { margin: 4px 0; padding-left: 2px; }
+.md h2 { margin: 18px 0 8px; color: var(--kg-text-primary);
+  font-size: 16px; font-weight: 600; line-height: 1.45; }
+.md ul, .md ol { margin: 9px 0; padding-left: 23px; }
+.md li { margin: 5px 0; padding-left: 2px; }
 .md li::marker { color: var(--kg-accent); font-family: var(--kg-font-mono); font-size: .85em; }
 .md code { padding: 2px 5px; border: 1px solid var(--kg-border-subtle);
-  border-radius: var(--kg-radius-xs); background: var(--kg-bg-surface-2); color: var(--kg-accent);
+  border-radius: var(--kg-radius-xs); background: var(--kg-bg-surface-3); color: var(--kg-accent);
   font-family: var(--kg-font-mono); font-size: .88em; }
 .md pre { position: relative; margin: 11px 0; padding: 13px 14px; overflow-x: auto;
-  border: 1px solid var(--kg-border-default); border-radius: var(--kg-radius-md);
-  background: var(--kg-bg-surface-1); }
+  border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md);
+  background: var(--kg-bg-surface-3); }
 .md pre code { padding: 0; border: none; background: none; color: var(--kg-text-secondary);
   font-size: 12px; line-height: 1.65; }
 .md table { display: block; width: 100%; margin: 11px 0; overflow-x: auto;

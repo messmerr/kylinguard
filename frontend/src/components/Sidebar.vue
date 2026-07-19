@@ -149,16 +149,17 @@ function timeText(ts) {
 }
 
 .brand-mark {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   display: grid;
   flex: none;
   place-items: center;
   border: 0;
-  border-radius: var(--kg-radius-sm);
-  background: var(--kg-accent);
+  border-radius: 9px;
+  background: var(--kg-accent-gradient);
   color: #fff;
-  box-shadow: 0 4px 12px rgb(23 92 255 / 18%);
+  box-shadow: 0 6px 16px rgb(23 92 255 / 30%),
+    inset 0 1px 0 rgb(255 255 255 / 22%);
 }
 
 .brand-copy {
@@ -168,49 +169,58 @@ function timeText(ts) {
 }
 
 .brand-copy strong {
-  color: #1046c7;
+  background: var(--kg-accent-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
   font-size: 16px;
-  font-weight: 700;
+  font-weight: 750;
+  letter-spacing: .02em;
 }
 
 .brand-copy span {
   margin-top: 3px;
   color: var(--kg-text-tertiary);
   font-size: 11px;
-  letter-spacing: 0;
+  letter-spacing: .04em;
 }
 
 .new-btn {
-  height: 34px;
+  height: 36px;
   margin: var(--kg-space-3) var(--kg-space-3) var(--kg-space-2);
   padding: 0 var(--kg-space-3);
   display: flex;
   align-items: center;
   gap: var(--kg-space-2);
   flex: none;
-  border: 1px solid #a8c0ff;
-  border-radius: var(--kg-radius-sm);
-  background: #fff;
-  color: var(--kg-accent);
+  border: 1px solid transparent;
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-accent-gradient);
+  color: #fff;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 550;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgb(23 92 255 / 7%);
-  transition: color var(--kg-motion-fast), background var(--kg-motion-fast),
-    border-color var(--kg-motion-fast);
+  box-shadow: var(--kg-shadow-accent), inset 0 1px 0 rgb(255 255 255 / 18%);
+  transition: box-shadow var(--kg-motion-fast), transform var(--kg-motion-fast),
+    filter var(--kg-motion-fast);
 }
 
 .new-btn:hover:not(:disabled) {
-  border-color: var(--kg-accent);
-  background: var(--kg-accent-soft);
-  color: var(--kg-accent-hover);
+  filter: brightness(1.07);
+  box-shadow: 0 8px 20px rgb(23 92 255 / 32%),
+    inset 0 1px 0 rgb(255 255 255 / 18%);
+  transform: translateY(-1px);
 }
 
-.new-btn:active:not(:disabled) { background: var(--kg-bg-surface-3); }
+.new-btn:active:not(:disabled) {
+  transform: translateY(0);
+  filter: brightness(.97);
+}
 .new-btn:disabled {
   border-color: var(--kg-border-subtle);
   background: var(--kg-bg-surface-1);
   color: var(--kg-text-disabled);
+  box-shadow: none;
   cursor: not-allowed;
 }
 
@@ -223,33 +233,57 @@ function timeText(ts) {
 .nav-item {
   position: relative;
   width: 100%;
-  height: 36px;
+  height: 38px;
   padding: 0 var(--kg-space-3);
   display: flex;
   align-items: center;
   gap: 10px;
   border: 0;
-  border-radius: var(--kg-radius-sm);
+  border-radius: var(--kg-radius-md);
   background: transparent;
   border: 1px solid transparent;
   color: var(--kg-text-secondary);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
-  transition: color var(--kg-motion-fast), background var(--kg-motion-fast);
+  transition: color var(--kg-motion-fast), background var(--kg-motion-fast),
+    border-color var(--kg-motion-fast), box-shadow var(--kg-motion-fast);
+}
+
+.nav-item::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 50%;
+  width: 3px;
+  height: 0;
+  border-radius: 2px;
+  background: var(--kg-accent);
+  transform: translateY(-50%);
+  transition: height var(--kg-motion-base) var(--kg-ease-emphasized);
 }
 
 .nav-item:hover {
-  background: rgb(255 255 255 / 68%);
+  background: rgb(255 255 255 / 72%);
   color: var(--kg-text-primary);
 }
 
+/* 悬停时图标轻微前送，强化指向感 */
+.nav-item :deep(.kg-icon) {
+  transition: transform var(--kg-motion-base) var(--kg-ease-spring);
+}
+
+.nav-item:hover :deep(.kg-icon) { transform: translateX(2px); }
+
 .nav-item.active {
-  border-color: #9db9ff;
+  border-color: rgb(23 92 255 / 16%);
   background: #fff;
   color: var(--kg-accent);
-  box-shadow: 0 3px 10px rgb(23 92 255 / 8%);
+  font-weight: 550;
+  box-shadow: 0 4px 14px rgb(23 92 255 / 10%);
 }
+
+.nav-item.active::before { height: 18px; }
 
 .nav-item.active :deep(.kg-icon) { color: var(--kg-accent); }
 
@@ -305,9 +339,10 @@ function timeText(ts) {
 .section-label {
   padding: 0 var(--kg-space-4) var(--kg-space-2);
   color: var(--kg-text-tertiary);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 550;
   line-height: 18px;
+  letter-spacing: .07em;
 }
 
 .session-list {

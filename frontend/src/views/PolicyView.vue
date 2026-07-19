@@ -1,7 +1,7 @@
 <template>
   <div class="kg-page policy-page">
     <div class="kg-page-inner policy-inner">
-      <el-tabs v-model="policyTab" class="main-tabs">
+      <el-tabs v-model="policyTab" class="main-tabs kg-enter">
         <el-tab-pane label="权限模式" name="access">
 
           <section class="policy-section permission-section">
@@ -48,12 +48,13 @@
           :aria-busy="permissionChanging"
         >
           <button
-            v-for="mode in visiblePermissionModes"
+            v-for="(mode, modeIndex) in visiblePermissionModes"
             :key="mode.value"
             :ref="element => setPermissionModeButtonRef(mode.value, element)"
             type="button"
-            class="mode-card"
+            class="mode-card kg-enter"
             :class="[`is-${mode.tone}`, { active: permissionMode === mode.value }]"
+            :style="{ '--kg-enter-delay': `${modeIndex * 70}ms` }"
             role="radio"
             :aria-checked="permissionMode === mode.value"
             :aria-label="`${mode.label}：${mode.short}`"
@@ -79,11 +80,11 @@
           <div class="execution-facts">
             <div>
               <span>{{ executionIdentitySourceLabel() }}</span>
-              <code>{{ permissionContext.executorIdentity }}</code>
+              <code :title="permissionContext.executorIdentity">{{ permissionContext.executorIdentity }}</code>
             </div>
             <div>
               <span>Agent 工作目录</span>
-              <code>{{ permissionContext.workspaceRoot || '由服务器配置' }}</code>
+              <code :title="permissionContext.workspaceRoot || '由服务器配置'">{{ permissionContext.workspaceRoot || '由服务器配置' }}</code>
             </div>
             <div v-if="fullAccessActive">
               <span>完整 Shell</span>
@@ -156,7 +157,7 @@
           <article v-for="path in autoReviewRoots" :key="path" class="grant-row auto-review-root-row">
             <span class="grant-icon"><KgIcon name="disk" :size="15" /></span>
             <div class="grant-copy">
-              <code>{{ path }}</code>
+              <code :title="path">{{ path }}</code>
               <span>{{ permissionMode === 'auto_review' ? '全局自动审核已启用' : '切换到自动审核后生效' }} · 包含子目录</span>
             </div>
             <span class="grant-lifetime">全局</span>
@@ -179,7 +180,7 @@
           <article v-for="grant in activePermissionGrants" :key="grant.id" class="grant-row">
             <span class="grant-icon"><KgIcon :name="grant.resourceKind === 'path' ? 'disk' : 'terminal'" :size="15" /></span>
             <div class="grant-copy">
-              <code>{{ grant.path || grant.label || grant.resourceKind }}</code>
+              <code :title="grant.path || grant.label || grant.resourceKind">{{ grant.path || grant.label || grant.resourceKind }}</code>
               <span>{{ grantDescription(grant) }}</span>
             </div>
             <span class="grant-lifetime">{{ lifetimeLabel(grant.lifetime) }}</span>
@@ -239,7 +240,7 @@
             </template>
           </el-table-column>
           <el-table-column label="模式" min-width="260">
-            <template #default="{ row }"><code class="policy-pattern">{{ row.pattern }}</code></template>
+            <template #default="{ row }"><code class="policy-pattern" :title="row.pattern">{{ row.pattern }}</code></template>
           </el-table-column>
           <el-table-column label="说明" min-width="220">
             <template #default="{ row }"><span :class="{ muted: !row.note }">{{ row.note || '—' }}</span></template>
@@ -751,8 +752,8 @@ onMounted(() => {
 
 .mode-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: var(--kg-space-2);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--kg-space-3);
 }
 
 .mode-card {
@@ -761,61 +762,89 @@ onMounted(() => {
   display: grid;
   align-content: start;
   gap: 9px;
-  padding: 12px;
+  padding: 14px;
   border: 1px solid var(--kg-border-subtle);
-  border-radius: var(--kg-radius-md);
+  border-radius: var(--kg-radius-lg);
   background: var(--kg-bg-surface-1);
+  box-shadow: var(--kg-shadow-xs);
   color: var(--kg-text-tertiary);
   text-align: left;
   cursor: pointer;
   transition: border-color var(--kg-motion-fast), background var(--kg-motion-fast),
-    color var(--kg-motion-fast);
+    color var(--kg-motion-fast), box-shadow var(--kg-motion-fast),
+    transform var(--kg-motion-fast);
 }
 
-.mode-card:hover:not(:disabled) { border-color: var(--kg-border-default); background: var(--kg-bg-surface-2); }
-.mode-card.active { border-color: var(--kg-accent-active); background: var(--kg-accent-soft); }
-.mode-card.is-safe.active { border-color: var(--kg-success-border); background: var(--kg-success-soft); }
-.mode-card.is-warning.active { border-color: var(--kg-warning-border); background: var(--kg-warning-soft); }
-.mode-card.is-danger.active { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); }
+/* 入场动画只回填第一帧，播完后交还 transform，hover 位移才能生效 */
+.mode-card.kg-enter { animation-fill-mode: backwards; }
+
+.mode-card:hover:not(:disabled):not(.active) {
+  border-color: var(--kg-border-default);
+  box-shadow: var(--kg-shadow-md);
+  transform: translateY(-2px);
+}
+/* 选中态：inset 叠出第二圈 accent 描边（2px 观感），避免 1px→2px 的布局抖动 */
+.mode-card.active {
+  border-color: var(--kg-accent);
+  background: var(--kg-accent-soft);
+  box-shadow: inset 0 0 0 1px var(--kg-accent), var(--kg-shadow-sm);
+}
 .mode-card:disabled { opacity: .55; cursor: not-allowed; }
 
 .mode-card-head { display: flex; align-items: center; gap: 7px; }
-.mode-card-head strong { color: var(--kg-text-primary); font-size: 12px; font-weight: 600; }
-.mode-card > span:last-child { font-size: 11px; line-height: 1.45; }
+.mode-card-head strong { color: var(--kg-text-primary); font-size: 13px; font-weight: 600; }
+.mode-card > span:last-child { font-size: 12px; line-height: 1.5; }
 .mode-selected { margin-left: auto; color: var(--kg-accent); }
 .mode-card.is-danger .mode-card-head :deep(.kg-icon) { color: var(--kg-danger); }
+.mode-card.is-danger .mode-card-head :deep(.mode-selected) { color: var(--kg-accent); }
 
 .effective-access {
   min-height: 52px;
   display: flex;
   align-items: center;
-  gap: var(--kg-space-4);
+  gap: var(--kg-space-6);
   margin-top: var(--kg-space-3);
-  padding: 10px 12px;
+  padding: var(--kg-space-3) var(--kg-space-4);
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-md);
   background: var(--kg-bg-surface-2);
 }
 .effective-access.danger { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); }
-.execution-facts { display: flex; flex: none; gap: var(--kg-space-4); }
+.execution-facts { display: flex; flex: 0 1 auto; min-width: 0; gap: var(--kg-space-6); }
 .execution-facts > div { display: grid; min-width: 0; gap: 2px; }
-.execution-facts span { color: var(--kg-text-tertiary); font-size: 10px; }
-.effective-access code { color: var(--kg-text-primary); font: 11px/1.5 var(--kg-font-mono); }
+/* 信息条 label 采用 eyebrow 风格 */
+.execution-facts span {
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+.effective-access code {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--kg-text-primary);
+  font: 13px/1.5 var(--kg-font-mono);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .effective-access p { min-width: 0; flex: 1; margin: 0; color: var(--kg-text-secondary); font-size: 11px; line-height: 1.5; text-align: right; }
 .root-access-warning {
   display: flex;
   align-items: flex-start;
-  gap: 9px;
-  margin-top: var(--kg-space-2);
-  padding: 10px 12px;
+  gap: 10px;
+  margin-top: var(--kg-space-3);
+  padding: var(--kg-space-3) var(--kg-space-4);
   border: 1px solid var(--kg-danger-border);
   border-radius: var(--kg-radius-md);
   background: var(--kg-danger-soft);
   color: var(--kg-danger);
 }
-.root-access-warning > div { display: grid; gap: 2px; }
+.root-access-warning > :deep(.kg-icon) { flex: none; margin-top: 1px; }
+.root-access-warning > div { display: grid; min-width: 0; gap: 2px; }
 .root-access-warning strong { font-size: 12px; font-weight: 650; }
-.root-access-warning span { color: var(--kg-text-secondary); font-size: 11px; line-height: 1.5; }
+.root-access-warning span { color: var(--kg-text-secondary); font-size: 11px; line-height: 1.6; }
 
 .root-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--kg-space-2); }
 .server-path-note {
@@ -840,11 +869,11 @@ onMounted(() => {
 }
 .grant-subhead strong { color: var(--kg-text-secondary); font-size: 11px; font-weight: 600; }
 .grant-row {
-  min-height: 54px;
+  min-height: 56px;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 8px;
+  padding: 9px var(--kg-space-3);
   border-top: 1px solid var(--kg-border-subtle);
 }
 .grant-row:last-child { border-bottom: 1px solid var(--kg-border-subtle); }
@@ -915,7 +944,12 @@ onMounted(() => {
 .section-meta :deep(.el-button) { gap: 7px; }
 
 .policy-table { width: 100%; }
-.policy-pattern { color: var(--kg-text-primary); font-family: var(--kg-font-mono); font-size: 12px; }
+.policy-pattern {
+  color: var(--kg-text-primary);
+  font-family: var(--kg-font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 .muted { color: var(--kg-text-disabled); }
 
 .kind-badge {
@@ -978,7 +1012,7 @@ onMounted(() => {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.4fr);
   gap: var(--kg-space-4);
-  padding: 7px 8px;
+  padding: 9px var(--kg-space-3);
   border-radius: var(--kg-radius-xs);
 }
 

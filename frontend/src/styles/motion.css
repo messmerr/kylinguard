@@ -7,6 +7,56 @@
   50% { opacity: 1; }
 }
 
+/* 入场：上浮 + 淡入，配合 --kg-enter-delay 实现 stagger */
+@keyframes kg-fade-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes kg-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes kg-scale-in {
+  from { opacity: 0; transform: scale(.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* 实时状态呼吸脉冲（告警点、采集状态等） */
+@keyframes kg-pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgb(23 92 255 / 26%); }
+  70% { box-shadow: 0 0 0 7px rgb(23 92 255 / 0%); }
+  100% { box-shadow: 0 0 0 0 rgb(23 92 255 / 0%); }
+}
+
+@keyframes kg-dot-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .55; transform: scale(.82); }
+}
+
+/* 环形占比首次挂载时的填充动画：驱动 @property 注册的 --kg-ring-p，
+   解决「初始赋值不触发 transition」导致的首屏不动；后续数据更新仍由
+   transition: --kg-ring-p 接管。 */
+@keyframes kg-ring-fill {
+  from { --kg-ring-p: 0%; }
+}
+
+/* 骨架屏 shimmer：渐变扫光 */
+@keyframes kg-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+.kg-shimmer {
+  background: linear-gradient(90deg,
+    var(--kg-bg-surface-3) 25%,
+    var(--kg-bg-surface-2) 50%,
+    var(--kg-bg-surface-3) 75%);
+  background-size: 200% 100%;
+  animation: kg-shimmer 1.5s linear infinite;
+}
+
 .kg-spinner {
   width: 14px;
   height: 14px;
@@ -14,6 +64,23 @@
   border-top-color: var(--kg-info);
   border-radius: 50%;
   animation: kg-spin 800ms linear infinite;
+}
+
+/* 通用入场工具类：用 --kg-enter-delay 控制错峰。
+   用 backwards 而非 both：动画结束后交还 transform 控制权，避免压住 hover 位移。 */
+.kg-enter {
+  animation: kg-fade-up var(--kg-motion-slower) var(--kg-ease-out-expo) backwards;
+  animation-delay: var(--kg-enter-delay, 0ms);
+}
+
+.kg-enter-fade {
+  animation: kg-fade-in var(--kg-motion-slow) var(--kg-ease-standard) backwards;
+  animation-delay: var(--kg-enter-delay, 0ms);
+}
+
+.kg-enter-scale {
+  animation: kg-scale-in var(--kg-motion-base) var(--kg-ease-spring) backwards;
+  animation-delay: var(--kg-enter-delay, 0ms);
 }
 
 @media (prefers-reduced-motion: reduce) {

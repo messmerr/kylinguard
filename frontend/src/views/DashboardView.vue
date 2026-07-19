@@ -19,8 +19,14 @@
       <el-tabs v-model="activeTab" class="dashboard-tabs">
         <el-tab-pane label="运行概览" name="overview">
           <div v-if="initialLoading" class="dashboard-state" role="status" aria-live="polite">
-            <span class="kg-spinner" aria-hidden="true"></span>
-            <div><strong>正在汇总运行概览</strong><span>系统状态、安全活动与告警会在这里同步显示。</span></div>
+            <span class="sr-only">正在汇总运行概览，请稍候</span>
+            <div class="skeleton-strip" aria-hidden="true">
+              <span v-for="i in 4" :key="i" class="kg-shimmer skeleton-cell"></span>
+            </div>
+            <div class="skeleton-grid" aria-hidden="true">
+              <span class="kg-shimmer skeleton-panel"></span>
+              <span class="kg-shimmer skeleton-panel is-small"></span>
+            </div>
           </div>
 
           <div v-else-if="dashboardError && !hasDashboardData" class="dashboard-state is-error" role="alert">
@@ -31,15 +37,15 @@
 
           <template v-else>
           <section class="summary-strip" aria-label="运行概览">
-            <div v-for="item in summaryStats" :key="item.label" class="summary-item">
-              <span>{{ item.label }}</span>
-              <strong :class="item.tone">{{ item.value }}</strong>
+            <div v-for="item in summaryStats" :key="item.label" class="summary-item kg-enter">
+              <span class="kg-eyebrow">{{ item.label }}</span>
+              <strong :class="item.tone"><CountUp :value="item.value" /></strong>
               <small>{{ item.note }}</small>
             </div>
           </section>
 
           <div class="overview-grid">
-            <section class="overview-panel health-panel">
+            <section class="overview-panel health-panel kg-enter" :style="{ '--kg-enter-delay': '280ms' }">
               <div class="section-head">
                 <div>
                   <h2 class="kg-section-title">系统状态</h2>
@@ -55,8 +61,8 @@
                 <span class="platform-icon"><KgIcon name="server" :size="18" /></span>
                 <div class="platform-copy">
                   <span>目标环境感知</span>
-                  <strong>{{ platformSummary.title }}</strong>
-                  <small>{{ platformSummary.detail }}</small>
+                  <strong :title="platformSummary.title">{{ platformSummary.title }}</strong>
+                  <small :title="platformSummary.detail">{{ platformSummary.detail }}</small>
                 </div>
                 <span class="platform-match">{{ platformSummary.badge }}</span>
               </div>
@@ -129,7 +135,7 @@
               </div>
             </section>
 
-            <section class="overview-panel activity-panel">
+            <section class="overview-panel activity-panel kg-enter" :style="{ '--kg-enter-delay': '350ms' }">
               <template v-if="stats">
                 <EChartCanvas :option="activityChartOption" title="安全活动分布" :height="250" embedded />
                 <dl class="activity-list">
@@ -138,7 +144,7 @@
                       <span class="activity-dot" :class="item.tone"></span>
                       {{ item.label }}
                     </dt>
-                    <dd :class="item.tone">{{ item.value }}</dd>
+                    <dd :class="item.tone"><CountUp :value="item.value" /></dd>
                   </div>
                 </dl>
               </template>
@@ -200,6 +206,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import CountUp from '../components/CountUp.vue'
 import EChartCanvas from '../components/EChartCanvas.vue'
 import KgIcon from '../components/KgIcon.vue'
 import { apiFetch } from '../composables/useApi.js'
@@ -380,7 +387,14 @@ const activityChartOption = computed(() => ({
   series: [{
     type: 'pie', radius: ['52%', '74%'], center: ['50%', '43%'],
     label: { show: false },
-    emphasis: { label: { show: true, fontSize: 13, fontWeight: 600 } },
+    emphasis: {
+      label: { show: true, fontSize: 13, fontWeight: 600 },
+      // 悬停扇区轻微放大，配合 expo 缓动的回弹感
+      scaleSize: 8,
+    },
+    animationType: 'scale',
+    animationEasing: 'exponentialOut',
+    animationDelay: (idx) => idx * 100,
     data: activityStats.value.map(item => ({
       name: item.label,
       value: item.value,
@@ -391,7 +405,7 @@ const activityChartOption = computed(() => ({
     type: 'text', left: 'center', top: '36%',
     style: {
       text: `${stats.value?.sessions || 0}\n任务`, textAlign: 'center',
-      fill: '#172033', font: '600 16px Inter', lineHeight: 24,
+      fill: '#172033', font: '600 16px Inter, "Noto Sans SC", sans-serif', lineHeight: 24,
     },
   }],
 }))
@@ -399,7 +413,8 @@ const activityChartOption = computed(() => ({
 function ringStyle(metric) {
   const percent = metric.percent ?? (metric.tone === 'success' ? 100 : 12)
   return {
-    background: `conic-gradient(${TONE_COLORS[metric.tone] || TONE_COLORS.accent} ${percent}%, #edf1f8 ${percent}% 100%)`,
+    '--kg-ring-p': `${percent}%`,
+    '--kg-ring-c': TONE_COLORS[metric.tone] || TONE_COLORS.accent,
   }
 }
 
@@ -603,6 +618,44 @@ onUnmounted(() => {
 
 .dashboard-tabs-shell { position: relative; }
 
+/* 首屏加载骨架屏：轮廓与真实布局一致，shimmer 扫光 */
+.dashboard-state { display: grid; gap: var(--kg-space-4); }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.skeleton-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border-radius: var(--kg-radius-lg);
+}
+
+.skeleton-cell { height: 88px; }
+
+.skeleton-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.9fr) minmax(290px, 1fr);
+  gap: var(--kg-space-4);
+}
+
+.skeleton-panel {
+  height: 420px;
+  border-radius: var(--kg-radius-lg);
+}
+
+@media (max-width: 1080px) {
+  .skeleton-grid { grid-template-columns: 1fr; }
+  .skeleton-panel.is-small { display: none; }
+}
+
 .refresh-state {
   position: absolute;
   top: 0;
@@ -627,20 +680,23 @@ onUnmounted(() => {
   margin-top: 0;
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-lg);
-  background: #fff;
-  box-shadow: 0 3px 14px rgb(36 53 84 / 5%);
+  background: var(--kg-bg-surface-1);
+  box-shadow: var(--kg-shadow-sm);
 }
 
 .summary-item {
   min-width: 0;
   display: grid;
   gap: 3px;
-  padding: 14px 18px;
+  padding: var(--kg-space-5) var(--kg-space-6);
   border-right: 1px solid var(--kg-border-subtle);
 }
 .summary-item:last-child { border-right: 0; }
-.summary-item span { color: var(--kg-text-tertiary); font-size: 11px; }
-.summary-item strong { overflow: hidden; color: var(--kg-text-primary); font: 650 20px/1.3 var(--kg-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+/* 四项错峰入场（kg-enter 读取 --kg-enter-delay） */
+.summary-item:nth-child(2) { --kg-enter-delay: 70ms; }
+.summary-item:nth-child(3) { --kg-enter-delay: 140ms; }
+.summary-item:nth-child(4) { --kg-enter-delay: 210ms; }
+.summary-item strong { overflow: hidden; color: var(--kg-text-primary); font: 650 22px/1.3 var(--kg-font-mono); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .summary-item strong.accent { color: var(--kg-accent); }
 .summary-item strong.info { color: var(--kg-info); }
 .summary-item strong.success { color: var(--kg-success); }
@@ -657,11 +713,11 @@ onUnmounted(() => {
 
 .overview-panel {
   min-width: 0;
-  padding: var(--kg-space-5);
+  padding: var(--kg-space-6);
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-lg);
   background: var(--kg-bg-surface-1);
-  box-shadow: 0 3px 14px rgb(36 53 84 / 5%);
+  box-shadow: var(--kg-shadow-sm);
 }
 
 .section-head {
@@ -682,6 +738,7 @@ onUnmounted(() => {
 }
 
 .collection-state.is-ok { color: var(--kg-success); }
+.collection-state.is-ok .state-dot { animation: kg-dot-breathe 2.4s infinite; }
 .collection-state.is-warning { color: var(--kg-warning); }
 
 .state-dot,
@@ -732,18 +789,21 @@ onUnmounted(() => {
 
 .health-list {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: var(--kg-space-4);
   margin-top: var(--kg-space-6);
 }
 
 .health-metric { min-width: 0; display: grid; justify-items: center; gap: 10px; }
 .metric-ring {
-  width: 112px;
-  height: 112px;
+  width: min(112px, 100%);
+  aspect-ratio: 1;
   padding: 7px;
   border-radius: 50%;
+  background: conic-gradient(var(--kg-ring-c, #175cff) var(--kg-ring-p, 0%), #edf1f8 var(--kg-ring-p, 0%) 100%);
   box-shadow: inset 0 0 0 1px rgb(23 92 255 / 5%);
+  animation: kg-ring-fill 700ms var(--kg-ease-emphasized);
+  transition: --kg-ring-p 700ms var(--kg-ease-emphasized);
 }
 .metric-ring-core {
   width: 100%;
@@ -925,6 +985,15 @@ onUnmounted(() => {
 .metric-fill.danger { background: var(--kg-danger); }
 .metric-fill.info { background: var(--kg-info); }
 
+/* 视觉隐藏：环内数值与下方备注已可见，此处仅保留给读屏 */
+.metric-accessible {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
 .metric-note {
   display: block;
   overflow: hidden;
@@ -1062,7 +1131,7 @@ onUnmounted(() => {
   .refresh-state .kg-meta { display: none; }
   .dashboard-tabs :deep(.el-tabs__nav-wrap) { padding-right: 82px; }
   .health-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .metric-ring { width: 96px; height: 96px; }
+  .metric-ring { width: min(96px, 100%); }
   .capability-row { grid-template-columns: 1fr; gap: 5px; }
 }
 </style>

@@ -1,7 +1,7 @@
 <template>
   <div class="kg-page audit-page">
     <div class="kg-page-inner audit-inner">
-      <div class="audit-toolbar">
+      <div class="audit-toolbar kg-enter">
         <label class="session-picker">
           <el-select
             :model-value="selectedId"
@@ -52,7 +52,7 @@
         <el-button size="small" :loading="targetsLoading" @click="loadAuditTargets">重新加载</el-button>
       </div>
 
-      <div v-if="targetsLoading && !auditTargets.length" class="kg-empty audit-empty audit-state">
+      <div v-if="targetsLoading && !auditTargets.length" class="kg-empty audit-empty audit-state kg-enter-fade">
         <span class="kg-spinner" aria-hidden="true"></span>
         <strong>正在读取审计范围</strong>
         <span>正在同步任务与系统配置记录。</span>
@@ -60,29 +60,34 @@
 
       <div
         v-else-if="targetsError && !auditTargets.length"
-        class="kg-empty audit-empty audit-state is-error"
+        class="kg-empty audit-empty audit-state is-error kg-enter-fade"
         role="alert"
       >
-        <KgIcon name="warning" :size="22" />
+        <KgIcon name="warning" :size="24" />
         <strong>审计范围暂时未加载</strong>
         <span>{{ targetsError }}</span>
         <el-button :loading="targetsLoading" @click="loadAuditTargets">重新加载</el-button>
       </div>
 
-      <div v-else-if="loading" class="kg-empty audit-empty audit-state" aria-live="polite">
+      <div v-else-if="loading" class="kg-empty audit-empty audit-state kg-enter-fade" aria-live="polite">
         <span class="kg-spinner" aria-hidden="true"></span>
         <strong>正在读取审计记录</strong>
         <span>正在校验事件链与哈希连续性。</span>
       </div>
 
-      <div v-else-if="loadError" class="kg-empty audit-empty audit-state is-error" role="alert">
-        <KgIcon name="warning" :size="22" />
+      <div v-else-if="loadError" class="kg-empty audit-empty audit-state is-error kg-enter-fade" role="alert">
+        <KgIcon name="warning" :size="24" />
         <strong>无法读取审计记录</strong>
         <span>{{ loadError }}</span>
         <el-button :loading="loading" @click="retrySelected">重新加载</el-button>
       </div>
 
-      <section v-else-if="selectedId && events.length" class="timeline" aria-label="审计事件">
+      <section
+        v-else-if="selectedId && events.length"
+        class="timeline kg-enter"
+        :style="{ '--kg-enter-delay': '80ms' }"
+        aria-label="审计事件"
+      >
         <article
           v-for="ev in pagedEvents"
           :key="ev.seq"
@@ -100,8 +105,8 @@
             @click="toggle(ev.seq)"
           >
             <span class="event-seq">#{{ ev.seq }}</span>
-            <span class="event-type">{{ typeLabel(ev.event_type) }}</span>
-            <span class="event-brief">{{ brief(ev) }}</span>
+            <span class="event-type" :title="typeLabel(ev.event_type)">{{ typeLabel(ev.event_type) }}</span>
+            <span class="event-brief" :title="brief(ev)">{{ brief(ev) }}</span>
             <span class="event-ts">
               <span class="event-date">{{ tsParts(ev.ts).date }}</span>
               {{ tsParts(ev.ts).time }}
@@ -126,12 +131,12 @@
             <div class="hash-chain">
               <div>
                 <span>前一事件</span>
-                <code>{{ ev.prev_hash }}</code>
+                <code :title="ev.prev_hash">{{ ev.prev_hash }}</code>
               </div>
               <KgIcon name="chevron" :size="13" />
               <div>
                 <span>当前事件</span>
-                <code>{{ ev.hash }}</code>
+                <code :title="ev.hash">{{ ev.hash }}</code>
               </div>
             </div>
 
@@ -160,13 +165,13 @@
         </div>
       </section>
 
-      <div v-else-if="selectedId" class="kg-empty audit-empty audit-state">
-        <KgIcon name="audit" :size="24" />
+      <div v-else-if="selectedId" class="kg-empty audit-empty audit-state kg-enter-fade">
+        <KgIcon name="audit" :size="28" />
         <strong>这项任务还没有审计事件</strong>
       </div>
 
-      <div v-else class="kg-empty audit-empty audit-state">
-        <KgIcon name="audit" :size="24" />
+      <div v-else class="kg-empty audit-empty audit-state kg-enter-fade">
+        <KgIcon name="audit" :size="28" />
         <strong>{{ auditTargets.length ? '选择一项范围查看审计记录' : '还没有可审计的记录' }}</strong>
         <span v-if="auditTargets.length">每次检查、确认和执行都会记录在这里。</span>
         <span v-else-if="targetsLoaded">任务运行或系统配置发生变更后，记录会显示在这里。</span>
@@ -756,7 +761,7 @@ onMounted(loadAuditTargets)
 
 <style scoped>
 .audit-inner {
-  width: min(100%, 1100px);
+  width: 100%;
   min-height: 100%;
 }
 
@@ -838,10 +843,26 @@ onMounted(loadAuditTargets)
   color: var(--kg-text-tertiary);
 }
 
-.event.is-warning .event-marker { border-color: var(--kg-warning-border); color: var(--kg-warning); }
-.event.is-danger .event-marker { border-color: var(--kg-danger-border); color: var(--kg-danger); }
-.event.is-info .event-marker { border-color: var(--kg-info-border); color: var(--kg-info); }
-.event.is-success .event-marker { border-color: var(--kg-success-border); color: var(--kg-success); }
+.event.is-warning .event-marker {
+  border-color: var(--kg-warning-border);
+  background: var(--kg-warning-soft);
+  color: var(--kg-warning);
+}
+.event.is-danger .event-marker {
+  border-color: var(--kg-danger-border);
+  background: var(--kg-danger-soft);
+  color: var(--kg-danger);
+}
+.event.is-info .event-marker {
+  border-color: var(--kg-info-border);
+  background: var(--kg-info-soft);
+  color: var(--kg-info);
+}
+.event.is-success .event-marker {
+  border-color: var(--kg-success-border);
+  background: var(--kg-success-soft);
+  color: var(--kg-success);
+}
 
 .event-head {
   display: grid;
@@ -861,8 +882,20 @@ onMounted(loadAuditTargets)
 }
 
 .event-head:hover { background: var(--kg-bg-surface-1); }
+
+/* 栅格列防挤压：固定列不被内容撑宽，长文本在列内截断 */
+.event-head > * { min-width: 0; }
+
 .event-seq { color: var(--kg-text-disabled); font-family: var(--kg-font-mono); font-size: 11px; }
-.event-type { color: var(--kg-text-primary); font-size: 13px; font-weight: 500; }
+
+.event-type {
+  overflow: hidden;
+  color: var(--kg-text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .event-brief {
   overflow: hidden;
@@ -905,7 +938,7 @@ onMounted(loadAuditTargets)
   padding: var(--kg-space-4);
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-md);
-  background: var(--kg-bg-surface-1);
+  background: var(--kg-bg-surface-2);
 }
 
 .detail-list { display: grid; gap: 9px; margin: 0; }
@@ -944,13 +977,14 @@ onMounted(loadAuditTargets)
 .hash-chain > div { min-width: 0; }
 .hash-chain span { display: block; margin-bottom: 3px; font-size: 11px; }
 
+/* 完整哈希为等宽长串，允许横向滚动查看 */
 .hash-chain code {
   display: block;
-  overflow: hidden;
+  padding-bottom: 2px;
+  overflow-x: auto;
   color: var(--kg-text-tertiary);
   font-family: var(--kg-font-mono);
   font-size: 10px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -976,7 +1010,7 @@ onMounted(loadAuditTargets)
   overflow: auto;
   border: 1px solid var(--kg-border-subtle);
   border-radius: var(--kg-radius-sm);
-  background: var(--kg-bg-surface-2);
+  background: var(--kg-bg-surface-1);
   color: var(--kg-text-secondary);
   font-family: var(--kg-font-mono);
   font-size: 11px;
@@ -992,7 +1026,11 @@ onMounted(loadAuditTargets)
   border-top: 1px solid var(--kg-border-subtle);
 }
 
-.audit-empty { min-height: 280px; align-content: center; }
+.audit-empty {
+  min-height: 300px;
+  align-content: center;
+  gap: var(--kg-space-3);
+}
 .audit-empty.is-error { color: var(--kg-danger); }
 
 @media (max-width: 1320px) {

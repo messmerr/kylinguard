@@ -22,7 +22,8 @@ body {
   color: var(--kg-text-primary);
   font-family: var(--kg-font-ui);
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.65;
+  letter-spacing: .003em;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
@@ -91,8 +92,9 @@ textarea:focus-visible {
   margin: 0;
   color: var(--kg-text-primary);
   font-size: 18px;
-  font-weight: 600;
+  font-weight: 650;
   line-height: 28px;
+  letter-spacing: .01em;
 }
 
 .kg-section-title {
@@ -101,6 +103,31 @@ textarea:focus-visible {
   font-size: 14px;
   font-weight: 600;
   line-height: 22px;
+  letter-spacing: .005em;
+}
+
+/* 小型大写标签（section eyebrow / 统计标签） */
+.kg-eyebrow {
+  color: var(--kg-text-tertiary);
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+/* 统一卡片：各视图面板尽量复用，保持阴影/圆角一致 */
+.kg-card {
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: var(--kg-radius-lg);
+  background: var(--kg-bg-surface-1);
+  box-shadow: var(--kg-shadow-sm);
+}
+
+/* 可动画的环形占比（conic-gradient 百分比过渡，需浏览器支持 @property） */
+@property --kg-ring-p {
+  syntax: '<percentage>';
+  initial-value: 0%;
+  inherits: false;
 }
 
 .kg-meta {

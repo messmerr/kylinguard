@@ -13,7 +13,7 @@
                 :disabled="disabled" @click="$emit('configure-model')">
           <KgIcon name="model" :size="13" />检查模型设置
         </button>
-        <button v-if="error.retryable !== false" type="button"
+        <button v-if="error.retryable !== false" type="button" class="primary"
                 :disabled="disabled" @click="$emit('retry')">
           <KgIcon name="refresh" :size="13" />重新尝试
         </button>
@@ -96,18 +96,42 @@ async function copyDetails() {
   margin: 12px 0 14px 42px;
   padding: 12px 13px;
   border: 1px solid var(--kg-danger-border);
-  border-radius: var(--kg-radius-md);
+  border-left: 3px solid var(--kg-danger);
+  border-radius: var(--kg-radius-lg);
   background: var(--kg-danger-soft);
+  box-shadow: var(--kg-shadow-xs);
 }
-.error-icon { flex: none; padding-top: 1px; color: var(--kg-danger); }
+.error-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border-radius: var(--kg-radius-sm);
+  background: rgb(255 255 255 / 70%);
+  color: var(--kg-danger);
+}
 .error-content { min-width: 0; flex: 1; }
 .error-content h3 { margin: 0; color: var(--kg-text-primary); font-size: 13px; font-weight: 600; }
 .error-content p { margin: 5px 0 0; color: var(--kg-text-secondary); font-size: 13px; line-height: 1.55; }
 .error-content .error-answer { color: var(--kg-text-tertiary); }
 .error-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.error-meta code { padding: 2px 5px; border-radius: var(--kg-radius-xs); background: var(--kg-bg-code); color: #b8c4d7; font: 11px/1.4 var(--kg-font-mono); }
+.error-meta code { padding: 2px 5px; border-radius: var(--kg-radius-xs); background: rgb(255 255 255 / 70%); color: var(--kg-text-secondary); font: 11px/1.4 var(--kg-font-mono); }
 .error-actions { display: flex; gap: 8px; margin-top: 10px; }
-.error-actions button { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid var(--kg-border-default); border-radius: var(--kg-radius-sm); background: var(--kg-bg-surface-1); color: var(--kg-text-secondary); font-size: 12px; cursor: pointer; }
+.error-actions button { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid var(--kg-border-default); border-radius: var(--kg-radius-sm); background: var(--kg-bg-surface-1); color: var(--kg-text-secondary); font-size: 12px; cursor: pointer; transition: color var(--kg-motion-fast), border-color var(--kg-motion-fast), background var(--kg-motion-fast), box-shadow var(--kg-motion-fast); }
 .error-actions button:hover:not(:disabled) { color: var(--kg-text-primary); border-color: var(--kg-border-strong); }
 .error-actions button:disabled { color: var(--kg-text-disabled); cursor: not-allowed; }
+/* 重试为恢复路径的主操作，用填充主色与其余次要按钮拉开层次 */
+.error-actions button.primary {
+  border-color: var(--kg-accent);
+  background: var(--kg-accent);
+  color: var(--kg-text-on-accent);
+  box-shadow: 0 3px 10px rgb(23 92 255 / 22%);
+}
+.error-actions button.primary:hover:not(:disabled) {
+  border-color: var(--kg-accent-hover);
+  background: var(--kg-accent-hover);
+  color: var(--kg-text-on-accent);
+}
+.error-actions button.primary:disabled { color: var(--kg-text-on-accent); opacity: .6; }
 </style>

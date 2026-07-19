@@ -8,7 +8,7 @@
         <KgIcon v-else :name="statusIcon" :size="13" />
       </span>
       <span class="step-identity">
-        <strong>{{ step.purpose || shortTool }}</strong>
+        <strong :title="step.purpose || shortTool">{{ step.purpose || shortTool }}</strong>
         <code>{{ shortTool }}</code>
       </span>
       <span class="spacer"></span>
@@ -22,7 +22,7 @@
     <button v-if="preview && !step.expanded" type="button" class="preview-line"
             @click="step.expanded = true">
       <KgIcon name="terminal" :size="12" />
-      <span>{{ preview }}</span>
+      <span :title="preview">{{ preview }}</span>
       <small>查看输出</small>
     </button>
 
@@ -223,7 +223,8 @@ const decisionClass = computed(() => ({
 
 <style scoped>
 .step-block { position: relative; margin: 6px 0; }
-.step-block::before { content: ''; position: absolute; top: 36px; bottom: -9px; left: 20px; width: 1px; background: var(--kg-border-subtle); }
+/* 纵向连线与节点圆心对齐：header 左内边距 7px + 节点半径 14px */
+.step-block::before { content: ''; position: absolute; top: 36px; bottom: -9px; left: 21px; width: 1px; background: var(--kg-border-subtle); }
 
 .step-header {
   width: 100%;
@@ -241,7 +242,7 @@ const decisionClass = computed(() => ({
   transition: background var(--kg-motion-fast), border-color var(--kg-motion-fast);
 }
 
-.step-header:hover,
+.step-header:hover { background: var(--kg-bg-surface-2); }
 .step-block.open .step-header { border-color: var(--kg-border-subtle); background: var(--kg-bg-surface-1); }
 
 .status-node {
@@ -293,7 +294,7 @@ const decisionClass = computed(() => ({
 .status-text.verifying,
 .status-text.reviewing,
 .status-text.running { color: var(--kg-info); }
-.duration { flex: none; color: var(--kg-text-tertiary); font: 12px/1 var(--kg-font-mono); }
+.duration { flex: none; color: var(--kg-text-tertiary); font: 12px/1 var(--kg-font-mono); font-variant-numeric: tabular-nums; }
 .chevron { flex: none; color: var(--kg-text-tertiary); transition: transform var(--kg-motion-base); }
 .chevron.open { transform: rotate(90deg); }
 

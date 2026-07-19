@@ -27,17 +27,20 @@
       </header>
 
       <div class="content-area">
-        <ChatView
-          v-if="view === 'chat'"
-          @open-model-settings="changeView('models')"
-          @open-extensions="changeView('extensions')"
-        />
-        <ModelSettingsView v-else-if="view === 'models'" />
-        <ExtensionsView v-else-if="view === 'extensions'" />
-        <AuditView v-else-if="view === 'audit'" />
-        <PolicyView v-else-if="view === 'policy'" />
-        <DashboardView v-else-if="view === 'dashboard'" />
-        <AlertsView v-else-if="view === 'alerts'" />
+        <Transition name="kg-view" mode="out-in">
+          <ChatView
+            v-if="view === 'chat'"
+            key="chat"
+            @open-model-settings="changeView('models')"
+            @open-extensions="changeView('extensions')"
+          />
+          <ModelSettingsView v-else-if="view === 'models'" key="models" />
+          <ExtensionsView v-else-if="view === 'extensions'" key="extensions" />
+          <AuditView v-else-if="view === 'audit'" key="audit" />
+          <PolicyView v-else-if="view === 'policy'" key="policy" />
+          <DashboardView v-else-if="view === 'dashboard'" key="dashboard" />
+          <AlertsView v-else-if="view === 'alerts'" key="alerts" />
+        </Transition>
       </div>
 
       <StatusPanel :open="showPanel" @close="closeStatusPanel" @closed="restoreStatusFocus" />
@@ -176,10 +179,10 @@ onUnmounted(stopSystemStatusPolling)
   align-items: center;
   justify-content: space-between;
   gap: var(--kg-space-4);
-  padding: 0 var(--kg-space-5);
+  padding: 0 var(--kg-space-5) 0 var(--kg-space-6);
   border-bottom: 1px solid var(--kg-border-subtle);
   background: var(--kg-bg-surface-1);
-  box-shadow: 0 1px 2px rgb(26 43 74 / 4%);
+  box-shadow: var(--kg-shadow-xs);
   z-index: 5;
 }
 
@@ -195,8 +198,9 @@ onUnmounted(stopSystemStatusPolling)
   margin: 0;
   color: var(--kg-text-primary);
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 650;
   line-height: 22px;
+  letter-spacing: .01em;
 }
 
 .page-ident h1::before {
@@ -204,9 +208,9 @@ onUnmounted(stopSystemStatusPolling)
   display: inline-block;
   width: 3px;
   height: 14px;
-  margin-right: 9px;
+  margin-right: 10px;
   border-radius: 2px;
-  background: var(--kg-accent);
+  background: var(--kg-accent-gradient);
   vertical-align: -2px;
 }
 
@@ -259,22 +263,24 @@ onUnmounted(stopSystemStatusPolling)
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 0 10px;
+  padding: 0 12px;
   border: 1px solid var(--kg-border-subtle);
-  border-radius: var(--kg-radius-sm);
+  border-radius: var(--kg-radius-pill);
   background: var(--kg-bg-surface-1);
   color: var(--kg-text-tertiary);
   font-size: 12px;
   cursor: pointer;
+  box-shadow: var(--kg-shadow-xs);
   transition: color var(--kg-motion-fast), background var(--kg-motion-fast),
-    border-color var(--kg-motion-fast);
+    border-color var(--kg-motion-fast), box-shadow var(--kg-motion-fast);
 }
 
 .status-trigger:hover,
 .status-trigger.active {
-  border-color: #9db8f6;
+  border-color: rgb(23 92 255 / 30%);
   background: var(--kg-accent-soft);
   color: var(--kg-accent);
+  box-shadow: 0 3px 10px rgb(23 92 255 / 14%);
 }
 
 .content-area {
@@ -283,6 +289,23 @@ onUnmounted(stopSystemStatusPolling)
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* 视图切换过渡：旧视图快速淡出，新视图轻微上浮淡入（每次切页可见） */
+.kg-view-leave-active {
+  transition: opacity var(--kg-motion-fast) var(--kg-ease-exit);
+}
+
+.kg-view-enter-active {
+  transition: opacity var(--kg-motion-slow) var(--kg-ease-out-expo),
+    transform var(--kg-motion-slow) var(--kg-ease-out-expo);
+}
+
+.kg-view-leave-to { opacity: 0; }
+
+.kg-view-enter-from {
+  opacity: 0;
+  transform: translateY(14px);
 }
 
 @media (max-width: 1080px) {

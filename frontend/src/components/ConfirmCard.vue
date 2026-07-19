@@ -295,6 +295,7 @@ async function act(decision) {
   border-left: 3px solid var(--kg-warning);
   border-radius: var(--kg-radius-lg);
   background: var(--kg-bg-surface-1);
+  box-shadow: var(--kg-shadow-md);
 }
 
 .confirm-card.high { border-color: var(--kg-danger-border); border-left-color: var(--kg-danger); }
@@ -307,6 +308,9 @@ async function act(decision) {
   padding: 12px 14px;
   border-bottom: 1px solid var(--kg-border-subtle);
 }
+
+/* 高危确认：头部整体转为 danger 语义，与左侧 3px 色条呼应 */
+.high .confirm-head { border-bottom-color: var(--kg-danger-border); background: var(--kg-danger-soft); }
 
 .confirm-icon {
   width: 34px;
@@ -332,6 +336,8 @@ async function act(decision) {
   background: var(--kg-warning-soft);
   color: var(--kg-warning);
   font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .02em;
 }
 .high .risk-label { border-color: var(--kg-danger-border); background: var(--kg-danger-soft); color: var(--kg-danger); }
 
@@ -360,9 +366,9 @@ async function act(decision) {
 .technical-detail { margin-top: 12px; color: var(--kg-text-tertiary); font-size: 11px; }
 .technical-detail summary { width: fit-content; cursor: pointer; user-select: none; }
 .technical-detail[open] summary { color: var(--kg-text-secondary); }
-.command-row { display: grid; gap: 4px; margin-top: 9px; padding: 9px 10px; border-radius: var(--kg-radius-sm); background: var(--kg-bg-code); }
-.command-row code { color: #dbe5f4; font: 12px/1.55 var(--kg-font-mono); word-break: break-all; }
-.command-row code:first-child { color: #79a7ff; }
+.command-row { display: grid; gap: 4px; margin-top: 9px; padding: 9px 10px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-sm); background: var(--kg-bg-surface-2); }
+.command-row code { color: var(--kg-text-secondary); font: 12px/1.55 var(--kg-font-mono); word-break: break-all; }
+.command-row code:first-child { color: var(--kg-accent); }
 
 .reason-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; align-items: baseline; margin-top: 10px; }
 .reason-row > span { color: var(--kg-text-tertiary); font-size: 11px; }
@@ -376,6 +382,7 @@ async function act(decision) {
   gap: 12px;
   padding: 10px 14px;
   border-top: 1px solid var(--kg-border-subtle);
+  background: var(--kg-bg-surface-2);
 }
 
 .audit-note { display: inline-flex; align-items: center; gap: 6px; color: var(--kg-text-tertiary); font-size: 11px; }

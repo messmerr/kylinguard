@@ -467,12 +467,16 @@ defineExpose({ clear, focus, getNodes, hasText, insertMention, insertTrigger })
   max-height: 176px;
   min-height: 24px;
   overflow-y: auto;
+  border-radius: var(--kg-radius-sm);
   color: var(--kg-text-primary);
   font: 14px/24px var(--kg-font-ui);
   outline: none;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+
+/* focus 视觉由外层 .composer-shell:focus-within 统一承担，内层不再描边，
+   避免出现“两层文本框”。 */
 
 .inline-mention-input:empty::before {
   color: var(--kg-text-tertiary);

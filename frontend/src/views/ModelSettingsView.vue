@@ -3,7 +3,7 @@
     <div class="kg-page-inner models-inner">
       <div
         v-if="modelSecurity.message"
-        class="security-note"
+        class="security-note kg-enter"
         :class="{ isolated: modelSecurity.credentialsIsolated }"
         role="status"
       >
@@ -14,7 +14,7 @@
         </div>
       </div>
 
-      <section class="model-section provider-section">
+      <section class="model-section provider-section kg-enter" :style="{ '--kg-enter-delay': '80ms' }">
         <div class="section-head">
           <div>
             <h2 class="kg-section-title">API 提供商</h2>
@@ -44,7 +44,7 @@
             <template #default="{ row }">
               <div class="provider-cell">
                 <span>
-                  <strong>{{ row.name }}</strong>
+                  <strong :title="row.name">{{ row.name }}</strong>
                   <small>{{ adapterLabel(row.adapter) }}</small>
                 </span>
               </div>
@@ -54,7 +54,7 @@
             <template #default="{ row }"><code class="endpoint" :title="row.baseUrl">{{ row.baseUrl }}</code></template>
           </el-table-column>
           <el-table-column label="模型" width="150" align="center">
-            <template #default="{ row }">{{ row.models.filter(model => model.enabled).length }}</template>
+            <template #default="{ row }"><span class="kg-mono model-count">{{ row.models.filter(model => model.enabled).length }}</span></template>
           </el-table-column>
           <el-table-column label="连接状态" width="150">
             <template #default="{ row }">
@@ -107,7 +107,7 @@
       </section>
 
       <template v-if="modelOptions.length">
-        <section class="model-section default-option-section">
+        <section class="model-section default-option-section kg-enter" :style="{ '--kg-enter-delay': '160ms' }">
           <h2 class="kg-section-title">新任务默认模型</h2>
           <el-select
             v-model="defaultDraft.agent.key"
@@ -133,7 +133,7 @@
           </el-select>
         </section>
 
-        <section class="model-section default-option-section">
+        <section class="model-section default-option-section kg-enter" :style="{ '--kg-enter-delay': '240ms' }">
           <h2 class="kg-section-title">安全复核模型</h2>
           <el-select
             v-model="defaultDraft.reviewer.key"
@@ -159,7 +159,7 @@
           </el-select>
         </section>
       </template>
-      <section v-else class="model-section">
+      <section v-else class="model-section kg-enter" :style="{ '--kg-enter-delay': '160ms' }">
         <div class="defaults-unavailable">添加并启用至少一个模型后，才能设置新任务默认值。</div>
       </section>
     </div>
@@ -830,9 +830,10 @@ function originChanged() {
 </script>
 
 <style scoped>
-.models-inner { width: min(100%, 1120px); }
-.security-note { min-height: 44px; display: flex; align-items: flex-start; gap: 9px; padding: 9px 11px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-2); color: var(--kg-text-secondary); font-size: 12px; }
-.security-note > .kg-icon { margin-top: 2px; color: var(--kg-text-muted); }
+.models-inner { width: 100%; }
+/* 顶部环境说明 banner：info 语义色，标题 600 / 正文 secondary 两层 */
+.security-note { min-height: 44px; display: flex; align-items: flex-start; gap: var(--kg-space-2); padding: var(--kg-space-2) var(--kg-space-3); border: 1px solid var(--kg-info-border); border-radius: var(--kg-radius-md); background: var(--kg-info-soft); color: var(--kg-text-secondary); font-size: 12px; }
+.security-note > .kg-icon { margin-top: 2px; flex: none; color: var(--kg-info); }
 .security-note > div { display: grid; gap: 2px; }
 .security-note strong { color: var(--kg-text-primary); font-weight: 600; }
 .security-note span { color: var(--kg-text-secondary); line-height: 1.55; }
@@ -842,25 +843,28 @@ function originChanged() {
 .provider-section { margin-top: 0; }
 .security-note + .provider-section { margin-top: var(--kg-space-6); }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--kg-space-5); margin-bottom: var(--kg-space-3); }
-.section-head p { margin: 3px 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
+.section-head p { margin: var(--kg-space-1) 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
 .section-meta { display: flex; align-items: center; gap: var(--kg-space-2); }
 .section-meta :deep(.el-button) { gap: 5px; margin-left: 0; }
 .section-count { color: var(--kg-text-tertiary); font-size: 12px; white-space: nowrap; }
-.provider-cell { display: flex; align-items: center; gap: 9px; }
+.provider-cell { display: flex; align-items: center; gap: var(--kg-space-2); }
 .provider-cell > span:last-child { min-width: 0; display: grid; }
-.provider-cell strong { overflow: hidden; color: var(--kg-text-primary); font-size: 13px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
-.provider-cell small { margin-top: 1px; color: var(--kg-text-tertiary); font-size: 10px; }
-.endpoint { display: block; overflow: hidden; color: var(--kg-text-secondary); font: 11px/1.45 var(--kg-font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.status-ok { color: var(--kg-success); font-size: 11px; }
-.status-warn { color: var(--kg-warning); font-size: 11px; }
-.test-status { font-size: 11px; white-space: nowrap; }
+/* 名称最多两行 clamp，防止窄列挤压截断关键信息 */
+.provider-cell strong { display: -webkit-box; overflow: hidden; color: var(--kg-text-primary); font-size: 13px; font-weight: 550; line-height: 1.4; white-space: normal; word-break: break-all; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.provider-cell small { margin-top: 1px; overflow: hidden; color: var(--kg-text-tertiary); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.endpoint { display: block; overflow: hidden; color: var(--kg-text-secondary); font: 12px/1.5 var(--kg-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.model-count { color: var(--kg-text-primary); font-size: 13px; font-weight: 600; }
+/* 连接状态：色点 + 文字，成功/失败/未验证三态 */
+.test-status { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; white-space: nowrap; }
+.test-status::before { width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; content: ''; }
 .test-status.ok { color: var(--kg-success); }
 .test-status.failed { color: var(--kg-danger); }
 .test-status.unknown { color: var(--kg-text-tertiary); }
+.test-status.unknown::before { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
 .row-actions { display: flex; justify-content: center; gap: 0; white-space: nowrap; }
 .row-actions :deep(.el-button + .el-button) { margin-left: 0; }
-.empty-providers { min-height: 92px; display: flex; align-items: center; gap: 13px; padding: 15px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-1); }
-.load-error { min-height: 92px; display: flex; align-items: center; gap: 13px; padding: 15px; border: 1px solid var(--kg-warning-border); border-radius: var(--kg-radius-md); background: var(--kg-warning-soft); }
+.empty-providers { min-height: 92px; display: flex; align-items: center; gap: var(--kg-space-3); padding: var(--kg-space-4); border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-1); }
+.load-error { min-height: 92px; display: flex; align-items: center; gap: var(--kg-space-3); padding: var(--kg-space-4); border: 1px solid var(--kg-warning-border); border-radius: var(--kg-radius-md); background: var(--kg-warning-soft); }
 .load-error > div { min-width: 0; flex: 1; }
 .load-error .empty-mark { color: var(--kg-warning); }
 .load-error strong { color: var(--kg-text-primary); font-size: 13px; font-weight: 550; }
@@ -871,30 +875,31 @@ function originChanged() {
 .empty-providers strong { color: var(--kg-text-primary); font-size: 13px; font-weight: 550; }
 .empty-providers p { margin: 3px 0 0; color: var(--kg-text-tertiary); font-size: 12px; }
 .loading-line { display: flex; align-items: center; gap: 9px; min-height: 72px; color: var(--kg-text-tertiary); font-size: 12px; }
-.default-option-section { display: grid; min-height: 58px; grid-template-columns: minmax(180px, 1fr) minmax(240px, 360px) 126px; align-items: center; gap: var(--kg-space-4); padding-bottom: var(--kg-space-3); border-bottom: 1px solid var(--kg-border-subtle); }
+/* 默认模型行：label 与 select 居中对齐，两个区块 select 列宽一致，用留白代替分割线 */
+.default-option-section { display: grid; min-height: 58px; grid-template-columns: minmax(160px, 1fr) minmax(220px, 340px) minmax(120px, 140px); align-items: center; gap: var(--kg-space-4); }
 .provider-section + .default-option-section { margin-top: var(--kg-space-8); }
 .default-option-section + .default-option-section { margin-top: var(--kg-space-3); }
 .default-option-section .kg-section-title { margin: 0; }
 .default-option-section :deep(.el-select) { width: 100%; }
-.defaults-unavailable { min-height: 62px; display: flex; align-items: center; border-bottom: 1px solid var(--kg-border-subtle); color: var(--kg-text-tertiary); font-size: 12px; }
-.provider-form :deep(.el-form-item) { margin-bottom: 17px; }
-.provider-form :deep(.el-form-item__label) { margin-bottom: 6px; color: var(--kg-text-secondary); font-size: 12px; line-height: 18px; }
+.defaults-unavailable { min-height: 62px; display: flex; align-items: center; color: var(--kg-text-tertiary); font-size: 12px; }
+.provider-form :deep(.el-form-item) { margin-bottom: var(--kg-space-4); }
+.provider-form :deep(.el-form-item__label) { margin-bottom: var(--kg-space-1); color: var(--kg-text-secondary); font-size: 12px; line-height: 18px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--kg-space-4); }
-.field-note { margin-top: 5px; color: var(--kg-text-tertiary); font-size: 11px; }
-.clear-key { display: flex; width: max-content; margin-top: 7px; }
+.field-note { margin-top: var(--kg-space-1); color: var(--kg-text-tertiary); font-size: 11px; }
+.clear-key { display: flex; width: max-content; margin-top: var(--kg-space-2); }
 .clear-key :deep(.el-checkbox__label) { color: var(--kg-text-tertiary); font-size: 11px; }
-.insecure-http-warning { display: flex; align-items: flex-start; gap: 9px; margin: -5px 0 17px; padding: 9px 11px; border: 1px solid var(--kg-warning-border); border-radius: var(--kg-radius-md); background: var(--kg-warning-soft); color: var(--kg-warning); }
+.insecure-http-warning { display: flex; align-items: flex-start; gap: var(--kg-space-2); margin: calc(-1 * var(--kg-space-1)) 0 var(--kg-space-4); padding: 10px var(--kg-space-3); border: 1px solid var(--kg-warning-border); border-radius: var(--kg-radius-md); background: var(--kg-warning-soft); color: var(--kg-warning); }
 .insecure-http-warning > div { min-width: 0; }
 .insecure-http-warning span { display: block; color: var(--kg-text-tertiary); font-size: 11px; }
-.models-editor { margin: 2px 0 17px; padding: 11px; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-1); }
-.models-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.models-editor { margin: 2px 0 var(--kg-space-4); padding: var(--kg-space-3); border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-md); background: var(--kg-bg-surface-1); }
+.models-editor-head { display: flex; align-items: center; justify-content: space-between; gap: var(--kg-space-3); }
 .models-editor-head strong { display: block; color: var(--kg-text-secondary); font-size: 12px; font-weight: 550; }
 .models-editor-head span { display: block; margin-top: 1px; color: var(--kg-text-tertiary); font-size: 11px; }
-.models-editor-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 7px; }
+.models-editor-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: var(--kg-space-2); }
 .models-editor-actions :deep(.el-button .kg-icon) { margin-left: 5px; }
-.model-rows { display: grid; gap: 7px; margin-top: 10px; }
-.model-row { display: grid; grid-template-columns: minmax(110px, 1.1fr) minmax(105px, 1fr) minmax(120px, .9fr) 34px 28px; align-items: center; gap: 7px; }
-.remove-model { width: 28px; height: 28px; display: grid; padding: 0; place-items: center; border: 0; border-radius: var(--kg-radius-sm); background: transparent; color: var(--kg-text-tertiary); cursor: pointer; }
+.model-rows { display: grid; gap: var(--kg-space-2); margin-top: var(--kg-space-3); }
+.model-row { display: grid; grid-template-columns: minmax(110px, 1.1fr) minmax(105px, 1fr) minmax(120px, .9fr) 34px 28px; align-items: center; gap: var(--kg-space-2); }
+.remove-model { width: 28px; height: 28px; display: grid; padding: 0; place-items: center; border: 0; border-radius: var(--kg-radius-sm); background: transparent; color: var(--kg-text-tertiary); cursor: pointer; transition: background var(--kg-motion-fast), color var(--kg-motion-fast); }
 .remove-model:hover { background: var(--kg-danger-soft); color: var(--kg-danger); }
 .remove-model:disabled { background: transparent; color: var(--kg-text-disabled); cursor: not-allowed; }
 :global(.provider-dialog .el-dialog__body) { max-height: calc(100vh - 180px); overflow-y: auto; }
@@ -912,7 +917,7 @@ function originChanged() {
   .section-head p { display: none; }
   .provider-table :deep(.el-table__cell:nth-child(5)) { display: none; }
   .row-actions :deep(.el-button) { padding-right: 3px; padding-left: 3px; font-size: 11px; }
-  .default-option-section { grid-template-columns: 1fr; gap: 8px; padding-bottom: 14px; }
+  .default-option-section { grid-template-columns: 1fr; gap: var(--kg-space-2); }
   .form-grid { grid-template-columns: 1fr; gap: 0; }
   .models-editor-head { align-items: flex-start; flex-direction: column; }
   .models-editor-actions { width: 100%; }

@@ -12,7 +12,7 @@
         <el-button :loading="alertsLoading" @click="loadAlerts">重新加载</el-button>
       </div>
 
-      <div v-else class="alerts-tabs-shell">
+      <div v-else class="alerts-tabs-shell kg-enter">
         <div class="tab-actions">
           <el-button
             v-if="tab === 'pending'"
@@ -65,7 +65,7 @@
             </span>
           </template>
 
-          <section class="alerts-section" aria-label="待处理告警">
+          <section class="alerts-section kg-card" aria-label="待处理告警">
             <div
               v-if="pendingAlertsError && pendingAlertsLoaded"
               class="section-refresh-warning"
@@ -93,8 +93,8 @@
                 <el-table-column label="告警" min-width="290">
                   <template #default="{ row }">
                     <div class="pending-copy">
-                      <strong>{{ row.title }}</strong>
-                      <span>{{ row.message }}</span>
+                      <strong :title="row.title">{{ row.title }}</strong>
+                      <span :title="row.message">{{ row.message }}</span>
                     </div>
                   </template>
                 </el-table-column>
@@ -111,7 +111,8 @@
                 <el-table-column label="" width="94" align="right">
                   <template #default="{ row }">
                     <el-button
-                      text
+                      size="small"
+                      class="ack-btn"
                       :loading="pendingAlertAckingIds.has(row.id)"
                       :disabled="pendingAlertsAcknowledgingAll || pendingAlertAckingIds.has(row.id)"
                       :aria-label="`确认告警 ${row.title}`"
@@ -124,7 +125,7 @@
               <div class="compact-list pending-compact">
                 <article v-for="alert in pagedPendingAlerts" :key="alert.id" class="compact-record pending-record">
                   <div class="compact-head">
-                    <strong>{{ alert.title }}</strong>
+                    <strong :title="alert.title">{{ alert.title }}</strong>
                     <span class="severity" :class="alert.severity">
                       <span class="severity-dot"></span>{{ severityLabel(alert.severity) }}
                     </span>
@@ -137,7 +138,8 @@
                   <p class="compact-message">{{ alert.message }}</p>
                   <div class="compact-actions">
                     <el-button
-                      text
+                      size="small"
+                      class="ack-btn"
                       :loading="pendingAlertAckingIds.has(alert.id)"
                       :disabled="pendingAlertsAcknowledgingAll || pendingAlertAckingIds.has(alert.id)"
                       @click="ackPending(alert)"
@@ -170,7 +172,7 @@
             <span class="tab-label">规则 <span>{{ tabCountText(rules.length) }}</span></span>
           </template>
 
-          <section class="alerts-section" aria-label="告警规则">
+          <section class="alerts-section kg-card" aria-label="告警规则">
           <div v-if="ruleLoadError && rules.length" class="section-refresh-warning" role="status">
             <KgIcon name="warning" :size="15" />
             <span>规则列表刷新未完成，当前显示最近一次结果。</span>
@@ -184,7 +186,9 @@
           </div>
           <template v-else-if="rules.length">
             <el-table :data="pagedRules" class="wide-table alert-table">
-              <el-table-column label="规则名称" prop="name" min-width="145" />
+              <el-table-column label="规则名称" min-width="145">
+                <template #default="{ row }"><span class="cell-name" :title="row.name">{{ row.name }}</span></template>
+              </el-table-column>
               <el-table-column label="指标" min-width="150">
                 <template #default="{ row }">{{ metricLabel(row.metric) }}</template>
               </el-table-column>
@@ -245,7 +249,7 @@
             <div class="compact-list rules-compact">
               <article v-for="rule in pagedRules" :key="rule.id" class="compact-record">
                 <div class="compact-head">
-                  <strong>{{ rule.name }}</strong>
+                  <strong :title="rule.name">{{ rule.name }}</strong>
                   <span class="severity" :class="rule.severity">
                     <span class="severity-dot"></span>{{ severityLabel(rule.severity) }}
                   </span>
@@ -302,7 +306,7 @@
             <span class="tab-label">渠道 <span>{{ tabCountText(channels.length) }}</span></span>
           </template>
 
-          <section class="alerts-section" aria-label="推送渠道">
+          <section class="alerts-section kg-card" aria-label="推送渠道">
           <div v-if="channelLoadError && channels.length" class="section-refresh-warning" role="status">
             <KgIcon name="warning" :size="15" />
             <span>渠道列表刷新未完成，当前显示最近一次结果。</span>
@@ -316,14 +320,16 @@
           </div>
           <template v-else-if="channels.length">
             <el-table :data="pagedChannels" class="wide-table alert-table">
-              <el-table-column label="渠道名称" prop="name" min-width="170" />
+              <el-table-column label="渠道名称" min-width="170">
+                <template #default="{ row }"><span class="cell-name" :title="row.name">{{ row.name }}</span></template>
+              </el-table-column>
               <el-table-column label="类型" width="108">
                 <template #default="{ row }">
                   <span class="type-badge">{{ channelTypeLabel(row.type) }}</span>
                 </template>
               </el-table-column>
               <el-table-column label="目标" min-width="310">
-                <template #default="{ row }"><code class="target">{{ chTarget(row) }}</code></template>
+                <template #default="{ row }"><code class="target" :title="chTarget(row)">{{ chTarget(row) }}</code></template>
               </el-table-column>
               <el-table-column label="状态" width="76" align="center">
                 <template #default="{ row }">
@@ -364,7 +370,7 @@
             <div class="compact-list channels-compact">
               <article v-for="channel in pagedChannels" :key="channel.id" class="compact-record">
                 <div class="compact-head">
-                  <strong>{{ channel.name }}</strong>
+                  <strong :title="channel.name">{{ channel.name }}</strong>
                   <span class="type-badge">{{ channelTypeLabel(channel.type) }}</span>
                   <el-switch
                     :model-value="channel.enabled"
@@ -375,7 +381,7 @@
                     @change="toggleChannel(channel)"
                   />
                 </div>
-                <code class="compact-target">{{ chTarget(channel) }}</code>
+                <code class="compact-target" :title="chTarget(channel)">{{ chTarget(channel) }}</code>
                 <div class="compact-actions">
                   <el-button
                     text
@@ -420,7 +426,7 @@
             <span class="tab-label">历史 <span>{{ tabCountText(history.length) }}</span></span>
           </template>
 
-          <section class="alerts-section" aria-label="告警历史">
+          <section class="alerts-section kg-card" aria-label="告警历史">
           <div v-if="historyLoadError && history.length" class="section-refresh-warning" role="status">
             <KgIcon name="warning" :size="15" />
             <span>历史记录刷新未完成，当前显示最近一次结果。</span>
@@ -441,7 +447,9 @@
               <el-table-column label="时间" width="150">
                 <template #default="{ row }"><span class="time-text">{{ fmtTime(row.fired_at) }}</span></template>
               </el-table-column>
-              <el-table-column label="规则" prop="rule_name" min-width="140" />
+              <el-table-column label="规则" min-width="140">
+                <template #default="{ row }"><span class="cell-name" :title="row.rule_name">{{ row.rule_name }}</span></template>
+              </el-table-column>
               <el-table-column label="指标" min-width="145">
                 <template #default="{ row }">{{ metricLabel(row.metric) }}</template>
               </el-table-column>
@@ -457,11 +465,11 @@
               </el-table-column>
               <el-table-column label="已通知" min-width="140">
                 <template #default="{ row }">
-                  <span class="muted">{{ notifiedSummary(row) }}</span>
+                  <span class="muted" :title="notifiedSummary(row)">{{ notifiedSummary(row) }}</span>
                 </template>
               </el-table-column>
               <el-table-column label="说明" prop="message" min-width="210">
-                <template #default="{ row }"><span class="history-message">{{ row.message }}</span></template>
+                <template #default="{ row }"><span class="history-message" :title="row.message">{{ row.message }}</span></template>
               </el-table-column>
               <el-table-column label="" width="48" align="right">
                 <template #default="{ row }">
@@ -486,7 +494,7 @@
                 @click="openHistoryDetail(item)"
               >
                 <div class="compact-head">
-                  <strong>{{ item.rule_name }}</strong>
+                  <strong :title="item.rule_name">{{ item.rule_name }}</strong>
                   <span class="severity" :class="item.severity">
                     <span class="severity-dot"></span>{{ severityLabel(item.severity) }}
                   </span>
@@ -538,7 +546,7 @@
             <KgIcon name="warning" :size="18" />
           </span>
           <div>
-            <strong>{{ selectedHistory.rule_name }}</strong>
+            <strong :title="selectedHistory.rule_name">{{ selectedHistory.rule_name }}</strong>
             <span>{{ fmtFullTime(selectedHistory.fired_at) }}</span>
           </div>
           <span class="severity" :class="selectedHistory.severity">
@@ -1345,7 +1353,7 @@ async function clearHistory() {
   top: 0;
   right: 0;
   z-index: 2;
-  height: 38px;
+  height: 40px;
   display: flex;
   align-items: center;
 }
@@ -1353,7 +1361,7 @@ async function clearHistory() {
 .tab-actions :deep(.el-button) { gap: 7px; }
 .main-tabs { margin-top: 0; }
 .main-tabs :deep(.el-tabs__nav-wrap) { padding-right: 132px; }
-.main-tabs :deep(.el-tabs__header) { margin-bottom: var(--kg-space-3); }
+.main-tabs :deep(.el-tabs__header) { margin-bottom: var(--kg-space-4); }
 .main-tabs :deep(.el-tabs__content) { overflow: visible; }
 
 .tab-label {
@@ -1362,19 +1370,79 @@ async function clearHistory() {
   gap: 6px;
 }
 
+/* 计数徽章：pill 底 + 主色字 + 等宽数字 */
 .tab-label > span {
   min-width: 18px;
-  padding: 0 5px;
+  padding: 0 6px;
   border-radius: var(--kg-radius-pill);
-  background: var(--kg-bg-surface-2);
-  color: var(--kg-text-tertiary);
+  background: var(--kg-accent-soft);
+  color: var(--kg-accent);
   font-family: var(--kg-font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 10px;
-  line-height: 18px;
+  font-weight: 600;
+  line-height: 16px;
   text-align: center;
 }
 
 .alert-table { width: 100%; }
+
+/* 各 tab 面板统一 kg-card 承载，20~24px 内边距 */
+.alerts-section { padding: var(--kg-space-5) var(--kg-space-6); }
+
+/* 分区刷新失败提示条 */
+.section-refresh-warning {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--kg-space-2);
+  margin-bottom: var(--kg-space-3);
+  padding: var(--kg-space-2) var(--kg-space-3);
+  border: 1px solid var(--kg-warning-border);
+  border-radius: var(--kg-radius-md);
+  background: var(--kg-warning-soft);
+  color: var(--kg-warning);
+  font-size: 12px;
+}
+
+.section-refresh-warning > span {
+  flex: 1;
+  min-width: 200px;
+  color: var(--kg-text-secondary);
+}
+
+/* 名称类单元格：单行截断，完整值通过 title 展示 */
+.cell-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 确认按钮：描边小按钮，hover 填充浅主色 */
+.el-button.ack-btn {
+  border-color: var(--kg-border-control);
+  background: var(--kg-bg-surface-1);
+  color: var(--kg-text-secondary);
+}
+
+.el-button.ack-btn:not(.is-disabled):not(.is-loading):hover,
+.el-button.ack-btn:not(.is-disabled):not(.is-loading):focus-visible {
+  border-color: var(--kg-accent);
+  background: var(--kg-accent-soft);
+  color: var(--kg-accent);
+}
+
+.el-button.ack-btn.is-disabled {
+  border-color: var(--kg-border-subtle);
+  background: var(--kg-bg-surface-2);
+  color: var(--kg-text-disabled);
+}
+
+/* 待处理表格行 hover 底色 */
+.pending-table :deep(.el-table__row:hover > td.el-table__cell) {
+  background: var(--kg-bg-surface-2);
+}
 
 .pending-copy {
   min-width: 0;
@@ -1423,6 +1491,7 @@ async function clearHistory() {
   gap: 6px;
   color: var(--kg-text-secondary);
   font-size: 12px;
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -1430,6 +1499,7 @@ async function clearHistory() {
 .severity.critical { color: var(--kg-danger); }
 
 .severity-dot {
+  flex: none;
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -1489,7 +1559,6 @@ async function clearHistory() {
 
 .alerts-empty {
   min-height: 230px;
-  border-bottom: 1px solid var(--kg-border-subtle);
 }
 
 .alerts-pagination {
@@ -1689,7 +1758,7 @@ async function clearHistory() {
   overflow-wrap: anywhere;
 }
 
-.dialog-form :deep(.el-form-item) { margin-bottom: 17px; }
+.dialog-form :deep(.el-form-item) { margin-bottom: var(--kg-space-4); }
 .dialog-form :deep(.el-form-item__label) { margin-bottom: 6px; color: var(--kg-text-secondary); font-size: 12px; line-height: 18px; }
 
 .condition-editor,
@@ -1700,8 +1769,8 @@ async function clearHistory() {
   width: 100%;
 }
 
-.operator-select { width: 96px; }
-.condition-editor :deep(.el-input-number) { flex: 1; width: auto; }
+.operator-select { flex: none; width: 96px; }
+.condition-editor :deep(.el-input-number) { flex: 1; min-width: 0; width: auto; }
 .condition-editor > span,
 .number-field > span { color: var(--kg-text-tertiary); font-size: 12px; }
 
@@ -1722,6 +1791,7 @@ async function clearHistory() {
   gap: var(--kg-space-4);
 }
 
+.form-grid :deep(.el-form-item) { min-width: 0; }
 .form-grid :deep(.el-input-number) { width: 100%; }
 
 .enabled-row {

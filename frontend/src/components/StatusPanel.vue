@@ -47,7 +47,7 @@
             >
               <span class="resource-card-head">
                 <span class="metric-icon"><KgIcon :name="metric.icon" :size="17" /></span>
-                <span class="metric-label">{{ metric.label }}</span>
+                <span class="metric-label" :title="metric.label">{{ metric.label }}</span>
                 <strong>{{ metric.value }}</strong>
               </span>
               <el-progress
@@ -58,7 +58,7 @@
                 :class="{ 'is-unavailable': metric.percent == null }"
               />
               <span class="metric-note">
-                <span>{{ metric.note }}</span>
+                <span :title="metric.note">{{ metric.note }}</span>
                 <KgIcon
                   name="chevron"
                   :size="13"
@@ -81,8 +81,8 @@
             >
               <span class="signal-icon"><KgIcon :name="metric.icon" :size="18" /></span>
               <span class="signal-copy">
-                <span>{{ metric.label }}</span>
-                <small>{{ metric.note }}</small>
+                <span :title="metric.label">{{ metric.label }}</span>
+                <small :title="metric.note">{{ metric.note }}</small>
               </span>
               <strong>{{ metric.value }}</strong>
               <KgIcon
@@ -490,9 +490,10 @@ async function ack(alert) {
   align-items: center;
   gap: var(--kg-space-2);
   color: var(--kg-text-primary);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 20px;
+  letter-spacing: .005em;
 }
 
 .section-title :deep(.kg-icon) { color: var(--kg-text-tertiary); }
@@ -515,15 +516,17 @@ async function ack(alert) {
   cursor: pointer;
   text-align: left;
   transition: border-color var(--kg-motion-fast), background var(--kg-motion-fast),
-    box-shadow var(--kg-motion-fast);
+    box-shadow var(--kg-motion-fast), transform var(--kg-motion-fast);
 }
 
 .resource-card:hover,
 .resource-card.is-selected {
   border-color: var(--kg-border-strong);
   background: var(--kg-bg-surface-2);
-  box-shadow: 0 2px 8px rgb(31 48 80 / 7%);
+  box-shadow: var(--kg-shadow-sm);
 }
+
+.resource-card:hover { transform: translateY(-1px); }
 
 .resource-card:focus-visible,
 .signal-card:focus-visible { outline: 2px solid var(--kg-focus); outline-offset: 2px; }
@@ -554,7 +557,14 @@ async function ack(alert) {
 .resource-card.is-warning .metric-icon { background: var(--kg-warning-soft); color: var(--kg-warning); }
 .resource-card.is-danger .metric-icon { background: var(--kg-danger-soft); color: var(--kg-danger); }
 
-.metric-label { min-width: 0; color: var(--kg-text-secondary); font-size: 12px; }
+.metric-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kg-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .resource-card-head strong {
   color: var(--kg-text-primary);
@@ -570,6 +580,10 @@ async function ack(alert) {
 
 .resource-card :deep(.el-progress) { margin: var(--kg-space-3) 0 var(--kg-space-2); }
 .resource-card :deep(.el-progress-bar__outer) { background: var(--kg-bg-surface-3); }
+/* 进度条宽度变化走慢速强调缓动，避免读数跳变 */
+.resource-card :deep(.el-progress-bar__inner) {
+  transition: width var(--kg-motion-slow) var(--kg-ease-emphasized);
+}
 .resource-card :deep(.el-progress.is-unavailable .el-progress-bar__inner) { opacity: 0; }
 
 .metric-note {
@@ -616,11 +630,14 @@ async function ack(alert) {
   color: var(--kg-text-tertiary);
   cursor: pointer;
   text-align: left;
-  transition: border-color var(--kg-motion-fast), background var(--kg-motion-fast);
+  transition: border-color var(--kg-motion-fast), background var(--kg-motion-fast),
+    box-shadow var(--kg-motion-fast), transform var(--kg-motion-fast);
 }
 
 .signal-card:hover,
 .signal-card.is-selected { border-color: var(--kg-border-strong); background: var(--kg-bg-surface-3); }
+
+.signal-card:hover { box-shadow: var(--kg-shadow-xs); transform: translateY(-1px); }
 
 .signal-icon { width: 34px; height: 34px; background: var(--kg-bg-surface-1); }
 .signal-card.is-info .signal-icon { background: var(--kg-info-soft); color: var(--kg-info); }
@@ -629,7 +646,13 @@ async function ack(alert) {
 .signal-card.is-danger .signal-icon { background: var(--kg-danger-soft); color: var(--kg-danger); }
 
 .signal-copy { min-width: 0; display: grid; gap: 1px; }
-.signal-copy > span { color: var(--kg-text-secondary); font-size: 12px; }
+.signal-copy > span {
+  overflow: hidden;
+  color: var(--kg-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .signal-copy small {
   overflow: hidden;
   color: var(--kg-text-tertiary);

@@ -1,18 +1,18 @@
 :root {
   color-scheme: light;
 
-  --kg-bg-canvas: #f3f6fb;
-  --kg-bg-sidebar: #edf2ff;
+  --kg-bg-canvas: #f2f5fa;
+  --kg-bg-sidebar: #eaf0fc;
   --kg-bg-surface-1: #ffffff;
-  --kg-bg-surface-2: #f7f9fc;
-  --kg-bg-surface-3: #edf2f8;
+  --kg-bg-surface-2: #f7f9fd;
+  --kg-bg-surface-3: #edf2f9;
   --kg-bg-elevated: #ffffff;
-  --kg-bg-code: #111827;
+  --kg-bg-code: #0f172a;
 
-  --kg-border-subtle: #e5eaf2;
-  --kg-border-default: #d7deea;
-  --kg-border-control: #c9d3e2;
-  --kg-border-strong: #aebbd0;
+  --kg-border-subtle: #e6ebf3;
+  --kg-border-default: #d9e0ec;
+  --kg-border-control: #c9d3e4;
+  --kg-border-strong: #adbacd;
   --kg-focus: #175cff;
 
   --kg-text-primary: #172033;
@@ -25,6 +25,8 @@
   --kg-accent-hover: #0d4fe0;
   --kg-accent-active: #0b42bd;
   --kg-accent-soft: #eaf1ff;
+  --kg-accent-bright: #3d8bff;
+  --kg-accent-gradient: linear-gradient(135deg, #3d8bff 0%, #175cff 52%, #0b42bd 100%);
   --kg-selection: #dce8ff;
 
   --kg-info: #3979d7;
@@ -57,17 +59,29 @@
   --kg-space-10: 40px;
 
   --kg-radius-xs: 4px;
-  --kg-radius-sm: 6px;
-  --kg-radius-md: 8px;
-  --kg-radius-lg: 8px;
+  --kg-radius-sm: 7px;
+  --kg-radius-md: 9px;
+  --kg-radius-lg: 12px;
+  --kg-radius-xl: 16px;
   --kg-radius-pill: 999px;
 
+  --kg-shadow-xs: 0 1px 2px rgb(23 43 84 / 5%);
+  --kg-shadow-sm: 0 2px 10px rgb(23 43 84 / 6%);
+  --kg-shadow-md: 0 8px 24px rgb(23 43 84 / 8%);
+  --kg-shadow-lg: 0 18px 48px rgb(23 43 84 / 13%);
+  --kg-shadow-accent: 0 6px 18px rgb(23 92 255 / 24%);
+
   --kg-motion-instant: 80ms;
-  --kg-motion-fast: 120ms;
-  --kg-motion-base: 180ms;
-  --kg-motion-slow: 240ms;
+  --kg-motion-fast: 140ms;
+  --kg-motion-base: 200ms;
+  --kg-motion-slow: 320ms;
+  --kg-motion-slower: 480ms;
   --kg-ease-standard: cubic-bezier(.2, 0, 0, 1);
+  --kg-ease-emphasized: cubic-bezier(.2, .8, .2, 1);
   --kg-ease-exit: cubic-bezier(.4, 0, 1, 1);
+  /* 高级动效缓动：expo 急停（入场/数值）、spring 轻回弹（弹出/悬停） */
+  --kg-ease-out-expo: cubic-bezier(.16, 1, .3, 1);
+  --kg-ease-spring: cubic-bezier(.34, 1.4, .64, 1);
 
   --kg-sidebar-width: 232px;
   --kg-pagebar-height: 56px;

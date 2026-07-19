@@ -20,7 +20,7 @@
         :aria-expanded="open"
       >
         <KgIcon name="model" :size="13" />
-        <span class="model-trigger-label">{{ activeModel?.model.label || '配置模型' }}</span>
+        <span class="model-trigger-label" :title="activeModel?.model.label">{{ activeModel?.model.label || '配置模型' }}</span>
         <span v-if="activeModel" class="effort-compact">
           {{ effortLabel(sessionModel.reasoningEffort) }}
         </span>
@@ -201,7 +201,7 @@ function openSettings() {
 <style scoped>
 .model-trigger {
   min-width: 0;
-  max-width: 210px;
+  max-width: 250px;
   height: 26px;
   display: inline-flex;
   align-items: center;

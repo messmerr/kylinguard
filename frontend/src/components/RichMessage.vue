@@ -33,6 +33,8 @@ const segments = computed(() => parseRichMessage(props.text))
 
 <style scoped>
 .rich-message { min-width: 0; }
+/* 分段之间留基础呼吸间距，图表/流程图卡片自带 12px 外边距会叠加 */
+.rich-message > * + * { margin-top: var(--kg-space-2); }
 .visual-error { display: grid; gap: 3px; margin: 12px 0; padding: 11px 13px; border: 1px solid var(--kg-danger-border); border-radius: var(--kg-radius-md); background: var(--kg-danger-soft); }
 .visual-error strong { color: var(--kg-danger); font-size: 12px; }
 .visual-error span { color: var(--kg-text-secondary); font: 11px/1.5 var(--kg-font-mono); }

@@ -80,15 +80,15 @@ watch(() => props.code, render)
 </script>
 
 <style scoped>
-.flow-canvas { margin: 12px 0; overflow: hidden; border: 1px solid var(--kg-border-default); border-radius: var(--kg-radius-lg); background: #fff; box-shadow: 0 5px 18px rgb(32 49 82 / 7%); }
-.canvas-head { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 12px 8px 15px; border-bottom: 1px solid var(--kg-border-subtle); }
+.flow-canvas { margin: 12px 0; overflow: hidden; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-lg); background: var(--kg-bg-surface-1); box-shadow: var(--kg-shadow-sm); }
+.canvas-head { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 12px 8px 16px; border-bottom: 1px solid var(--kg-border-subtle); }
 .canvas-head > div:first-child { display: grid; gap: 1px; }
 .canvas-kicker { color: var(--kg-accent); font: 600 9px/1.4 var(--kg-font-mono); }
-.canvas-head strong { color: var(--kg-text-primary); font-size: 13px; font-weight: 600; }
+.canvas-head strong { color: var(--kg-text-primary); font-size: 14px; font-weight: 600; letter-spacing: .005em; }
 .zoom-actions { display: flex; gap: 4px; }
-.zoom-actions button { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-sm); background: #fff; color: var(--kg-text-secondary); font-weight: 600; cursor: pointer; }
-.zoom-actions button:hover { border-color: #aec4f8; background: var(--kg-accent-soft); color: var(--kg-accent); }
-.flow-viewport { min-height: 260px; padding: 24px; overflow: auto; background-image: linear-gradient(#eef2f8 1px, transparent 1px), linear-gradient(90deg, #eef2f8 1px, transparent 1px); background-size: 24px 24px; }
+.zoom-actions button { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--kg-border-subtle); border-radius: var(--kg-radius-sm); background: var(--kg-bg-surface-1); color: var(--kg-text-secondary); font-weight: 600; cursor: pointer; transition: color var(--kg-motion-fast), border-color var(--kg-motion-fast), background var(--kg-motion-fast); }
+.zoom-actions button:hover { border-color: var(--kg-accent-bright); background: var(--kg-accent-soft); color: var(--kg-accent); }
+.flow-viewport { min-height: 260px; padding: 24px; overflow: auto; background-image: linear-gradient(var(--kg-border-subtle) 1px, transparent 1px), linear-gradient(90deg, var(--kg-border-subtle) 1px, transparent 1px); background-size: 24px 24px; }
 .flow-diagram { min-width: 620px; transform-origin: top center; transition: transform var(--kg-motion-base) var(--kg-ease-standard); }
 .flow-diagram :deep(svg) { display: block; max-width: none; margin: 0 auto; }
 .canvas-error { margin: 0; padding: 10px 14px; border-top: 1px solid var(--kg-danger-border); background: var(--kg-danger-soft); color: var(--kg-danger); font-size: 12px; }
