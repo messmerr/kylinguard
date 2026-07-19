@@ -7,6 +7,9 @@ def test_默认值():
     s = Settings(_env_file=None)
     assert s.llm_timeout == 60.0
     assert Path(s.workspace_root).resolve() == Path(__file__).resolve().parents[2]
+    assert Path(s.frontend_dist).resolve() == (
+        Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    )
     assert s.command_shell == "/bin/bash"
     assert s.command_timeout == 30
     assert s.command_max_timeout == 900
@@ -20,6 +23,7 @@ def test_环境变量覆盖(monkeypatch):
     monkeypatch.setenv("KG_COMMAND_MAX_TIMEOUT", "1200")
     monkeypatch.setenv("KG_COMMAND_SHELL", "/bin/zsh")
     monkeypatch.setenv("KG_WORKSPACE_ROOT", "/srv/agent-workspace")
+    monkeypatch.setenv("KG_FRONTEND_DIST", "/opt/kylinguard/current/frontend")
     monkeypatch.setenv("KG_LLM_TIMEOUT", "25")
     monkeypatch.setenv("KG_ALLOW_FULL_ACCESS", "false")
     s = Settings(_env_file=None)
@@ -27,6 +31,7 @@ def test_环境变量覆盖(monkeypatch):
     assert s.command_max_timeout == 1200
     assert s.command_shell == "/bin/zsh"
     assert s.workspace_root == "/srv/agent-workspace"
+    assert s.frontend_dist == "/opt/kylinguard/current/frontend"
     assert s.llm_timeout == 25.0
     assert s.allow_full_access is False
 

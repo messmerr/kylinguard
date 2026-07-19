@@ -1,0 +1,7 @@
+# KylinGuard 控制面只能：
+# 1. 把 Agent 工具降权到 kylinguard-exec（不能借此成为 root）；
+# 2. 以 root 调用一个 root-owned、参数重新校验的窄口 helper。
+Defaults:kylinguard !requiretty
+Cmnd_Alias KYLINGUARD_PRIVILEGED = /usr/local/libexec/kylinguard/kylinguard-privileged
+kylinguard ALL=(kylinguard-exec) NOPASSWD: ALL
+kylinguard ALL=(root) NOPASSWD: KYLINGUARD_PRIVILEGED
