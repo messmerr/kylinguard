@@ -1,0 +1,199 @@
+#!/usr/bin/python3
+"""KylinGuard 的唯一 root 窄口；不经 shell，并在特权侧重新校验参数。"""
+
+from __future__ import annotations
+
+import ctypes
+import errno
+import os
+import posixpath
+import re
+import secrets
+import stat
+import sys
+
+
+SYSTEMCTL = "/usr/bin/systemctl"
+ALLOWED_ACTIONS = frozenset({"start", "stop", "restart"})
+ALLOWED_CLEAN_PREFIXES = ("/tmp/", "/var/tmp/", "/var/cache/", "/var/log/")
+UNIT_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@:-]{0,253}$")
+SELF_UNIT = "kylinguard.service"
+
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+DIR_FLAGS = os.O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW
+FILE_FLAGS = os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+RENAME_NOREPLACE = 1
+
+LIBC = ctypes.CDLL(None, use_errno=True)
+RENAMEAT2 = getattr(LIBC, "renameat2", None)
+if RENAMEAT2 is not None:
+    RENAMEAT2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    RENAMEAT2.restype = ctypes.c_int
+
+
+class Refused(RuntimeError):
+    """请求不属于 helper 的授权语法或安全边界。"""
+
+
+def fail(message: str) -> "None":
+    print(f"kylinguard-privileged: {message}", file=sys.stderr)
+    raise SystemExit(64)
+
+
+def require_root() -> None:
+    if os.geteuid() != 0:
+        fail("必须通过 sudo 以 root 身份调用")
+    if os.environ.get("SUDO_USER") != "kylinguard":
+        fail("仅接受 kylinguard 控制面账户发起的 sudo 调用")
+
+
+def normalize_service(raw: str) -> str:
+    if not UNIT_RE.fullmatch(raw) or raw.startswith("-"):
+        raise Refused("服务名不合法")
+    unit = raw if "." in raw else f"{raw}.service"
+    if not unit.endswith(".service"):
+        raise Refused("只允许操作 .service 单元")
+    if unit == SELF_UNIT:
+        raise Refused("拒绝由 Agent 停启自身控制面服务")
+    return unit
+
+
+def service(action: str, raw_unit: str) -> None:
+    if action not in ALLOWED_ACTIONS:
+        raise Refused("服务动作只允许 start/stop/restart")
+    unit = normalize_service(raw_unit)
+    if not os.path.isfile(SYSTEMCTL) or not os.access(SYSTEMCTL, os.X_OK):
+        raise Refused(f"systemctl 不可执行：{SYSTEMCTL}")
+    os.execv(
+        SYSTEMCTL,
+        [SYSTEMCTL, "--no-ask-password", action, unit],
+    )
+
+
+def normalize_clean_path(raw: str) -> str:
+    if not raw or "\x00" in raw or not raw.startswith("/"):
+        raise Refused("清理目标必须是不含 NUL 的绝对路径")
+    path = posixpath.normpath(raw)
+    if not path.startswith(ALLOWED_CLEAN_PREFIXES):
+        raise Refused("只允许清理 /tmp、/var/tmp、/var/cache、/var/log 下的文件")
+    if path == "/" or not posixpath.basename(path):
+        raise Refused("不能清理目录根")
+    return path
+
+
+def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def rename_noreplace(parent_fd: int, source: str, destination: str) -> None:
+    if RENAMEAT2 is None:
+        raise Refused("当前内核/glibc 不支持 renameat2，拒绝降级为竞态不安全的删除")
+    ctypes.set_errno(0)
+    result = RENAMEAT2(
+        parent_fd,
+        os.fsencode(source),
+        parent_fd,
+        os.fsencode(destination),
+        RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise FileExistsError(error, os.strerror(error), destination)
+    raise OSError(error, os.strerror(error), source)
+
+
+def open_parent(path: str) -> tuple[int, str]:
+    parts = path.split("/")[1:]
+    name = parts.pop()
+    descriptor = os.open("/", DIR_FLAGS)
+    try:
+        for part in parts:
+            child = os.open(part, DIR_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor, name
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def clean_file(raw_path: str) -> None:
+    path = normalize_clean_path(raw_path)
+    parent_fd, name = open_parent(path)
+    target_fd = -1
+    try:
+        target_fd = os.open(name, FILE_FLAGS, dir_fd=parent_fd)
+        expected = os.fstat(target_fd)
+        if not stat.S_ISREG(expected.st_mode):
+            raise Refused("清理目标必须是普通文件，不能是目录、设备或套接字")
+
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(current.st_mode) or not same_inode(expected, current):
+            raise Refused("目标在校验期间被替换，已拒绝")
+
+        for _ in range(32):
+            quarantine = f".kylinguard-delete-{secrets.token_hex(16)}"
+            try:
+                rename_noreplace(parent_fd, name, quarantine)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise Refused("无法创建安全隔离名")
+
+        moved_fd = -1
+        try:
+            moved_fd = os.open(quarantine, FILE_FLAGS, dir_fd=parent_fd)
+            moved = os.fstat(moved_fd)
+            if not same_inode(expected, moved):
+                try:
+                    rename_noreplace(parent_fd, quarantine, name)
+                except OSError as exc:
+                    raise Refused("检测到并发替换且无法恢复目录项") from exc
+                raise Refused("目标在隔离期间被替换，已拒绝")
+            os.unlink(quarantine, dir_fd=parent_fd)
+            try:
+                os.fsync(parent_fd)
+            except OSError:
+                pass
+        finally:
+            if moved_fd >= 0:
+                os.close(moved_fd)
+    except FileNotFoundError as exc:
+        raise Refused(f"目标不存在：{path}") from exc
+    except OSError as exc:
+        raise Refused(f"清理失败：{exc.strerror or type(exc).__name__}") from exc
+    finally:
+        if target_fd >= 0:
+            os.close(target_fd)
+        os.close(parent_fd)
+
+
+def main(argv: list[str]) -> None:
+    require_root()
+    try:
+        if len(argv) == 4 and argv[1] == "service":
+            service(argv[2], argv[3])
+            return
+        if len(argv) == 3 and argv[1] == "clean-file":
+            clean_file(argv[2])
+            return
+        raise Refused(
+            "用法：service <start|stop|restart> <name> | clean-file <absolute-path>"
+        )
+    except Refused as exc:
+        fail(str(exc))
+
+
+if __name__ == "__main__":
+    main(sys.argv)

@@ -31,6 +31,9 @@ class Settings(BaseSettings):
 
     # 存储
     db_path: str = "data/kylinguard.db"
+    # 源码开发时使用仓库中的 Vite 构建结果；安装包通过
+    # KG_FRONTEND_DIST 指向 /opt 下随版本发布的只读静态文件。
+    frontend_dist: str = str(_PROJECT_ROOT / "frontend" / "dist")
 
     # 执行器
     workspace_root: str = str(_PROJECT_ROOT)

@@ -1,0 +1,31 @@
+[Unit]
+Description=KylinGuard secure operations agent
+Documentation=file:///opt/kylinguard/current/docs/安装包与银河麒麟V11部署手册.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kylinguard
+Group=kylinguard
+WorkingDirectory=/srv/kylinguard-workspace
+EnvironmentFile=/etc/kylinguard/kylinguard.env
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/bin/test -x /opt/kylinguard/current/venv/bin/python
+ExecStartPre=/usr/bin/test -f /opt/kylinguard/current/frontend/index.html
+ExecStart=/opt/kylinguard/current/venv/bin/python -m uvicorn --factory kylinguard.api:create_app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=120s
+TimeoutStopSec=30s
+KillMode=control-group
+UMask=0077
+LimitNOFILE=65536
+
+# KylinGuard 需要通过 sudo 切换到受限执行账户，并让窄口 helper 完成确实需要
+# root 的 systemd/文件清理动作，不能启用 NoNewPrivileges、RestrictSUIDSGID、
+# CapabilityBoundingSet= 或 ProtectSystem=。权限边界由双账户、sudoers 精确入口
+# 和 helper 二次校验共同实现。
+
+[Install]
+WantedBy=multi-user.target

@@ -47,6 +47,20 @@ python -m uvicorn --factory kylinguard.api:create_app \
 
 浏览器访问 `http://127.0.0.1:8000`。
 
+### 银河麒麟 V11 安装包
+
+比赛提交用安装包由构建脚本生成，目标机不需要 Node.js，也不把第三方安装包
+塞进归档；后端依赖按锁定版本从目标机配置的 pip 源安装：
+
+```bash
+python tools/build_install_package.py
+```
+
+目标机先执行 `./install.sh --check-only`，确认后执行 `sudo ./install.sh`。
+安装器会创建控制面/受限执行面双账户、安装 systemd 服务和精确 sudoers，并
+对 LoongArch64 所需 Rust/C 源码依赖做版本检查。完整说明见
+[安装包与银河麒麟 V11 部署手册](docs/安装包与银河麒麟V11部署手册.md)。
+
 首次使用时，在“模型服务”页面完成以下配置：
 
 1. 添加模型提供商及 API Key；

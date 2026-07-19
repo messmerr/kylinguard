@@ -1,0 +1,50 @@
+# 与完整自动化测试对应的生产依赖锁。LoongArch64 上带 Rust/C 扩展的包会
+# 从源码构建；所选 pydantic-core/jiter 的 MSRV 为 1.75，cryptography 为
+# 1.74，均可由 V11 2503 的 Rust 1.82 构建。
+# 直接依赖
+fastapi==0.139.2
+httpx==0.28.1
+mcp==1.28.1
+openai==2.46.0
+pydantic==2.11.4
+pydantic-core==2.33.2
+pydantic-settings==2.14.2
+uvicorn==0.51.0
+
+# PEP 517 隔离构建后端。cryptography 46.0.7 要求 maturin>=1.9.4；
+# 1.9.4 仍使用 Rust 2021 Edition、MSRV 1.74。必须同时通过 pip 的
+# --build-constraint 约束它，不能只把本文件作为普通运行依赖约束。
+maturin==1.9.4
+
+# LoongArch64 会从源码构建的扩展：这些版本可由 V11 2503 官方
+# Rust 1.82 构建。不要无验证地更新。
+jiter==0.10.0
+rpds-py==0.27.1
+cryptography==46.0.7
+cffi==2.1.0
+
+# 其余已验证的传递依赖，避免比赛现场解析到未测试的新发布。
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.14.2
+attrs==26.1.0
+certifi==2026.6.17
+click==8.4.2
+distro==1.9.0
+h11==0.16.0
+httpcore==1.0.9
+httpx-sse==0.4.3
+idna==3.18
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+pycparser==3.0
+pyjwt==2.13.0
+python-dotenv==1.2.2
+python-multipart==0.0.32
+referencing==0.37.0
+sniffio==1.3.1
+sse-starlette==3.4.5
+starlette==1.3.1
+tqdm==4.69.0
+typing-extensions==4.16.0
+typing-inspection==0.4.2

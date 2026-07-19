@@ -116,7 +116,6 @@ _SYSTEM_AUDIT_IDS = {
 from kylinguard.storage_security import secure_database_path
 from kylinguard.subprocess_env import safe_subprocess_env
 
-_FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 _LOCAL_OPERATOR = "local"
 logger = logging.getLogger(__name__)
 
@@ -3081,8 +3080,9 @@ def create_app(settings: Settings | None = None,
                 )
         return {"ok": True}
 
-    if _FRONTEND_DIST.is_dir():
-        app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True),
+    frontend_dist = Path(settings.frontend_dist).expanduser()
+    if frontend_dist.is_dir():
+        app.mount("/", StaticFiles(directory=str(frontend_dist), html=True),
                   name="frontend")
 
     return app
